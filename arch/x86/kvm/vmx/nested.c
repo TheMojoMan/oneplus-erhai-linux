@@ -7470,7 +7470,7 @@ static gpa_t vmx_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
 				      struct x86_exception *exception,
 				      u64 pte_access)
 {
-	struct kvm_mmu *mmu = vcpu->arch.mmu;
+	struct kvm_pagewalk *w = &vcpu->arch.mmu->w;
 
 	if (WARN_ON_ONCE(!mmu_is_nested(vcpu)))
 		return gpa;
@@ -7483,7 +7483,7 @@ static gpa_t vmx_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
 	if ((pte_access & ACC_USER_MASK) && (access & PFERR_GUEST_FINAL_MASK))
 		access |= PFERR_USER_MASK;
 
-	return mmu->gva_to_gpa(vcpu, mmu, gpa, access, exception);
+	return w->gva_to_gpa(vcpu, w, gpa, access, exception);
 }
 
 struct kvm_x86_nested_ops vmx_nested_ops = {
