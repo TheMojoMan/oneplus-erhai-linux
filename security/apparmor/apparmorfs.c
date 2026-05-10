@@ -23,6 +23,7 @@
 #include <linux/fs_context.h>
 #include <linux/poll.h>
 #include <linux/zstd.h>
+#include <linux/string.h>
 #include <uapi/linux/major.h>
 #include <uapi/linux/magic.h>
 
@@ -546,6 +547,15 @@ fail:
 
 }
 
+struct aa_user_hdr {
+	uint8_t version;
+	uint8_t compress_level;
+	uint8_t padding[6];	/* force 8-byte alignment */
+} __packed __aligned(8);
+
+#define aa_hdr_magic "\x04\x08\x00\x76\x65\x72\x73\x69\x6f\x6e\x00\x02"
+#define aa_hdr_magic_size 12
+
 static ssize_t policy_update(u32 mask, const char __user *buf, size_t size,
 			     loff_t *pos, struct aa_ns *ns,
 			     const struct cred *ocred)
@@ -556,6 +566,7 @@ static ssize_t policy_update(u32 mask, const char __user *buf, size_t size,
 	char *compressed_data = NULL;
 	__le32 magic_le;
 	bool is_compressed;
+	u8 aahdr[aa_hdr_magic_size];
 
 	label = begin_current_label_crit_section();
 
@@ -576,11 +587,30 @@ static ssize_t policy_update(u32 mask, const char __user *buf, size_t size,
 
 	if (size >= sizeof(__le32) &&
 	    !copy_from_user(&magic_le, buf, sizeof(magic_le)) &&
-	    le32_to_cpu(magic_le) == ZSTD_MAGICNUMBER)
+	    le32_to_cpu(magic_le) == ZSTD_MAGICNUMBER) {
 		is_compressed = true;
-	else
+	} else if (size >= sizeof(struct aa_user_hdr) + sizeof(__le32) &&
+		   !copy_from_user(&magic_le,
+				   buf + sizeof(struct aa_user_hdr),
+				   sizeof(magic_le)) &&
+		   le32_to_cpu(magic_le) == ZSTD_MAGICNUMBER) {
+		is_compressed = true;
+		/* skip the userspace header if present */
+		buf += sizeof(struct aa_user_hdr);
+		size -= sizeof(struct aa_user_hdr);
+	} else if (size >= sizeof(struct aa_user_hdr) +
+		   aa_hdr_magic_size &&
+		   !copy_from_user(&aahdr,
+				   buf + sizeof(struct aa_user_hdr),
+				   aa_hdr_magic_size) &&
+		   memcmp(&aahdr, aa_hdr_magic, aa_hdr_magic_size) == 0) {
+		/* uncompressed blob with user hdr */
+		buf += sizeof(struct aa_user_hdr);
+		size -= sizeof(struct aa_user_hdr);
 		is_compressed = false;
-
+	} else {
+		is_compressed = false;
+	}
 	if (is_compressed) {
 
 		data = aa_get_data_from_compressed(buf, size, pos, &compressed_data);
@@ -2575,6 +2605,7 @@ static struct aa_sfs_entry aa_sfs_entry_policy[] = {
 	AA_SFS_FILE_U64("state32",	1),
 	AA_SFS_DIR("unconfined_restrictions",   aa_sfs_entry_unconfined),
 	AA_SFS_FILE_BOOLEAN("compressed_load",	1),
+	AA_SFS_FILE_BOOLEAN("extended_policy_header",	1),
 	{ }
 };
 
