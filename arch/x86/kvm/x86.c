@@ -586,7 +586,7 @@ void __kvm_inject_emulated_page_fault(struct kvm_vcpu *vcpu,
 
 	WARN_ON_ONCE(fault->vector != PF_VECTOR);
 
-	fault_walk = fault->nested_page_fault ? &vcpu->arch.mmu->w :
+	fault_walk = fault->nested_page_fault ? &vcpu->arch.ngpa_walk :
 						vcpu->arch.gva_walk;
 
 	/*

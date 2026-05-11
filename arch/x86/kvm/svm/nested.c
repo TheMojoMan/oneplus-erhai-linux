@@ -114,17 +114,16 @@ static void nested_svm_init_mmu_context(struct kvm_vcpu *vcpu)
 				svm->nested.ctl.nested_cr3,
 				svm->nested.ctl.misc_ctl);
 
-	vcpu->arch.mmu->w.get_guest_pgd     = nested_svm_get_tdp_cr3;
-	vcpu->arch.mmu->w.get_pdptr       = nested_svm_get_tdp_pdptr;
-
-	vcpu->arch.mmu->w.inject_page_fault = nested_svm_inject_npf_exit;
+	vcpu->arch.ngpa_walk.get_guest_pgd     = nested_svm_get_tdp_cr3;
+	vcpu->arch.ngpa_walk.get_pdptr         = nested_svm_get_tdp_pdptr;
+	vcpu->arch.ngpa_walk.inject_page_fault = nested_svm_inject_npf_exit;
 	vcpu->arch.gva_walk              = &vcpu->arch.ngva_walk;
 }
 
 static void nested_svm_uninit_mmu_context(struct kvm_vcpu *vcpu)
 {
 	vcpu->arch.mmu = &vcpu->arch.root_mmu;
-	vcpu->arch.gva_walk = &vcpu->arch.root_mmu.w;
+	vcpu->arch.gva_walk = vcpu->arch.root_mmu.w;
 }
 
 static bool nested_vmcb_needs_vls_intercept(struct vcpu_svm *svm)
@@ -2153,7 +2152,7 @@ static gpa_t svm_translate_nested_gpa(struct kvm_vcpu *vcpu, gpa_t gpa,
 				      u64 pte_access)
 {
 	struct vcpu_svm *svm = to_svm(vcpu);
-	struct kvm_pagewalk *w = &vcpu->arch.mmu->w;
+	struct kvm_pagewalk *w = &vcpu->arch.ngpa_walk;
 
 	if (WARN_ON_ONCE(!mmu_is_nested(vcpu)))
 		return gpa;

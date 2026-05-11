@@ -257,7 +257,7 @@ static inline void kvm_mmu_refresh_passthrough_bits(struct kvm_vcpu *vcpu,
 	 * need to refresh ngva_walk, a.k.a. the walker used to translate L2
 	 * GVAs to GPAs, so as to honor L2's CR0.WP.
 	 */
-	if (!tdp_enabled || w == &vcpu->arch.guest_mmu.w)
+	if (!tdp_enabled || w == &vcpu->arch.ngpa_walk)
 		return;
 
 	__kvm_mmu_refresh_passthrough_bits(vcpu, w);
