@@ -905,26 +905,15 @@ struct kvm_vcpu_arch {
 
 	/* Non-nested MMU for L1 */
 	struct kvm_mmu root_mmu;
-	struct kvm_pagewalk root_gva_walk;
 
 	/* L1 TDP when running nested */
 	struct kvm_mmu guest_mmu;
 	struct kvm_pagewalk ngpa_walk;
 
 	/*
-	 * Paging state of an L2 guest (used for nested npt)
-	 *
-	 * This context will save all necessary information to walk page tables
-	 * of an L2 guest. This context is only initialized for page table
-	 * walking and not for faulting since we never handle l2 page faults on
-	 * the host.
-	 */
-	struct kvm_pagewalk ngva_walk;
-
-	/*
 	 * Pagewalk context used for gva_to_gpa translations.
 	 */
-	struct kvm_pagewalk *gva_walk;
+	struct kvm_pagewalk gva_walk;
 
 	u64 pdptrs[4]; /* pae */
 
