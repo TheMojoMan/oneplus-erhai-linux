@@ -553,9 +553,8 @@
 };
 
 &ipa {
-	qcom,gsi-loader = "self";
-	memory-region = <&ipa_fw_mem>;
 	firmware-name = "qcom/qcm6490/SHIFT/otter/ipa_fws.mbn";
+
 	status = "okay";
 };
 

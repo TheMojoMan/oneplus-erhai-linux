@@ -504,6 +504,10 @@
 	status = "okay";
 };
 
+&ipa {
+	/delete-property/ memory-region;
+};
+
 &lpass_audiocc {
 	compatible = "qcom,qcm6490-lpassaudiocc";
 	/delete-property/ power-domains;
