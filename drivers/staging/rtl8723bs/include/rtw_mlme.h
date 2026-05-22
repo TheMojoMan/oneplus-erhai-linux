@@ -258,7 +258,6 @@ extern void rtw_surveydone_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_joinbss_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_stassoc_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_stadel_event_callback(struct adapter *adapter, u8 *pbuf);
-extern void rtw_atimdone_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_cpwm_event_callback(struct adapter *adapter, u8 *pbuf);
 extern void rtw_wmm_event_callback(struct adapter *padapter, u8 *pbuf);
 

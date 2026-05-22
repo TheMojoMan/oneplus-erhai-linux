@@ -633,11 +633,6 @@ static bool rtw_is_desired_network(struct adapter *adapter, struct wlan_network 
 	return bselected;
 }
 
-/* TODO: Perry : For Power Management */
-void rtw_atimdone_event_callback(struct adapter	*adapter, u8 *pbuf)
-{
-}
-
 void rtw_survey_event_callback(struct adapter	*adapter, u8 *pbuf)
 {
 	u32 len;
