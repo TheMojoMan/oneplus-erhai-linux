@@ -233,10 +233,6 @@ void ODM_TXPowerTrackingCallback_ThermalMeter(struct adapter *Adapter)
 				pDM_Odm->RFCalibrateInfo.PowerIndexOffset[p] = 0;
 	}
 
-	/* Print Swing base & current */
-	for (p = RF_PATH_A; p < c.RfPathCount; p++) {
-	}
-
 	if (
 		(pDM_Odm->RFCalibrateInfo.PowerIndexOffset[RF_PATH_A] != 0 ||
 		 pDM_Odm->RFCalibrateInfo.PowerIndexOffset[RF_PATH_B] != 0) &&
