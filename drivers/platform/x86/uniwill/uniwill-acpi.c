@@ -368,6 +368,7 @@
 #define UNIWILL_FEATURE_USB_C_POWER_PRIORITY	BIT(11)
 #define UNIWILL_FEATURE_KEYBOARD_BACKLIGHT	BIT(12)
 #define UNIWILL_FEATURE_AC_AUTO_BOOT		BIT(13)
+#define UNIWILL_FEATURE_USB_POWERSHARE		BIT(14)
 
 enum usb_c_power_priority_options {
 	USB_C_POWER_PRIORITY_CHARGING = 0,
@@ -393,6 +394,7 @@ struct uniwill_data {
 	bool last_fn_lock_state;
 	bool last_super_key_enable_state;
 	bool last_touchpad_toggle_enable_state;
+	bool last_usb_powershare_high_state;
 	struct mutex super_key_lock;	/* Protects the toggling of the super key lock state */
 	struct list_head batteries;
 	struct mutex led_lock;		/* Protects writes to the lightbar registers */
@@ -1181,6 +1183,70 @@ static ssize_t ac_auto_boot_show(struct device *dev, struct device_attribute *at
 
 static DEVICE_ATTR_RW(ac_auto_boot);
 
+static int uniwill_write_usb_powershare_high(struct uniwill_data *data, bool status)
+{
+	unsigned int value;
+
+	if (status)
+		value = TRIGGER_USB_CHARGING;
+	else
+		value = 0;
+
+	/*
+	 * Normaly this RMW-sequence could also trigger the super key toggle,
+	 * but the EC seems to take care that those bits are always read as 0.
+	 */
+	return regmap_update_bits(data->regmap, EC_ADDR_TRIGGER, TRIGGER_USB_CHARGING, value);
+}
+
+static ssize_t usb_powershare_high_store(struct device *dev, struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct uniwill_data *data = dev_get_drvdata(dev);
+	bool enable;
+	int ret;
+
+	ret = kstrtobool(buf, &enable);
+	if (ret < 0)
+		return ret;
+
+	ret = uniwill_write_usb_powershare_high(data, enable);
+	if (ret < 0)
+		return ret;
+
+	return count;
+}
+
+static int uniwill_read_usb_powershare_high(struct uniwill_data *data, bool *status)
+{
+	unsigned int value;
+	int ret;
+
+	ret = regmap_read(data->regmap, EC_ADDR_TRIGGER, &value);
+	if (ret < 0)
+		return ret;
+
+	*status = !!(value & TRIGGER_USB_CHARGING);
+
+	return 0;
+}
+
+static ssize_t usb_powershare_high_show(struct device *dev, struct device_attribute *attr,
+					char *buf)
+{
+	struct uniwill_data *data = dev_get_drvdata(dev);
+	bool status;
+	int ret;
+
+	ret = uniwill_read_usb_powershare_high(data, &status);
+	if (ret < 0)
+		return ret;
+
+	return sysfs_emit(buf, "%d\n", status);
+}
+
+static DEVICE_ATTR_RW(usb_powershare_high);
+
 static struct attribute *uniwill_attrs[] = {
 	/* Keyboard-related */
 	&dev_attr_fn_lock.attr,
@@ -1193,6 +1259,7 @@ static struct attribute *uniwill_attrs[] = {
 	&dev_attr_ctgp_offset.attr,
 	&dev_attr_usb_c_power_priority.attr,
 	&dev_attr_ac_auto_boot.attr,
+	&dev_attr_usb_powershare_high.attr,
 	NULL
 };
 
@@ -1234,6 +1301,11 @@ static umode_t uniwill_attr_is_visible(struct kobject *kobj, struct attribute *a
 
 	if (attr == &dev_attr_ac_auto_boot.attr) {
 		if (uniwill_device_supports(data, UNIWILL_FEATURE_AC_AUTO_BOOT))
+			return attr->mode;
+	}
+
+	if (attr == &dev_attr_usb_powershare_high.attr) {
+		if (uniwill_device_supports(data, UNIWILL_FEATURE_USB_POWERSHARE))
 			return attr->mode;
 	}
 
@@ -2382,6 +2454,18 @@ static int uniwill_suspend_kbd_led(struct uniwill_data *data)
 	return regmap_write(data->regmap, EC_ADDR_KBD_STATUS, regval);
 }
 
+static int uniwill_suspend_usb_powershare(struct uniwill_data *data)
+{
+	if (!uniwill_device_supports(data, UNIWILL_FEATURE_USB_POWERSHARE))
+		return 0;
+
+	/*
+	 * EC_ADDR_TRIGGER is marked as volatile, so we have to restore it
+	 * ourselves.
+	 */
+	return uniwill_read_usb_powershare_high(data, &data->last_usb_powershare_high_state);
+}
+
 static int uniwill_suspend_nvidia_ctgp(struct uniwill_data *data)
 {
 	if (!uniwill_device_supports(data, UNIWILL_FEATURE_NVIDIA_CTGP_CONTROL))
@@ -2413,6 +2497,10 @@ static int uniwill_suspend(struct device *dev)
 		return ret;
 
 	ret = uniwill_suspend_kbd_led(data);
+	if (ret < 0)
+		return ret;
+
+	ret = uniwill_suspend_usb_powershare(data);
 	if (ret < 0)
 		return ret;
 
@@ -2479,6 +2567,14 @@ static int uniwill_resume_kbd_led(struct uniwill_data *data)
 	return regmap_write_bits(data->regmap, EC_ADDR_TRIGGER, RGB_APPLY_COLOR, RGB_APPLY_COLOR);
 }
 
+static int uniwill_resume_usb_powershare(struct uniwill_data *data)
+{
+	if (!uniwill_device_supports(data, UNIWILL_FEATURE_USB_POWERSHARE))
+		return 0;
+
+	return uniwill_write_usb_powershare_high(data, data->last_usb_powershare_high_state);
+}
+
 static int uniwill_resume_nvidia_ctgp(struct uniwill_data *data)
 {
 	if (!uniwill_device_supports(data, UNIWILL_FEATURE_NVIDIA_CTGP_CONTROL))
@@ -2524,6 +2620,10 @@ static int uniwill_resume(struct device *dev)
 		return ret;
 
 	ret = uniwill_resume_kbd_led(data);
+	if (ret < 0)
+		return ret;
+
+	ret = uniwill_resume_usb_powershare(data);
 	if (ret < 0)
 		return ret;
 

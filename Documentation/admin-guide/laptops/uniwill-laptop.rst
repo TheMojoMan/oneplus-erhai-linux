@@ -105,6 +105,13 @@ The ``uniwill-laptop`` driver allows the user to configure if the system should 
 boot when being connected to a power source, see
 Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
 
+USB Powershare
+--------------
+
+The ``uniwill-laptop`` driver allows the user to configure if the system should continue to
+provide power via the USB ports when hibernating or powered off, see
+Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
+
 References
 ==========
 
