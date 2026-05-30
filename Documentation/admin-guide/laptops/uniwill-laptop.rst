@@ -98,6 +98,13 @@ allow it.
 
 See Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
 
+AC Auto Boot
+------------
+
+The ``uniwill-laptop`` driver allows the user to configure if the system should automatically
+boot when being connected to a power source, see
+Documentation/ABI/testing/sysfs-driver-uniwill-laptop for details.
+
 References
 ==========
 

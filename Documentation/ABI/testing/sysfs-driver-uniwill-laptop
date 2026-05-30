@@ -78,3 +78,14 @@ Description:
 
 		Reading this file returns the profile names with the currently active one in
 		brackets.
+
+What:		/sys/bus/platform/devices/INOU0000:XX/ac_auto_boot
+Date:		March 2026
+KernelVersion:	7.1
+Contact:	Armin Wolf <W_Armin@gmx.de>
+Description:
+		Allows userspace applications to configure if the device should boot automatically
+		when being connected to a power source. Writing "1"/"0" into this file
+		enables/disables this functionality.
+
+		Reading this file returns the current status of the AC auto boot functionality.

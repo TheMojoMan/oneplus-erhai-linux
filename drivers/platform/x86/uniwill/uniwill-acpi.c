@@ -112,6 +112,9 @@
 
 #define EC_ADDR_BAT_CYCLE_COUNT_2	0x04A7
 
+#define EC_ADDR_OEM_9			0x0726
+#define AC_AUTO_BOOT_ENABLE		BIT(3)
+
 #define EC_ADDR_PROJECT_ID		0x0740
 #define PROJECT_ID_NONE			0x00
 #define PROJECT_ID_GI			0x01
@@ -364,6 +367,7 @@
 #define UNIWILL_FEATURE_NVIDIA_CTGP_CONTROL	BIT(10)
 #define UNIWILL_FEATURE_USB_C_POWER_PRIORITY	BIT(11)
 #define UNIWILL_FEATURE_KEYBOARD_BACKLIGHT	BIT(12)
+#define UNIWILL_FEATURE_AC_AUTO_BOOT		BIT(13)
 
 enum usb_c_power_priority_options {
 	USB_C_POWER_PRIORITY_CHARGING = 0,
@@ -586,6 +590,7 @@ static const struct regmap_bus uniwill_ec_bus = {
 static bool uniwill_writeable_reg(struct device *dev, unsigned int reg)
 {
 	switch (reg) {
+	case EC_ADDR_OEM_9:
 	case EC_ADDR_AP_OEM:
 	case EC_ADDR_LIGHTBAR_AC_CTRL:
 	case EC_ADDR_LIGHTBAR_AC_RED:
@@ -625,6 +630,7 @@ static bool uniwill_readable_reg(struct device *dev, unsigned int reg)
 	case EC_ADDR_SECOND_FAN_RPM_1:
 	case EC_ADDR_SECOND_FAN_RPM_2:
 	case EC_ADDR_BAT_ALERT:
+	case EC_ADDR_OEM_9:
 	case EC_ADDR_PROJECT_ID:
 	case EC_ADDR_AP_OEM:
 	case EC_ADDR_LIGHTBAR_AC_CTRL:
@@ -1136,6 +1142,45 @@ static int usb_c_power_priority_init(struct uniwill_data *data)
 	return 0;
 }
 
+static ssize_t ac_auto_boot_store(struct device *dev, struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	struct uniwill_data *data = dev_get_drvdata(dev);
+	unsigned int regval;
+	bool enable;
+	int ret;
+
+	ret = kstrtobool(buf, &enable);
+	if (ret < 0)
+		return ret;
+
+	if (enable)
+		regval = AC_AUTO_BOOT_ENABLE;
+	else
+		regval = 0;
+
+	ret = regmap_update_bits(data->regmap, EC_ADDR_OEM_9, AC_AUTO_BOOT_ENABLE, regval);
+	if (ret < 0)
+		return ret;
+
+	return count;
+}
+
+static ssize_t ac_auto_boot_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	struct uniwill_data *data = dev_get_drvdata(dev);
+	unsigned int regval;
+	int ret;
+
+	ret = regmap_read(data->regmap, EC_ADDR_OEM_9, &regval);
+	if (ret < 0)
+		return ret;
+
+	return sysfs_emit(buf, "%d\n", !!(regval & AC_AUTO_BOOT_ENABLE));
+}
+
+static DEVICE_ATTR_RW(ac_auto_boot);
+
 static struct attribute *uniwill_attrs[] = {
 	/* Keyboard-related */
 	&dev_attr_fn_lock.attr,
@@ -1147,6 +1192,7 @@ static struct attribute *uniwill_attrs[] = {
 	/* Power-management-related */
 	&dev_attr_ctgp_offset.attr,
 	&dev_attr_usb_c_power_priority.attr,
+	&dev_attr_ac_auto_boot.attr,
 	NULL
 };
 
@@ -1183,6 +1229,11 @@ static umode_t uniwill_attr_is_visible(struct kobject *kobj, struct attribute *a
 
 	if (attr == &dev_attr_usb_c_power_priority.attr) {
 		if (uniwill_device_supports(data, UNIWILL_FEATURE_USB_C_POWER_PRIORITY))
+			return attr->mode;
+	}
+
+	if (attr == &dev_attr_ac_auto_boot.attr) {
+		if (uniwill_device_supports(data, UNIWILL_FEATURE_AC_AUTO_BOOT))
 			return attr->mode;
 	}
 
