@@ -95,6 +95,9 @@
 
 #define EC_ADDR_MAIN_FAN_RPM_2		0x0465
 
+#define EC_ADDR_SCREEN_STATUS		0x0466
+#define SCREEN_SUSPENDED		BIT(6)
+
 #define EC_ADDR_SECOND_FAN_RPM_1	0x046C
 
 #define EC_ADDR_SECOND_FAN_RPM_2	0x046D
@@ -487,6 +490,9 @@ static const struct key_entry uniwill_keymap[] = {
 
 	/* Reported when the user wants to toggle the benchmark mode status */
 	{ KE_IGNORE,    UNIWILL_OSD_BENCHMARK_MODE_TOGGLE,      { KEY_UNKNOWN }},
+
+	/* Reported when the screen is enabled/disabled during resume/suspend */
+	{ KE_IGNORE,	UNIWILL_OSD_SCREEN_STATE_CHANGED,	{ KEY_UNKNOWN }},
 
 	/* Reported when the user wants to toggle the webcam */
 	{ KE_IGNORE,    UNIWILL_OSD_WEBCAM_TOGGLE,              { KEY_UNKNOWN }},
