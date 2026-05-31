@@ -1511,10 +1511,8 @@ void Hal_EfuseParseThermalMeter_8723B(
 	else
 		pHalData->EEPROMThermalMeter = EEPROM_Default_ThermalMeter_8723B;
 
-	if ((pHalData->EEPROMThermalMeter == 0xff) || AutoLoadFail) {
-		pHalData->bAPKThermalMeterIgnore = true;
+	if ((pHalData->EEPROMThermalMeter == 0xff) || AutoLoadFail)
 		pHalData->EEPROMThermalMeter = EEPROM_Default_ThermalMeter_8723B;
-	}
 }
 
 void Hal_ReadRFGainOffset(
