@@ -28,6 +28,7 @@ int xe_wa_gt_dump(struct xe_gt *gt, struct drm_printer *p);
 #if IS_ENABLED(CONFIG_DRM_XE_KUNIT_TEST)
 extern const struct xe_rtp_table_sr gt_was;
 extern __maybe_unused const struct xe_rtp_table oob_was;
+extern __maybe_unused const struct xe_rtp_table device_oob_was;
 #endif
 
 /**
