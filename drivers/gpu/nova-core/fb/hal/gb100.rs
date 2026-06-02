@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-//! Blackwell framebuffer HAL.
+//! Blackwell GB10x framebuffer HAL.
 
 use kernel::{
     prelude::*,
@@ -20,7 +20,7 @@ use crate::{
 
 struct Gb100;
 
-const fn pmu_reserved_size_gb100() -> u32 {
+pub(super) const fn pmu_reserved_size_gb100() -> u32 {
     usize_into_u32::<{ const_align_up(SZ_8M + SZ_16M + SZ_4K, Alignment::new::<SZ_128K>()).unwrap() }>(
     )
 }
@@ -46,6 +46,11 @@ impl FbHal for Gb100 {
 
     fn pmu_reserved_size(&self) -> u32 {
         pmu_reserved_size_gb100()
+    }
+
+    fn non_wpr_heap_size(&self) -> u32 {
+        // Non-WPR heap for GB10x (see Open RM: kgspGetNonWprHeapSize, GB100/GB102).
+        u32::SZ_2M
     }
 
     fn frts_size(&self) -> u64 {
