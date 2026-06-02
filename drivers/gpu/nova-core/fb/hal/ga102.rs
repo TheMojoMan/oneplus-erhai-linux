@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 use kernel::{
     io::Io,
@@ -11,7 +12,7 @@ use crate::{
     regs, //
 };
 
-fn vidmem_size_ga102(bar: &Bar0) -> u64 {
+pub(super) fn vidmem_size_ga102(bar: &Bar0) -> u64 {
     bar.read(regs::NV_USABLE_FB_SIZE_IN_MB).usable_fb_size()
 }
 
@@ -34,6 +35,10 @@ impl FbHal for Ga102 {
 
     fn vidmem_size(&self, bar: &Bar0) -> u64 {
         vidmem_size_ga102(bar)
+    }
+
+    fn pmu_reserved_size(&self) -> u32 {
+        super::tu102::pmu_reserved_size_tu102()
     }
 
     fn frts_size(&self) -> u64 {
