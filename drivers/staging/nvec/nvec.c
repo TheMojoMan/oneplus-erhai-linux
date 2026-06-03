@@ -2,7 +2,7 @@
 /*
  * NVEC: NVIDIA compliant embedded controller interface
  *
- * Copyright (C) 2011 The AC100 Kernel Team <ac100@lists.lauchpad.net>
+ * Copyright (C) 2011 The AC100 Kernel Team <ac100@lists.launchpad.net>
  *
  * Authors:  Pierre-Hugues Husson <phhusson@free.fr>
  *           Ilya Petrov <ilya.muromec@gmail.com>
