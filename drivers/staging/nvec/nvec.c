@@ -57,7 +57,7 @@
  * @NVEC_MSG_RX: The message is an incoming message (from EC)
  * @NVEC_MSG_TX: The message is an outgoing message (to EC)
  */
-enum nvec_msg_category  {
+enum nvec_msg_category {
 	NVEC_MSG_RX,
 	NVEC_MSG_TX,
 };
