@@ -1049,6 +1049,8 @@ static bool is_dtbclk_required(struct dc *dc, struct dc_state *context)
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
 		if (!context->res_ctx.pipe_ctx[i].stream)
 			continue;
+		if (dc_is_hdmi_frl_signal(context->res_ctx.pipe_ctx[i].stream->signal))
+			return true;
 		if (dc->link_srv->dp_is_128b_132b_signal(&context->res_ctx.pipe_ctx[i]))
 			return true;
 	}
@@ -1105,7 +1107,7 @@ static enum dcn_zstate_support_state  decide_zstate_support(struct dc *dc, struc
 }
 
 static void dcn20_adjust_freesync_v_startup(
-		const struct dc_crtc_timing *dc_crtc_timing, int *vstartup_start)
+		const struct dc_crtc_timing *dc_crtc_timing, unsigned int *vstartup_start)
 {
 	struct dc_crtc_timing patched_crtc_timing;
 	uint32_t asic_blank_end   = 0;
@@ -1253,7 +1255,7 @@ void dcn20_calculate_dlg_params(struct dc *dc,
 
 static void swizzle_to_dml_params(
 		enum swizzle_mode_values swizzle,
-		unsigned int *sw_mode)
+		int *sw_mode)
 {
 	switch (swizzle) {
 	case DC_SW_LINEAR:
@@ -1466,6 +1468,9 @@ int dcn20_populate_dml_pipes_from_context(struct dc *dc,
 		case SIGNAL_TYPE_DVI_SINGLE_LINK:
 		case SIGNAL_TYPE_DVI_DUAL_LINK:
 			pipes[pipe_cnt].dout.output_type = dm_hdmi;
+			break;
+		case SIGNAL_TYPE_HDMI_FRL:
+			pipes[pipe_cnt].dout.output_type = dm_hdmifrl;
 			break;
 		default:
 			/* In case there is no signal, set dp with 4 lanes to allow max config */
@@ -2217,7 +2222,7 @@ static void calculate_wm_set_for_vlevel(int vlevel,
 {
 	double dram_clock_change_latency_cached = dml->soc.dram_clock_change_latency_us;
 
-	ASSERT(vlevel < dml->soc.num_states);
+	ASSERT(vlevel < (int)dml->soc.num_states);
 	/* only pipe 0 is read for voltage and dcf/soc clocks */
 	pipes[0].clks_cfg.voltage = vlevel;
 	pipes[0].clks_cfg.dcfclk_mhz = dml->soc.clock_limits[vlevel].dcfclk_mhz;

@@ -25,10 +25,13 @@
  */
 
 #include "amdgpu_dm_psr.h"
+#include "amdgpu.h"
 #include "dc_dmub_srv.h"
 #include "dc.h"
 #include "amdgpu_dm.h"
 #include "modules/power/power_helpers.h"
+#include "amdgpu_dm_kunit_helpers.h"
+
 
 static bool link_supports_psrsu(struct dc_link *link)
 {
@@ -58,7 +61,8 @@ static bool link_supports_psrsu(struct dc_link *link)
 	return false;
 }
 
-static void amdgpu_dm_psr_fill_caps(struct dc_link *link, struct psr_caps *caps)
+STATIC_IFN_KUNIT
+void amdgpu_dm_psr_fill_caps(struct dc_link *link, struct psr_caps *caps)
 {
 	struct dpcd_caps *dpcd_caps = &link->dpcd_caps;
 	unsigned int power_opts = 0;
@@ -86,6 +90,7 @@ static void amdgpu_dm_psr_fill_caps(struct dc_link *link, struct psr_caps *caps)
 	caps->rate_control_caps = 0; /* TODO: read in rc caps from aux */
 	caps->psr_power_opt_flag = power_opts;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_psr_fill_caps);
 
 /*
  * amdgpu_dm_set_psr_caps() - set link psr capabilities
@@ -118,7 +123,7 @@ bool amdgpu_dm_set_psr_caps(struct dc_link *link, struct amdgpu_dm_connector *ac
 		return false;
 
 	/*disable allow psr/psrsu/replay on eDP1*/
-	if (dc_get_edp_link_panel_inst(link->ctx->dc, link, &panel_inst) && panel_inst == 1)
+	if (dc_get_edp_link_panel_inst(dc, link, &panel_inst) && panel_inst == 1)
 		return false;
 
 	if (link_supports_psrsu(link))
@@ -140,22 +145,17 @@ bool amdgpu_dm_set_psr_caps(struct dc_link *link, struct amdgpu_dm_connector *ac
 bool amdgpu_dm_psr_is_active_allowed(struct amdgpu_display_manager *dm)
 {
 	unsigned int i;
-	bool allow_active = false;
 
-	for (i = 0; i < dm->dc->current_state->stream_count ; i++) {
-		struct dc_link *link;
-		struct dc_stream_state *stream = dm->dc->current_state->streams[i];
+	for (i = 0; i < dm->dc->current_state->stream_count; i++) {
+		const struct dc_link *link = dm->dc->current_state->streams[i]->link;
 
-		link = stream->link;
 		if (!link)
 			continue;
-		if (link->psr_settings.psr_feature_enabled &&
-		    link->psr_settings.psr_allow_active) {
-			allow_active = true;
-			break;
-		}
+
+		if (link->psr_settings.psr_feature_enabled && link->psr_settings.psr_allow_active)
+			return true;
 	}
-	return allow_active;
+	return false;
 }
 
 /*
@@ -189,3 +189,4 @@ bool amdgpu_dm_psr_set_event(struct amdgpu_display_manager *dm, struct dc_stream
 	return mod_power_set_psr_event(dm->power_module, stream,
 				       set_event, event, wait_for_disable);
 }
+EXPORT_IF_KUNIT(amdgpu_dm_psr_set_event);

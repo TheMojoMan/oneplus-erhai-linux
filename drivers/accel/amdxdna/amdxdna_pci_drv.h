@@ -7,6 +7,7 @@
 #define _AMDXDNA_PCI_DRV_H_
 
 #include <drm/amdxdna_accel.h>
+#include <drm/drm_mm.h>
 #include <drm/drm_print.h>
 #include <linux/iommu.h>
 #include <linux/iova.h>
@@ -56,12 +57,15 @@ struct amdxdna_dev_ops {
 	int (*resume)(struct amdxdna_dev *xdna);
 	int (*suspend)(struct amdxdna_dev *xdna);
 	int (*sriov_configure)(struct amdxdna_dev *xdna, int num_vfs);
+	int (*mmap)(struct amdxdna_client *client, struct vm_area_struct *vma);
 	int (*hwctx_init)(struct amdxdna_hwctx *hwctx);
 	void (*hwctx_fini)(struct amdxdna_hwctx *hwctx);
 	int (*hwctx_config)(struct amdxdna_hwctx *hwctx, u32 type, u64 value, void *buf, u32 size);
 	int (*hwctx_sync_debug_bo)(struct amdxdna_hwctx *hwctx, u32 debug_bo_hdl);
+	int (*hwctx_heap_expand)(struct amdxdna_hwctx *hwctx, struct amdxdna_gem_obj *heap);
 	void (*hmm_invalidate)(struct amdxdna_gem_obj *abo, unsigned long cur_seq);
 	int (*cmd_submit)(struct amdxdna_hwctx *hwctx, struct amdxdna_sched_job *job, u64 *seq);
+	int (*cmd_wait)(struct amdxdna_hwctx *hwctx, u64 seq, u32 timeout);
 	int (*get_aie_info)(struct amdxdna_client *client, struct amdxdna_drm_get_info *args);
 	int (*set_aie_state)(struct amdxdna_client *client, struct amdxdna_drm_set_state *args);
 	int (*get_array)(struct amdxdna_client *client, struct amdxdna_drm_get_array *args);
@@ -85,6 +89,7 @@ struct amdxdna_dev_info {
 	int				sram_bar;
 	int				psp_bar;
 	int				smu_bar;
+	int				doorbell_bar;
 	int				device_type;
 	int				first_col;
 	u32				dev_mem_buf_shift;
@@ -92,6 +97,7 @@ struct amdxdna_dev_info {
 	size_t				dev_mem_size;
 	const char			*default_vbnv;
 	const struct amdxdna_rev_vbnv	*rev_vbnv_tbl;
+	size_t				dev_heap_max_size;
 	const struct amdxdna_dev_priv	*dev_priv;
 	const struct amdxdna_fw_feature_tbl *fw_feature_tbl;
 	const struct amdxdna_dev_ops	*ops;
@@ -150,7 +156,10 @@ struct amdxdna_client {
 	struct drm_file			*filp;
 
 	struct mutex			mm_lock; /* protect memory related */
-	struct amdxdna_gem_obj		*dev_heap;
+	struct xarray			dev_heap_xa;
+	struct drm_mm			dev_heap_mm;
+	u32				dev_heap_nid;
+	size_t				total_heap_size;
 
 	struct iommu_sva		*sva;
 	int				pasid;
@@ -167,6 +176,7 @@ struct amdxdna_client {
 /* Add device info below */
 extern const struct amdxdna_dev_info dev_npu1_info;
 extern const struct amdxdna_dev_info dev_npu3_pf_info;
+extern const struct amdxdna_dev_info dev_npu3_vf_info;
 extern const struct amdxdna_dev_info dev_npu4_info;
 extern const struct amdxdna_dev_info dev_npu5_info;
 extern const struct amdxdna_dev_info dev_npu6_info;

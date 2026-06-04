@@ -40,6 +40,7 @@
 #include "link_enc_cfg.h"
 #include "../hw_sequencer.h"
 #include "dio/dcn10/dcn10_dio.h"
+#include "gpio_service_interface.h"
 
 #define DC_LOGGER_INIT(logger)
 
@@ -319,6 +320,32 @@ void dcn401_init_hw(struct dc *dc)
 			backlight = link->panel_cntl->funcs->hw_init(link->panel_cntl);
 			user_level = link->panel_cntl->stored_backlight_registers.USER_LEVEL;
 		}
+
+		if (link->ctx->dc->config.dp_connector_no_native_i2c && link->no_ddc_pin) {
+			struct graphics_object_i2c_info i2c_info;
+			struct ddc *ddc_pin;
+			struct gpio_ddc_hw_info hw_info;
+
+			if (link->ctx->dc_bios->funcs->get_i2c_info(dcb, link->link_id, &i2c_info) == BP_RESULT_OK) {
+				hw_info.ddc_channel = i2c_info.i2c_line;
+				hw_info.hw_supported = i2c_info.i2c_hw_assist;
+
+				ddc_pin = dal_gpio_create_ddc(
+					link->ctx->gpio_service,
+					i2c_info.gpio_info.clk_a_register_index,
+					1 << i2c_info.gpio_info.clk_a_shift,
+					&hw_info);
+
+				if (ddc_pin) {
+					// need to switch pad to aux mode, one time only
+					// TODO: Handle result
+					dal_ddc_open(ddc_pin, GPIO_MODE_HARDWARE,
+						GPIO_DDC_CONFIG_TYPE_MODE_AUX);
+
+					dal_gpio_destroy_ddc(&ddc_pin);
+				}
+			}
+		}
 	}
 
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
@@ -493,12 +520,10 @@ void dcn401_populate_mcm_luts(struct dc *dc,
 		break;
 	case DC_CM2_TRANSFER_FUNC_SOURCE_VIDMEM:
 		switch (mcm_luts.lut3d_data.gpu_mem_params.size) {
-#if defined(CONFIG_DRM_AMD_DC_DCN4_2)
 		case DC_CM2_GPU_MEM_SIZE_333333:
 			if (dc->caps.color.mpc.rmcm_3d_lut_caps.lut_dim_caps.dim_33)
 				width = hubp_3dlut_fl_width_33;
 			break;
-#endif
 		case DC_CM2_GPU_MEM_SIZE_171717:
 			width = hubp_3dlut_fl_width_17;
 			break;
@@ -762,6 +787,9 @@ static void enable_stream_timing_calc(
 			stream->link->phy_state.symclk_state = SYMCLK_ON_TX_ON;
 	}
 
+	if (pipe_ctx->stream_res.tg->funcs->set_h_timing_div_manual_mode) {
+		*manual_mode = !is_h_timing_divisible_by_2(stream);
+	}
 	params->vertical_total_min = stream->adjust.v_total_min;
 	params->vertical_total_max = stream->adjust.v_total_max;
 	params->vertical_total_mid = stream->adjust.v_total_mid;
@@ -819,6 +847,8 @@ enum dc_status dcn401_enable_stream_timing(
 	if (dc->res_pool->dccg->funcs->set_dtbclk_p_src) {
 		if (dc_is_dp_signal(stream->signal) || dc_is_virtual_signal(stream->signal)) {
 			dc->res_pool->dccg->funcs->set_dtbclk_p_src(dc->res_pool->dccg, DPREFCLK, pipe_ctx->stream_res.tg->inst);
+		} else if (dc_is_hdmi_frl_signal(stream->signal)) {
+			dc->res_pool->dccg->funcs->set_dtbclk_p_src(dc->res_pool->dccg, DTBCLK0, pipe_ctx->stream_res.tg->inst);
 		}
 	}
 
@@ -857,6 +887,8 @@ enum dc_status dcn401_enable_stream_timing(
 		pipe_ctx->stream->signal,
 		true);
 
+	if (pipe_ctx->stream_res.tg->funcs->set_h_timing_div_manual_mode)
+		pipe_ctx->stream_res.tg->funcs->set_h_timing_div_manual_mode(pipe_ctx->stream_res.tg, manual_mode);
 	for (i = 0; i < opp_cnt; i++) {
 		opp_heads[i]->stream_res.opp->funcs->opp_pipe_clock_control(
 				opp_heads[i]->stream_res.opp,
@@ -1821,6 +1853,12 @@ void dcn401_unblank_stream(struct pipe_ctx *pipe_ctx,
 		pipe_ctx->stream_res.stream_enc->funcs->dp_unblank(link, pipe_ctx->stream_res.stream_enc, &params);
 	}
 
+	if (dc_is_hdmi_frl_signal(pipe_ctx->stream->signal)) {
+		if (link->link_status.link_active && link->frl_link_settings.frl_link_rate != 0)
+			pipe_ctx->stream_res.hpo_frl_stream_enc->funcs->hdmi_frl_unblank(
+					pipe_ctx->stream_res.hpo_frl_stream_enc,
+					pipe_ctx->stream_res.tg->inst);
+	}
 	if (link->local_sink && link->local_sink->sink_signal == SIGNAL_TYPE_EDP)
 		hws->funcs.edp_backlight_control(link, true);
 }
@@ -1952,6 +1990,9 @@ void dcn401_perform_3dlut_wa_unlock(struct pipe_ctx *pipe_ctx)
 	 * This is meant to work around a known HW issue where VREADY will cancel the pending 3DLUT_ENABLE signal regardless
 	 * of whether OTG lock is currently being held or not.
 	 */
+	if (!pipe_ctx)
+		return;
+
 	struct pipe_ctx *wa_pipes[MAX_PIPES] = { NULL };
 	struct pipe_ctx *odm_pipe, *mpc_pipe;
 	int i, wa_pipe_ct = 0;

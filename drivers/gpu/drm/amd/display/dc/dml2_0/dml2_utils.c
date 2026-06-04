@@ -173,6 +173,8 @@ bool is_dtbclk_required(const struct dc *dc, struct dc_state *context)
 	for (i = 0; i < dc->res_pool->pipe_count; i++) {
 		if (!context->res_ctx.pipe_ctx[i].stream)
 			continue;
+		if (dc_is_hdmi_frl_signal(context->res_ctx.pipe_ctx[i].stream->signal))
+			return true;
 		if (is_dp2p0_output_encoder(&context->res_ctx.pipe_ctx[i]))
 			return true;
 	}
@@ -255,7 +257,7 @@ static void populate_pipe_ctx_dlg_params_from_dml(struct pipe_ctx *pipe_ctx, str
 	pipe_ctx->pipe_dlg_param.vupdate_width = dml_get_vupdate_width(mode_lib, pipe_idx);
 	pipe_ctx->pipe_dlg_param.vready_offset = dml_get_vready_offset(mode_lib, pipe_idx);
 
-	ASSERT(pipe_ctx->stream_res.tg->inst >= 0 && pipe_ctx->stream_res.tg->inst <= 0xFF);
+	ASSERT(pipe_ctx->stream_res.tg->inst <= 0xFF);
 	pipe_ctx->pipe_dlg_param.otg_inst = (unsigned char)pipe_ctx->stream_res.tg->inst;
 
 	pipe_ctx->pipe_dlg_param.hactive = hactive;

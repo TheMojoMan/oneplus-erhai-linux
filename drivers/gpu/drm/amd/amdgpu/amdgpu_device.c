@@ -1913,6 +1913,20 @@ static void amdgpu_uid_fini(struct amdgpu_device *adev)
 	adev->uid_info = NULL;
 }
 
+static struct pci_dev *amdgpu_device_find_parent(struct amdgpu_device *adev)
+{
+	struct pci_dev *parent = adev->pdev;
+
+	/* skip upstream/downstream switches internal to dGPU */
+	while ((parent = pci_upstream_bridge(parent))) {
+		if (parent->vendor == PCI_VENDOR_ID_ATI)
+			continue;
+		break;
+	}
+
+	return parent;
+}
+
 /**
  * amdgpu_device_ip_early_init - run early init for hardware IPs
  *
@@ -2014,7 +2028,7 @@ static int amdgpu_device_ip_early_init(struct amdgpu_device *adev)
 		adev->flags |= AMD_IS_PX;
 
 	if (!(adev->flags & AMD_IS_APU)) {
-		parent = pcie_find_root_port(adev->pdev);
+		parent = amdgpu_device_find_parent(adev);
 		adev->has_pr3 = parent ? pci_pr3_present(parent) : false;
 	}
 
@@ -3647,6 +3661,7 @@ static int amdgpu_device_sys_interface_init(struct amdgpu_device *adev)
 	amdgpu_reg_state_sysfs_init(adev);
 	amdgpu_xcp_sysfs_init(adev);
 	amdgpu_uma_sysfs_init(adev);
+	amdgpu_ptl_sysfs_init(adev);
 
 	return r;
 }
@@ -3663,6 +3678,7 @@ static void amdgpu_device_sys_interface_fini(struct amdgpu_device *adev)
 	amdgpu_reg_state_sysfs_fini(adev);
 	amdgpu_xcp_sysfs_fini(adev);
 	amdgpu_uma_sysfs_fini(adev);
+	amdgpu_ptl_sysfs_fini(adev);
 }
 
 /**
@@ -3731,6 +3747,7 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 	mutex_init(&adev->virt.vf_errors.lock);
 	hash_init(adev->mn_hash);
 	mutex_init(&adev->psp.mutex);
+	mutex_init(&adev->psp.ptl.mutex);
 	mutex_init(&adev->notifier_lock);
 	mutex_init(&adev->pm.stable_pstate_ctx_lock);
 	mutex_init(&adev->benchmark_mutex);
@@ -3786,7 +3803,6 @@ int amdgpu_device_init(struct amdgpu_device *adev,
 	}
 
 	INIT_WORK(&adev->xgmi_reset_work, amdgpu_device_xgmi_reset_func);
-	INIT_WORK(&adev->userq_reset_work, amdgpu_userq_reset_work);
 
 	amdgpu_coredump_init(adev);
 
@@ -5090,6 +5106,7 @@ int amdgpu_device_pre_asic_reset(struct amdgpu_device *adev,
 {
 	int i, r = 0;
 	struct amdgpu_job *job = NULL;
+	struct dma_fence *fence = NULL;
 	struct amdgpu_device *tmp_adev = reset_context->reset_req_dev;
 	bool need_full_reset =
 		test_bit(AMDGPU_NEED_FULL_RESET, &reset_context->flags);
@@ -5102,6 +5119,9 @@ int amdgpu_device_pre_asic_reset(struct amdgpu_device *adev,
 
 	amdgpu_fence_driver_isr_toggle(adev, true);
 
+	if (job)
+		fence = &job->hw_fence->base;
+
 	/* block all schedulers and reset given job's ring */
 	for (i = 0; i < AMDGPU_MAX_RINGS; ++i) {
 		struct amdgpu_ring *ring = adev->rings[i];
@@ -5110,7 +5130,7 @@ int amdgpu_device_pre_asic_reset(struct amdgpu_device *adev,
 			continue;
 
 		/* after all hw jobs are reset, hw fence is meaningless, so force_completion */
-		amdgpu_fence_driver_force_completion(ring);
+		amdgpu_fence_driver_force_completion(ring, fence);
 	}
 
 	amdgpu_fence_driver_isr_toggle(adev, false);
@@ -5478,7 +5498,7 @@ static inline void amdgpu_device_stop_pending_resets(struct amdgpu_device *adev)
 	if (!amdgpu_sriov_vf(adev))
 		cancel_work(&adev->reset_work);
 #endif
-	cancel_work(&adev->userq_reset_work);
+	amdgpu_userq_mgr_cancel_reset_work(adev);
 
 	if (adev->kfd.dev)
 		cancel_work(&adev->kfd.reset_work);
@@ -5836,6 +5856,12 @@ int amdgpu_device_gpu_recover(struct amdgpu_device *adev,
 	/* We need to lock reset domain only once both for XGMI and single device */
 	amdgpu_device_recovery_get_reset_lock(adev, &device_list);
 
+	/* unmap all the mappings of doorbell and framebuffer to prevent user space from
+	 * accessing them
+	 */
+	unmap_mapping_range(adev->ddev.anon_inode->i_mapping, 0, 0, 1);
+	amdgpu_amdkfd_clear_kfd_mapping(adev);
+
 	amdgpu_device_halt_activities(adev, job, reset_context, &device_list,
 				      hive, need_emergency_restart);
 	if (need_emergency_restart)
@@ -5909,8 +5935,6 @@ static void amdgpu_device_partner_bandwidth(struct amdgpu_device *adev,
 					    enum pci_bus_speed *speed,
 					    enum pcie_link_width *width)
 {
-	struct pci_dev *parent = adev->pdev;
-
 	if (!speed || !width)
 		return;
 
@@ -5918,13 +5942,11 @@ static void amdgpu_device_partner_bandwidth(struct amdgpu_device *adev,
 	*width = PCIE_LNK_WIDTH_UNKNOWN;
 
 	if (amdgpu_device_pcie_dynamic_switching_supported(adev)) {
-		while ((parent = pci_upstream_bridge(parent))) {
-			/* skip upstream/downstream switches internal to dGPU*/
-			if (parent->vendor == PCI_VENDOR_ID_ATI)
-				continue;
+		struct pci_dev *parent = amdgpu_device_find_parent(adev);
+
+		if (parent) {
 			*speed = pcie_get_speed_cap(parent);
 			*width = pcie_get_width_cap(parent);
-			break;
 		}
 	} else {
 		/* use the current speeds rather than max if switching is not supported */
@@ -5951,22 +5973,15 @@ static void amdgpu_device_gpu_bandwidth(struct amdgpu_device *adev,
 	if (!speed || !width)
 		return;
 
-	parent = pci_upstream_bridge(parent);
-	if (parent && parent->vendor == PCI_VENDOR_ID_ATI) {
-		/* use the upstream/downstream switches internal to dGPU */
+	/* use the device itself */
+	*speed = pcie_get_speed_cap(adev->pdev);
+	*width = pcie_get_width_cap(adev->pdev);
+
+	/* use the link outside the device */
+	parent = amdgpu_device_find_parent(adev);
+	if (parent) {
 		*speed = pcie_get_speed_cap(parent);
 		*width = pcie_get_width_cap(parent);
-		while ((parent = pci_upstream_bridge(parent))) {
-			if (parent->vendor == PCI_VENDOR_ID_ATI) {
-				/* use the upstream/downstream switches internal to dGPU */
-				*speed = pcie_get_speed_cap(parent);
-				*width = pcie_get_width_cap(parent);
-			}
-		}
-	} else {
-		/* use the device itself */
-		*speed = pcie_get_speed_cap(adev->pdev);
-		*width = pcie_get_width_cap(adev->pdev);
 	}
 }
 

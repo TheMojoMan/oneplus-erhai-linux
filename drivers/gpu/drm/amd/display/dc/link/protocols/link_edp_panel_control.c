@@ -47,9 +47,9 @@
 #define DP_SINK_PR_ENABLE_AND_CONFIGURATION		0x37B
 
 /* Travis */
-static const uint8_t DP_VGA_LVDS_CONVERTER_ID_2[] = "sivarT";
+static const char DP_VGA_LVDS_CONVERTER_ID_2[] = "sivarT";
 /* Nutmeg */
-static const uint8_t DP_VGA_LVDS_CONVERTER_ID_3[] = "dnomlA";
+static const char DP_VGA_LVDS_CONVERTER_ID_3[] = "dnomlA";
 
 void dp_set_panel_mode(struct dc_link *link, enum dp_panel_mode panel_mode)
 {
@@ -462,7 +462,7 @@ bool edp_receiver_ready_T9(struct dc_link *link)
 		do {
 			sinkstatus = 1;
 			result = core_link_read_dpcd(link, DP_SINK_STATUS, &sinkstatus, sizeof(sinkstatus));
-			if (sinkstatus == 0)
+			if (!(sinkstatus & DP_RECEIVE_PORT_0_STATUS))
 				break;
 			if (result != DC_OK)
 				break;
@@ -492,7 +492,7 @@ bool edp_receiver_ready_T7(struct dc_link *link)
 		do {
 			sinkstatus = 0;
 			result = core_link_read_dpcd(link, DP_SINK_STATUS, &sinkstatus, sizeof(sinkstatus));
-			if (sinkstatus == 1)
+			if (sinkstatus & DP_RECEIVE_PORT_0_STATUS)
 				break;
 			if (result != DC_OK)
 				break;
@@ -788,7 +788,10 @@ bool edp_setup_psr(struct dc_link *link,
 		}
 	}
 
-	psr_context->channel = link->ddc->ddc_pin->hw_info.ddc_channel;
+	if (dc->config.dp_connector_no_native_i2c && link->no_ddc_pin)
+		psr_context->channel = (enum channel_id)link->aux_hw_inst;
+	else
+		psr_context->channel = link->ddc->ddc_pin->hw_info.ddc_channel;
 	psr_context->transmitterId = link->link_enc->transmitter;
 	psr_context->engineId = link->link_enc->preferred_engine;
 
@@ -1052,6 +1055,8 @@ bool edp_setup_freesync_replay(struct dc_link *link, const struct dc_stream_stat
 		replay_config.bits.FREESYNC_PANEL_REPLAY_MODE = 1;
 		replay_config.bits.TIMING_DESYNC_ERROR_VERIFICATION = 0;
 		replay_config.bits.STATE_TRANSITION_ERROR_DETECTION = 1;
+		replay_config.bits.FRAME_SKIPPING_ERROR_DETECTION = 1;
+		replay_config.bits.FRAME_SKIPPING_ENABLE = 1;
 		dm_helpers_dp_write_dpcd(link->ctx, link,
 			DP_SINK_PR_ENABLE_AND_CONFIGURATION,
 			(uint8_t *)&(replay_config.raw), sizeof(uint8_t));
@@ -1210,9 +1215,9 @@ int edp_get_backlight_level(const struct dc_link *link)
 		fw_set_brightness = dmcu->funcs->is_dmcu_initialized(dmcu);
 
 	if (!fw_set_brightness && panel_cntl->funcs->get_current_backlight)
-		return panel_cntl->funcs->get_current_backlight(panel_cntl);
+		return (int)panel_cntl->funcs->get_current_backlight(panel_cntl);
 	else if (abm != NULL && abm->funcs->get_current_backlight != NULL)
-		return (int) abm->funcs->get_current_backlight(abm);
+		return (int)abm->funcs->get_current_backlight(abm);
 	else
 		return DC_ERROR_UNEXPECTED;
 }

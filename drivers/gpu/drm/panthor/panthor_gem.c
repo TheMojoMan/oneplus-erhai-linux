@@ -687,6 +687,8 @@ static void panthor_gem_evict_locked(struct panthor_gem_object *bo)
 	if (drm_WARN_ON_ONCE(bo->base.dev, !bo->backing.pages))
 		return;
 
+	atomic_add_unless(&bo->reclaimed_count, 1, INT_MAX);
+
 	panthor_gem_dev_map_cleanup_locked(bo);
 	panthor_gem_backing_cleanup_locked(bo);
 	panthor_gem_update_reclaim_state_locked(bo, NULL);
@@ -1495,13 +1497,13 @@ panthor_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
 	if (!can_swap())
 		goto out;
 
-	freed += drm_gem_lru_scan(&ptdev->reclaim.unused,
+	freed += drm_gem_lru_scan(&ptdev->base, &ptdev->reclaim.unused,
 				  sc->nr_to_scan - freed, &remaining,
 				  panthor_gem_try_evict_no_resv_wait, NULL);
 	if (freed >= sc->nr_to_scan)
 		goto out;
 
-	freed += drm_gem_lru_scan(&ptdev->reclaim.mmapped,
+	freed += drm_gem_lru_scan(&ptdev->base, &ptdev->reclaim.mmapped,
 				  sc->nr_to_scan - freed, &remaining,
 				  panthor_gem_try_evict_no_resv_wait, NULL);
 	if (freed >= sc->nr_to_scan)
@@ -1515,7 +1517,7 @@ panthor_gem_shrinker_scan(struct shrinker *shrinker, struct shrink_control *sc)
 	if (freed >= sc->nr_to_scan)
 		goto out;
 
-	freed += drm_gem_lru_scan(&ptdev->reclaim.gpu_mapped_shared,
+	freed += drm_gem_lru_scan(&ptdev->base, &ptdev->reclaim.gpu_mapped_shared,
 				  sc->nr_to_scan - freed, &remaining,
 				  panthor_gem_try_evict, NULL);
 
@@ -1544,21 +1546,16 @@ out:
 int panthor_gem_shrinker_init(struct panthor_device *ptdev)
 {
 	struct shrinker *shrinker;
-	int ret;
-
-	ret = drmm_mutex_init(&ptdev->base, &ptdev->reclaim.lock);
-	if (ret)
-		return ret;
 
 	INIT_LIST_HEAD(&ptdev->reclaim.vms);
-	drm_gem_lru_init(&ptdev->reclaim.unused, &ptdev->reclaim.lock);
-	drm_gem_lru_init(&ptdev->reclaim.mmapped, &ptdev->reclaim.lock);
-	drm_gem_lru_init(&ptdev->reclaim.gpu_mapped_shared, &ptdev->reclaim.lock);
+	drm_gem_lru_init(&ptdev->reclaim.unused);
+	drm_gem_lru_init(&ptdev->reclaim.mmapped);
+	drm_gem_lru_init(&ptdev->reclaim.gpu_mapped_shared);
 	ptdev->reclaim.gpu_mapped_count = 0;
 
 	/* Teach lockdep about lock ordering wrt. shrinker: */
 	fs_reclaim_acquire(GFP_KERNEL);
-	might_lock(&ptdev->reclaim.lock);
+	might_lock(&ptdev->base.gem_lru_mutex);
 	fs_reclaim_release(GFP_KERNEL);
 
 	shrinker = shrinker_alloc(0, "drm-panthor-gem");
@@ -1595,6 +1592,7 @@ static void panthor_gem_debugfs_print_flag_names(struct seq_file *m)
 	static const char * const gem_state_flags_names[] = {
 		[PANTHOR_DEBUGFS_GEM_STATE_IMPORTED_BIT] = "imported",
 		[PANTHOR_DEBUGFS_GEM_STATE_EXPORTED_BIT] = "exported",
+		[PANTHOR_DEBUGFS_GEM_STATE_EVICTED_BIT] = "evicted",
 	};
 
 	static const char * const gem_usage_flags_names[] = {
@@ -1625,6 +1623,7 @@ static void panthor_gem_debugfs_bo_print(struct panthor_gem_object *bo,
 {
 	enum panthor_gem_reclaim_state reclaim_state = bo->reclaim_state;
 	unsigned int refcount = kref_read(&bo->base.refcount);
+	int reclaimed_count = atomic_read(&bo->reclaimed_count);
 	char creator_info[32] = {};
 	size_t resident_size;
 	u32 gem_usage_flags = bo->debugfs.flags;
@@ -1638,16 +1637,20 @@ static void panthor_gem_debugfs_bo_print(struct panthor_gem_object *bo,
 
 	snprintf(creator_info, sizeof(creator_info),
 		 "%s/%d", bo->debugfs.creator.process_name, bo->debugfs.creator.tgid);
-	seq_printf(m, "%-32s%-16d%-16d%-16zd%-16zd0x%-16lx",
+	seq_printf(m, "%-32s%-16d%-11d%-11d%-16zd%-16zd0x%-16lx",
 		   creator_info,
 		   bo->base.name,
 		   refcount,
+		   reclaimed_count,
 		   bo->base.size,
 		   resident_size,
 		   drm_vma_node_start(&bo->base.vma_node));
 
 	if (drm_gem_is_imported(&bo->base))
 		gem_state_flags |= PANTHOR_DEBUGFS_GEM_STATE_FLAG_IMPORTED;
+	else if (!resident_size && reclaimed_count)
+		gem_state_flags |= PANTHOR_DEBUGFS_GEM_STATE_FLAG_EVICTED;
+
 	if (bo->base.dma_buf)
 		gem_state_flags |= PANTHOR_DEBUGFS_GEM_STATE_FLAG_EXPORTED;
 
@@ -1671,8 +1674,8 @@ static void panthor_gem_debugfs_print_bos(struct panthor_device *ptdev,
 
 	panthor_gem_debugfs_print_flag_names(m);
 
-	seq_puts(m, "created-by                      global-name     refcount        size            resident-size   file-offset       state      usage       label\n");
-	seq_puts(m, "----------------------------------------------------------------------------------------------------------------------------------------------\n");
+	seq_puts(m, "created-by                      global-name     refcount   evictions  size            resident-size   file-offset       state      usage       label\n");
+	seq_puts(m, "----------------------------------------------------------------------------------------------------------------------------------------------------\n");
 
 	scoped_guard(mutex, &ptdev->gems.lock) {
 		list_for_each_entry(bo, &ptdev->gems.node, debugfs.node) {
@@ -1680,7 +1683,7 @@ static void panthor_gem_debugfs_print_bos(struct panthor_device *ptdev,
 		}
 	}
 
-	seq_puts(m, "==============================================================================================================================================\n");
+	seq_puts(m, "====================================================================================================================================================\n");
 	seq_printf(m, "Total size: %zd, Total resident: %zd, Total reclaimable: %zd\n",
 		   totals.size, totals.resident, totals.reclaimable);
 }

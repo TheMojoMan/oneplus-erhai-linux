@@ -29,6 +29,8 @@
 #include "display_mode_vba_31.h"
 #include "../dml_inline_defs.h"
 
+#include "../dml1_frl_cap_chk.h"
+
 /*
  * NOTE:
  *   This file is gcc-parsable HW gospel, coming straight from HW engineers.
@@ -157,7 +159,7 @@ static bool CalculatePrefetchSchedule(
 		double *Tdmdl_vm,
 		double *Tdmdl,
 		double *TSetup,
-		int *VUpdateOffsetPix,
+		unsigned int *VUpdateOffsetPix,
 		double *VUpdateWidthPix,
 		double *VReadyOffsetPix);
 static double RoundToDFSGranularityUp(double Clock, double VCOSpeed);
@@ -218,19 +220,19 @@ static unsigned int CalculateVMAndRowBytes(
 		unsigned int *MetaRowByte,
 		unsigned int *PixelPTEBytesPerRow,
 		bool *PTEBufferSizeNotExceeded,
-		int *dpte_row_width_ub,
+		unsigned int *dpte_row_width_ub,
 		unsigned int *dpte_row_height,
 		unsigned int *MetaRequestWidth,
 		unsigned int *MetaRequestHeight,
 		unsigned int *meta_row_width,
 		unsigned int *meta_row_height,
-		int *vm_group_bytes,
+		unsigned int *vm_group_bytes,
 		unsigned int *dpte_group_bytes,
 		unsigned int *PixelPTEReqWidth,
 		unsigned int *PixelPTEReqHeight,
 		unsigned int *PTERequestSize,
-		int *DPDE0BytesFrame,
-		int *MetaPTEBytesFrame);
+		unsigned int *DPDE0BytesFrame,
+		unsigned int *MetaPTEBytesFrame);
 static double CalculateTWait(unsigned int PrefetchMode, double DRAMClockChangeLatency, double UrgentLatency, double SREnterPlusExitTime);
 static void CalculateRowBandwidth(
 		bool GPUVMEnable,
@@ -285,7 +287,7 @@ static void CalculateVupdateAndDynamicMetadataParameters(
 		double *Tdmbf,
 		double *Tdmec,
 		double *Tdmsks,
-		int *VUpdateOffsetPix,
+		unsigned int *VUpdateOffsetPix,
 		double *VUpdateWidthPix,
 		double *VReadyOffsetPix);
 
@@ -318,8 +320,8 @@ static void CalculateWatermarksAndDRAMSpeedChangeSupport(
 static void CalculateDCFCLKDeepSleep(
 		struct display_mode_lib *mode_lib,
 		unsigned int NumberOfActivePlanes,
-		int BytePerPixelY[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelY[],
+		unsigned int BytePerPixelC[],
 		double VRatio[],
 		double VRatioChroma[],
 		double SwathWidthY[],
@@ -357,6 +359,17 @@ static void CalculateUrgentBurstFactor(
 		double *UrgentBurstFactorChroma,
 		bool *NotEnoughUrgentLatencyHiding);
 
+static double RequiredDTBCLK(
+		bool DSCEnable,
+		double PixelClock,
+		enum output_format_class OutputFormat,
+		double OutputBPP,
+		int DSCSlices,
+		int HTotal,
+		int HActive,
+		int AudioRate,
+		int AudioLayoutSingle);
+
 static void UseMinimumDCFCLK(
 		struct display_mode_lib *mode_lib,
 		int MaxPrefetchMode,
@@ -377,7 +390,7 @@ static void CalculatePixelDeliveryTimes(
 		double PSCL_THROUGHPUT[],
 		double PSCL_THROUGHPUT_CHROMA[],
 		double DPPCLK[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelC[],
 		enum scan_direction_class SourceScan[],
 		unsigned int NumberOfCursors[],
 		unsigned int CursorWidth[][DC__NUM_CURSOR__MAX],
@@ -402,35 +415,35 @@ static void CalculateMetaAndPTETimes(
 		bool GPUVMEnable,
 		int MetaChunkSize,
 		int MinMetaChunkSizeBytes,
-		int HTotal[],
+		unsigned int HTotal[],
 		double VRatio[],
 		double VRatioChroma[],
 		double DestinationLinesToRequestRowInVBlank[],
 		double DestinationLinesToRequestRowInImmediateFlip[],
 		bool DCCEnable[],
 		double PixelClock[],
-		int BytePerPixelY[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelY[],
+		unsigned int BytePerPixelC[],
 		enum scan_direction_class SourceScan[],
-		int dpte_row_height[],
-		int dpte_row_height_chroma[],
-		int meta_row_width[],
-		int meta_row_width_chroma[],
-		int meta_row_height[],
-		int meta_row_height_chroma[],
-		int meta_req_width[],
-		int meta_req_width_chroma[],
-		int meta_req_height[],
-		int meta_req_height_chroma[],
-		int dpte_group_bytes[],
-		int PTERequestSizeY[],
-		int PTERequestSizeC[],
-		int PixelPTEReqWidthY[],
-		int PixelPTEReqHeightY[],
-		int PixelPTEReqWidthC[],
-		int PixelPTEReqHeightC[],
-		int dpte_row_width_luma_ub[],
-		int dpte_row_width_chroma_ub[],
+		unsigned int dpte_row_height[],
+		unsigned int dpte_row_height_chroma[],
+		unsigned int meta_row_width[],
+		unsigned int meta_row_width_chroma[],
+		unsigned int meta_row_height[],
+		unsigned int meta_row_height_chroma[],
+		unsigned int meta_req_width[],
+		unsigned int meta_req_width_chroma[],
+		unsigned int meta_req_height[],
+		unsigned int meta_req_height_chroma[],
+		unsigned int dpte_group_bytes[],
+		unsigned int PTERequestSizeY[],
+		unsigned int PTERequestSizeC[],
+		unsigned int PixelPTEReqWidthY[],
+		unsigned int PixelPTEReqHeightY[],
+		unsigned int PixelPTEReqWidthC[],
+		unsigned int PixelPTEReqHeightC[],
+		unsigned int dpte_row_width_luma_ub[],
+		unsigned int dpte_row_width_chroma_ub[],
 		double DST_Y_PER_PTE_ROW_NOM_L[],
 		double DST_Y_PER_PTE_ROW_NOM_C[],
 		double DST_Y_PER_META_ROW_NOM_L[],
@@ -453,18 +466,18 @@ static void CalculateVMGroupAndRequestTimes(
 		bool GPUVMEnable,
 		unsigned int GPUVMMaxPageTableLevels,
 		unsigned int HTotal[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelC[],
 		double DestinationLinesToRequestVMInVBlank[],
 		double DestinationLinesToRequestVMInImmediateFlip[],
 		bool DCCEnable[],
 		double PixelClock[],
-		int dpte_row_width_luma_ub[],
-		int dpte_row_width_chroma_ub[],
-		int vm_group_bytes[],
+		unsigned int dpte_row_width_luma_ub[],
+		unsigned int dpte_row_width_chroma_ub[],
+		unsigned int vm_group_bytes[],
 		unsigned int dpde0_bytes_per_frame_ub_l[],
 		unsigned int dpde0_bytes_per_frame_ub_c[],
-		int meta_pte_bytes_per_frame_ub_l[],
-		int meta_pte_bytes_per_frame_ub_c[],
+		unsigned int meta_pte_bytes_per_frame_ub_l[],
+		unsigned int meta_pte_bytes_per_frame_ub_c[],
 		double TimePerVMGroupVBlank[],
 		double TimePerVMGroupFlip[],
 		double TimePerVMRequestVBlank[],
@@ -492,29 +505,29 @@ static void CalculateStutterEfficiency(
 		bool ProgressiveToInterlaceUnitInOPP,
 		bool Interlace[],
 		double MinTTUVBlank[],
-		int DPPPerPlane[],
+		unsigned int DPPPerPlane[],
 		unsigned int DETBufferSizeY[],
-		int BytePerPixelY[],
+		unsigned int BytePerPixelY[],
 		double BytePerPixelDETY[],
 		double SwathWidthY[],
-		int SwathHeightY[],
-		int SwathHeightC[],
+		unsigned int SwathHeightY[],
+		unsigned int SwathHeightC[],
 		double NetDCCRateLuma[],
 		double NetDCCRateChroma[],
 		double DCCFractionOfZeroSizeRequestsLuma[],
 		double DCCFractionOfZeroSizeRequestsChroma[],
-		int HTotal[],
-		int VTotal[],
+		unsigned int HTotal[],
+		unsigned int VTotal[],
 		double PixelClock[],
 		double VRatio[],
 		enum scan_direction_class SourceScan[],
-		int BlockHeight256BytesY[],
-		int BlockWidth256BytesY[],
-		int BlockHeight256BytesC[],
-		int BlockWidth256BytesC[],
-		int DCCYMaxUncompressedBlock[],
-		int DCCCMaxUncompressedBlock[],
-		int VActive[],
+		unsigned int BlockHeight256BytesY[],
+		unsigned int BlockWidth256BytesY[],
+		unsigned int BlockHeight256BytesC[],
+		unsigned int BlockWidth256BytesC[],
+		unsigned int DCCYMaxUncompressedBlock[],
+		unsigned int DCCCMaxUncompressedBlock[],
+		unsigned int VActive[],
 		bool DCCEnable[],
 		bool WritebackEnable[],
 		double ReadBandwidthPlaneLuma[],
@@ -539,32 +552,32 @@ static void CalculateSwathAndDETConfiguration(
 		enum scan_direction_class SourceScan[],
 		enum source_format_class SourcePixelFormat[],
 		enum dm_swizzle_mode SurfaceTiling[],
-		int ViewportWidth[],
-		int ViewportHeight[],
-		int SurfaceWidthY[],
-		int SurfaceWidthC[],
-		int SurfaceHeightY[],
-		int SurfaceHeightC[],
-		int Read256BytesBlockHeightY[],
-		int Read256BytesBlockHeightC[],
-		int Read256BytesBlockWidthY[],
-		int Read256BytesBlockWidthC[],
+		unsigned int ViewportWidth[],
+		unsigned int ViewportHeight[],
+		unsigned int SurfaceWidthY[],
+		unsigned int SurfaceWidthC[],
+		unsigned int SurfaceHeightY[],
+		unsigned int SurfaceHeightC[],
+		unsigned int Read256BytesBlockHeightY[],
+		unsigned int Read256BytesBlockHeightC[],
+		unsigned int Read256BytesBlockWidthY[],
+		unsigned int Read256BytesBlockWidthC[],
 		enum odm_combine_mode ODMCombineEnabled[],
-		int BlendingAndTiming[],
-		int BytePerPixY[],
-		int BytePerPixC[],
+		unsigned int BlendingAndTiming[],
+		unsigned int BytePerPixY[],
+		unsigned int BytePerPixC[],
 		double BytePerPixDETY[],
 		double BytePerPixDETC[],
-		int HActive[],
+		unsigned int HActive[],
 		double HRatio[],
 		double HRatioChroma[],
-		int DPPPerPlane[],
-		int swath_width_luma_ub[],
-		int swath_width_chroma_ub[],
+		unsigned int DPPPerPlane[],
+		unsigned int swath_width_luma_ub[],
+		unsigned int swath_width_chroma_ub[],
 		double SwathWidth[],
 		double SwathWidthChroma[],
-		int SwathHeightY[],
-		int SwathHeightC[],
+		unsigned int SwathHeightY[],
+		unsigned int SwathHeightC[],
 		unsigned int DETBufferSizeY[],
 		unsigned int DETBufferSizeC[],
 		bool ViewportSizeSupportPerPlane[],
@@ -574,31 +587,31 @@ static void CalculateSwathWidth(
 		int NumberOfActivePlanes,
 		enum source_format_class SourcePixelFormat[],
 		enum scan_direction_class SourceScan[],
-		int ViewportWidth[],
-		int ViewportHeight[],
-		int SurfaceWidthY[],
-		int SurfaceWidthC[],
-		int SurfaceHeightY[],
-		int SurfaceHeightC[],
+		unsigned int ViewportWidth[],
+		unsigned int ViewportHeight[],
+		unsigned int SurfaceWidthY[],
+		unsigned int SurfaceWidthC[],
+		unsigned int SurfaceHeightY[],
+		unsigned int SurfaceHeightC[],
 		enum odm_combine_mode ODMCombineEnabled[],
-		int BytePerPixY[],
-		int BytePerPixC[],
-		int Read256BytesBlockHeightY[],
-		int Read256BytesBlockHeightC[],
-		int Read256BytesBlockWidthY[],
-		int Read256BytesBlockWidthC[],
-		int BlendingAndTiming[],
-		int HActive[],
+		unsigned int BytePerPixY[],
+		unsigned int BytePerPixC[],
+		unsigned int Read256BytesBlockHeightY[],
+		unsigned int Read256BytesBlockHeightC[],
+		unsigned int Read256BytesBlockWidthY[],
+		unsigned int Read256BytesBlockWidthC[],
+		unsigned int BlendingAndTiming[],
+		unsigned int HActive[],
 		double HRatio[],
-		int DPPPerPlane[],
+		unsigned int DPPPerPlane[],
 		double SwathWidthSingleDPPY[],
 		double SwathWidthSingleDPPC[],
 		double SwathWidthY[],
 		double SwathWidthC[],
-		int MaximumSwathHeightY[],
-		int MaximumSwathHeightC[],
-		int swath_width_luma_ub[],
-		int swath_width_chroma_ub[]);
+		unsigned int MaximumSwathHeightY[],
+		unsigned int MaximumSwathHeightC[],
+		unsigned int swath_width_luma_ub[],
+		unsigned int swath_width_chroma_ub[]);
 
 static double CalculateExtraLatency(
 		int RoundTripPingLatencyCycles,
@@ -612,8 +625,8 @@ static double CalculateExtraLatency(
 		bool GPUVMEnable,
 		bool HostVMEnable,
 		int NumberOfActivePlanes,
-		int NumberOfDPP[],
-		int dpte_group_bytes[],
+		unsigned int NumberOfDPP[],
+		unsigned int dpte_group_bytes[],
 		double HostVMInefficiencyFactor,
 		double HostVMMinPageSize,
 		int HostVMMaxNonCachedPageTableLevels);
@@ -627,8 +640,8 @@ static double CalculateExtraLatencyBytes(
 		bool GPUVMEnable,
 		bool HostVMEnable,
 		int NumberOfActivePlanes,
-		int NumberOfDPP[],
-		int dpte_group_bytes[],
+		unsigned int NumberOfDPP[],
+		unsigned int dpte_group_bytes[],
 		double HostVMInefficiencyFactor,
 		double HostVMMinPageSize,
 		int HostVMMaxNonCachedPageTableLevels);
@@ -652,7 +665,7 @@ static void CalculateUnboundedRequestAndCompressedBufferSize(
 		int CompressedBufferSegmentSizeInkByteFinal,
 		enum output_encoder_class *Output,
 		bool *UnboundedRequestEnabled,
-		int *CompressedBufferSizeInkByte);
+		unsigned int *CompressedBufferSizeInkByte);
 
 static bool UnboundedRequest(enum unbounded_requesting_policy UseUnboundedRequestingFinal, int TotalNumberOfActiveDPP, bool NoChroma, enum output_encoder_class Output);
 
@@ -695,6 +708,8 @@ static unsigned int dscceComputeDelay(
 		pixelsPerClock = 1;
 	else if (pixelFormat == dm_n422)
 		pixelsPerClock = 2;
+	else if (Output == dm_hdmifrl)
+		pixelsPerClock = 2;
 	// #all other modes operate at 1 pixel per clock
 	else
 		pixelsPerClock = 1;
@@ -715,6 +730,8 @@ static unsigned int dscceComputeDelay(
 
 	//422 mode has an additional cycle of delay
 	if (pixelFormat == dm_420 || pixelFormat == dm_444 || pixelFormat == dm_n422)
+		s = 0;
+	else if (Output == dm_hdmifrl)
 		s = 0;
 	else
 		s = 1;
@@ -768,6 +785,25 @@ static unsigned int dscComputeDelay(enum output_format_class pixelFormat, enum o
 		//   sft
 		Delay = Delay + 1;
 	} else if (pixelFormat == dm_n422) {
+		//   sfr
+		Delay = Delay + 2;
+		//   dsccif
+		Delay = Delay + 1;
+		//   dscc - input deserializer
+		Delay = Delay + 5;
+		//  dscc - input cdc fifo
+		Delay = Delay + 25;
+		//   dscc - cdc uncertainty
+		Delay = Delay + 2;
+		//   dscc - output cdc fifo
+		Delay = Delay + 10;
+		//   dscc - cdc uncertainty
+		Delay = Delay + 2;
+		//   dscc - output serializer
+		Delay = Delay + 1;
+		//   sft
+		Delay = Delay + 1;
+	} else if (Output == dm_hdmifrl && pixelFormat != dm_444) {
 		//   sfr
 		Delay = Delay + 2;
 		//   dsccif
@@ -869,7 +905,7 @@ static bool CalculatePrefetchSchedule(
 		double *Tdmdl_vm,
 		double *Tdmdl,
 		double *TSetup,
-		int *VUpdateOffsetPix,
+		unsigned int *VUpdateOffsetPix,
 		double *VUpdateWidthPix,
 		double *VReadyOffsetPix)
 {
@@ -1818,19 +1854,19 @@ static unsigned int CalculateVMAndRowBytes(
 		unsigned int *MetaRowByte,
 		unsigned int *PixelPTEBytesPerRow,
 		bool *PTEBufferSizeNotExceeded,
-		int *dpte_row_width_ub,
+		unsigned int *dpte_row_width_ub,
 		unsigned int *dpte_row_height,
 		unsigned int *MetaRequestWidth,
 		unsigned int *MetaRequestHeight,
 		unsigned int *meta_row_width,
 		unsigned int *meta_row_height,
-		int *vm_group_bytes,
+		unsigned int *vm_group_bytes,
 		unsigned int *dpte_group_bytes,
 		unsigned int *PixelPTEReqWidth,
 		unsigned int *PixelPTEReqHeight,
 		unsigned int *PTERequestSize,
-		int *DPDE0BytesFrame,
-		int *MetaPTEBytesFrame)
+		unsigned int *DPDE0BytesFrame,
+		unsigned int *MetaPTEBytesFrame)
 {
 	(void)SourcePixelFormat;
 	struct vba_vars_st *v = &mode_lib->vba;
@@ -2242,6 +2278,8 @@ static void DISPCLKDPPCLKDCFCLKDeepSleepPrefetchParametersWatermarksAndPerforman
 			else if (v->OutputFormat[k] == dm_444)
 				v->DSCFormatFactor = 1;
 			else if (v->OutputFormat[k] == dm_n422)
+				v->DSCFormatFactor = 2;
+			else if (v->Output[k] == dm_hdmifrl)
 				v->DSCFormatFactor = 2;
 			else
 				v->DSCFormatFactor = 1;
@@ -3278,18 +3316,18 @@ static void DisplayPipeConfiguration(struct display_mode_lib *mode_lib)
 	// Display Pipe Configuration
 	double BytePerPixDETY[DC__NUM_DPP__MAX];
 	double BytePerPixDETC[DC__NUM_DPP__MAX];
-	int BytePerPixY[DC__NUM_DPP__MAX];
-	int BytePerPixC[DC__NUM_DPP__MAX];
-	int Read256BytesBlockHeightY[DC__NUM_DPP__MAX];
-	int Read256BytesBlockHeightC[DC__NUM_DPP__MAX];
-	int Read256BytesBlockWidthY[DC__NUM_DPP__MAX];
-	int Read256BytesBlockWidthC[DC__NUM_DPP__MAX];
+	unsigned int BytePerPixY[DC__NUM_DPP__MAX];
+	unsigned int BytePerPixC[DC__NUM_DPP__MAX];
+	unsigned int Read256BytesBlockHeightY[DC__NUM_DPP__MAX];
+	unsigned int Read256BytesBlockHeightC[DC__NUM_DPP__MAX];
+	unsigned int Read256BytesBlockWidthY[DC__NUM_DPP__MAX];
+	unsigned int Read256BytesBlockWidthC[DC__NUM_DPP__MAX];
 	double dummy1[DC__NUM_DPP__MAX];
 	double dummy2[DC__NUM_DPP__MAX];
 	double dummy3[DC__NUM_DPP__MAX];
 	double dummy4[DC__NUM_DPP__MAX];
-	int dummy5[DC__NUM_DPP__MAX];
-	int dummy6[DC__NUM_DPP__MAX];
+	unsigned int dummy5[DC__NUM_DPP__MAX];
+	unsigned int dummy6[DC__NUM_DPP__MAX];
 	bool dummy7[DC__NUM_DPP__MAX];
 	bool dummysinglestring;
 
@@ -3429,7 +3467,7 @@ static void CalculateVupdateAndDynamicMetadataParameters(
 		double *Tdmbf,
 		double *Tdmec,
 		double *Tdmsks,
-		int *VUpdateOffsetPix,
+		unsigned int *VUpdateOffsetPix,
 		double *VUpdateWidthPix,
 		double *VReadyOffsetPix)
 {
@@ -3615,19 +3653,41 @@ static double TruncToValidBPP(
 	int NonDSCBPP1;
 	int NonDSCBPP2;
 
+	enum frl_cap_chk_result hdmifrlresult = FRL_CAP_CHK_OK;
+	struct frl_cap_chk_params hdmifrlparams = { 0 };
+	struct frl_cap_chk_intermediates hdmifrlinter = { 0 };
+
+	hdmifrlparams.lanes = Lanes;
+	hdmifrlparams.f_pixel_clock_nominal = PixelClock * 1000000;
+	hdmifrlparams.r_bit_nominal = LinkBitRate * 1000000;
+	hdmifrlparams.layout = AudioLayout;
+	hdmifrlparams.f_audio = AudioRate * 1000;
+	hdmifrlparams.h_active = HActive;
+	hdmifrlparams.h_blank = HTotal - HActive;
+	hdmifrlparams.compressed = DSCEnable;
+	hdmifrlparams.slices = DSCSlices;
+	hdmifrlparams.slice_width = (int)dml_ceil((double) HActive / DSCSlices, 1.0);
+	hdmifrlparams.bpp_target = DesiredBPP;
+
 	if (Format == dm_420) {
 		NonDSCBPP0 = 12;
 		NonDSCBPP1 = 15;
 		NonDSCBPP2 = 18;
 		MinDSCBPP = 6;
 		MaxDSCBPP = 1.5 * DSCInputBitPerComponent - 1.0 / 16;
+		hdmifrlparams.pixel_encoding = HDMI_FRL_PIXEL_ENCODING_420;
+		hdmifrlparams.bpc = (int)(DesiredBPP * 2 / 3);
 	} else if (Format == dm_444) {
 		NonDSCBPP0 = 24;
 		NonDSCBPP1 = 30;
 		NonDSCBPP2 = 36;
 		MinDSCBPP = 8;
 		MaxDSCBPP = 3 * DSCInputBitPerComponent - 1.0 / 16;
+		hdmifrlparams.pixel_encoding = HDMI_FRL_PIXEL_ENCODING_444;
+	    hdmifrlparams.bpc = (int)(DesiredBPP / 3);
 	} else {
+		hdmifrlparams.pixel_encoding = HDMI_FRL_PIXEL_ENCODING_422;
+	    hdmifrlparams.bpc = (int)(DesiredBPP / 2);
 
 		NonDSCBPP0 = 16;
 		NonDSCBPP1 = 20;
@@ -3636,12 +3696,22 @@ static double TruncToValidBPP(
 		if (Format == dm_n422) {
 			MinDSCBPP = 7;
 			MaxDSCBPP = 2 * DSCInputBitPerComponent - 1.0 / 16.0;
+		} else if (Output == dm_hdmifrl) {
+			MinDSCBPP = 7;
+			MaxDSCBPP = 2 * DSCInputBitPerComponent - 1.0 / 16.0;
 		} else {
 			MinDSCBPP = 8;
 			MaxDSCBPP = 3 * DSCInputBitPerComponent - 1.0 / 16.0;
 		}
 	}
 
+	if (Output == dm_hdmifrl) {
+		hdmifrlresult = dml1_frl_cap_chk_inter(&hdmifrlparams, &hdmifrlinter);
+		MaxLinkBPP = (1 - hdmifrlinter.overhead_max)
+				* dml_min(
+						hdmifrlinter.r_frl_char_min * 16 * Lanes / hdmifrlinter.f_pixel_clock_max + 24 * TB_BORROWED_MAX / HActive,
+						(hdmifrlinter.r_frl_char_min * 16 * Lanes / hdmifrlinter.f_pixel_clock_max * HTotal - 16 * hdmifrlinter.blank_audio_min) / HActive);
+	} else
 	if (DSCEnable && Output == dm_dp) {
 		MaxLinkBPP = LinkBitRate / 10 * 8 * Lanes / PixelClock * (1 - 2.4 / 100);
 	} else {
@@ -3677,6 +3747,8 @@ static double TruncToValidBPP(
 	} else {
 		if (!((DSCEnable == false && (DesiredBPP == NonDSCBPP2 || DesiredBPP == NonDSCBPP1 || DesiredBPP <= NonDSCBPP0))
 				|| (DSCEnable && DesiredBPP >= MinDSCBPP && DesiredBPP <= MaxDSCBPP))) {
+			return BPP_INVALID;
+		} else if ((Output == dm_hdmifrl && hdmifrlresult != FRL_CAP_CHK_OK) || (Output != dm_hdmifrl && MaxLinkBPP < DesiredBPP)) {
 			return BPP_INVALID;
 		} else {
 			return DesiredBPP;
@@ -3783,7 +3855,7 @@ static noinline void CalculatePrefetchSchedulePerPlane(
 		&v->VReadyOffsetPix[k]);
 }
 
-static void PatchDETBufferSizeInKByte(unsigned int NumberOfActivePlanes, int NoOfDPPThisState[], unsigned int config_return_buffer_size_in_kbytes, unsigned int DETBufferSizeInKByte[])
+static void PatchDETBufferSizeInKByte(unsigned int NumberOfActivePlanes, unsigned int NoOfDPPThisState[], unsigned int config_return_buffer_size_in_kbytes, unsigned int DETBufferSizeInKByte[])
 {
 	int total_pipes = 0;
 	unsigned int i;
@@ -3804,7 +3876,7 @@ void dml31_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 	int idx;
 	unsigned int i, j, k, m;
 	int ReorderingBytes;
-	int MinPrefetchMode = 0, MaxPrefetchMode = 2;
+	unsigned int MinPrefetchMode = 0, MaxPrefetchMode = 2;
 	bool NoChroma = true;
 	bool EnoughWritebackUnits = true;
 	bool P2IWith420 = false;
@@ -4105,6 +4177,7 @@ void dml31_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 
 				if (v->ODMCombinePolicy == dm_odm_combine_policy_none
 						|| !(v->Output[k] == dm_dp ||
+						     v->Output[k] == dm_hdmifrl ||
 						     v->Output[k] == dm_dp2p0 ||
 						     v->Output[k] == dm_edp)) {
 					v->ODMCombineEnablePerState[i][k] = dm_odm_combine_mode_disabled;
@@ -4529,6 +4602,131 @@ void dml31_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 							// v->OutputTypeAndRatePerState[i][k] = v->Output[k] & " HBR3"
 						}
 					}
+				} else if (v->Output[k] == dm_hdmifrl) {
+					if (v->DSCEnable[k] == true) {
+						v->RequiresDSC[i][k] = true;
+						v->LinkDSCEnable = true;
+						v->RequiresFEC[i][k] = true;
+					} else {
+						v->RequiresDSC[i][k] = false;
+						v->LinkDSCEnable = false;
+						v->RequiresFEC[i][k] = false;
+					}
+					v->Outbpp = BPP_INVALID;
+					if (v->PHYCLKD18PerState[i] >= 3000.0 / 18) {
+						v->Outbpp = TruncToValidBPP(
+								3000,
+								3,
+								v->HTotal[k],
+								v->HActive[k],
+								v->PixelClockBackEnd[k],
+								v->ForcedOutputLinkBPP[k],
+								v->LinkDSCEnable,
+								v->Output[k],
+								v->OutputFormat[k],
+								v->DSCInputBitPerComponent[k],
+								v->NumberOfDSCSlices[k],
+								v->AudioSampleRate[k],
+								v->AudioSampleLayout[k],
+								v->ODMCombineEnablePerState[i][k]);
+						v->OutputBppPerState[i][k] = v->Outbpp;
+						//v->OutputTypeAndRatePerState[i][k] = v->Output[k] & "3x3";
+					}
+					if (v->Outbpp == BPP_INVALID && v->PHYCLKD18PerState[i] >= 6000.0 / 18) {
+						v->Outbpp = TruncToValidBPP(
+								6000,
+								3,
+								v->HTotal[k],
+								v->HActive[k],
+								v->PixelClockBackEnd[k],
+								v->ForcedOutputLinkBPP[k],
+								v->LinkDSCEnable,
+								v->Output[k],
+								v->OutputFormat[k],
+								v->DSCInputBitPerComponent[k],
+								v->NumberOfDSCSlices[k],
+								v->AudioSampleRate[k],
+								v->AudioSampleLayout[k],
+								v->ODMCombineEnablePerState[i][k]);
+						v->OutputBppPerState[i][k] = v->Outbpp;
+						//v->OutputTypeAndRatePerState[i][k] = v->Output[k] & "6x3";
+					}
+					if (v->Outbpp == BPP_INVALID && v->PHYCLKD18PerState[i] >= 6000.0 / 18) {
+						v->Outbpp = TruncToValidBPP(
+								6000,
+								4,
+								v->HTotal[k],
+								v->HActive[k],
+								v->PixelClockBackEnd[k],
+								v->ForcedOutputLinkBPP[k],
+								v->LinkDSCEnable,
+								v->Output[k],
+								v->OutputFormat[k],
+								v->DSCInputBitPerComponent[k],
+								v->NumberOfDSCSlices[k],
+								v->AudioSampleRate[k],
+								v->AudioSampleLayout[k],
+								v->ODMCombineEnablePerState[i][k]);
+						v->OutputBppPerState[i][k] = v->Outbpp;
+						//v->OutputTypeAndRatePerState[i][k] = v->Output[k] & "6x4";
+					}
+					if (v->Outbpp == BPP_INVALID && v->PHYCLKD18PerState[i] >= 8000.0 / 18) {
+						v->Outbpp = TruncToValidBPP(
+								8000,
+								4,
+								v->HTotal[k],
+								v->HActive[k],
+								v->PixelClockBackEnd[k],
+								v->ForcedOutputLinkBPP[k],
+								v->LinkDSCEnable,
+								v->Output[k],
+								v->OutputFormat[k],
+								v->DSCInputBitPerComponent[k],
+								v->NumberOfDSCSlices[k],
+								v->AudioSampleRate[k],
+								v->AudioSampleLayout[k],
+								v->ODMCombineEnablePerState[i][k]);
+						v->OutputBppPerState[i][k] = v->Outbpp;
+						//v->OutputTypeAndRatePerState(i, k) = v->Output[k] & "8x4";
+					}
+					if (v->Outbpp == BPP_INVALID && v->PHYCLKD18PerState[i] >= 10000.0 / 18) {
+						v->Outbpp = TruncToValidBPP(
+								10000,
+								4,
+								v->HTotal[k],
+								v->HActive[k],
+								v->PixelClockBackEnd[k],
+								v->ForcedOutputLinkBPP[k],
+								v->LinkDSCEnable,
+								v->Output[k],
+								v->OutputFormat[k],
+								v->DSCInputBitPerComponent[k],
+								v->NumberOfDSCSlices[k],
+								v->AudioSampleRate[k],
+								v->AudioSampleLayout[k],
+								v->ODMCombineEnablePerState[i][k]);
+						v->OutputBppPerState[i][k] = v->Outbpp;
+						//v->OutputTypeAndRatePerState[i][k] = v->Output[k] & "10x4";
+					}
+					if (v->Outbpp == BPP_INVALID && v->PHYCLKD18PerState[i] >= 12000.0 / 18) {
+						v->Outbpp = TruncToValidBPP(
+								12000,
+								4,
+								v->HTotal[k],
+								v->HActive[k],
+								v->PixelClockBackEnd[k],
+								v->ForcedOutputLinkBPP[k],
+								v->LinkDSCEnable,
+								v->Output[k],
+								v->OutputFormat[k],
+								v->DSCInputBitPerComponent[k],
+								v->NumberOfDSCSlices[k],
+								v->AudioSampleRate[k],
+								v->AudioSampleLayout[k],
+								v->ODMCombineEnablePerState[i][k]);
+						v->OutputBppPerState[i][k] = v->Outbpp;
+						//v->OutputTypeAndRatePerState[i][k] = v->Output[k] & "12x4";
+					}
 				}
 			} else {
 				v->OutputBppPerState[i][k] = 0;
@@ -4542,6 +4740,7 @@ void dml31_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 			if (v->BlendingAndTiming[k] == k
 					&& (v->Output[k] == dm_dp ||
 					    v->Output[k] == dm_edp ||
+					    v->Output[k] == dm_hdmifrl ||
 					    v->Output[k] == dm_hdmi) && v->OutputBppPerState[i][k] == 0) {
 				v->LinkCapacitySupport[i] = false;
 			}
@@ -4553,6 +4752,7 @@ void dml31_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 		if (v->BlendingAndTiming[k] == k
 				&& (v->Output[k] == dm_dp ||
 				    v->Output[k] == dm_edp ||
+				    v->Output[k] == dm_hdmifrl ||
 				    v->Output[k] == dm_hdmi)) {
 			if (v->OutputFormat[k] == dm_420 && v->Interlace[k] == 1 && v->ProgressiveToInterlaceUnitInOPP == true) {
 				P2IWith420 = true;
@@ -4565,10 +4765,30 @@ void dml31_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 	}
 
 	for (i = 0; i < v->soc.num_states; ++i) {
+		v->DTBCLKRequiredMoreThanSupported[i] = false;
+		for (k = 0; k < v->NumberOfActivePlanes; ++k) {
+			if (v->BlendingAndTiming[k] == k && v->Output[k] == dm_hdmifrl
+					&& RequiredDTBCLK(
+							v->RequiresDSC[i][k],
+							v->PixelClockBackEnd[k],
+							v->OutputFormat[k],
+							v->OutputBppPerState[i][k],
+							v->NumberOfDSCSlices[k],
+							v->HTotal[k],
+							v->HActive[k],
+							v->AudioSampleRate[k],
+							v->AudioSampleLayout[k]) > v->DTBCLKPerState[i]) {
+				v->DTBCLKRequiredMoreThanSupported[i] = true;
+			}
+		}
+	}
+
+	for (i = 0; i < v->soc.num_states; ++i) {
 		v->ODMCombine4To1SupportCheckOK[i] = true;
 		for (k = 0; k < v->NumberOfActivePlanes; ++k) {
 			if (v->BlendingAndTiming[k] == k && v->ODMCombineEnablePerState[i][k] == dm_odm_combine_mode_4to1
 					&& (v->ODMCombine4To1Supported == false || v->Output[k] == dm_dp || v->Output[k] == dm_edp
+							|| (v->Output[k] == dm_hdmifrl && v->DSCEnable[k] == false)
 							|| v->Output[k] == dm_hdmi)) {
 				v->ODMCombine4To1SupportCheckOK[i] = false;
 			}
@@ -5119,7 +5339,7 @@ void dml31_ModeSupportAndSystemConfigurationFull(struct display_mode_lib *mode_l
 			double HostVMInefficiencyFactor = 1;
 			int NextPrefetchModeState = MinPrefetchMode;
 			bool UnboundedRequestEnabledThisState = false;
-			int CompressedBufferSizeInkByteThisState = 0;
+			unsigned int CompressedBufferSizeInkByteThisState = 0;
 			double dummy;
 
 			v->TimeCalc = 24 / v->ProjectedDCFCLKDeepSleep[i][j];
@@ -5774,8 +5994,8 @@ static void CalculateWatermarksAndDRAMSpeedChangeSupport(
 static void CalculateDCFCLKDeepSleep(
 		struct display_mode_lib *mode_lib,
 		unsigned int NumberOfActivePlanes,
-		int BytePerPixelY[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelY[],
+		unsigned int BytePerPixelC[],
 		double VRatio[],
 		double VRatioChroma[],
 		double SwathWidthY[],
@@ -5926,7 +6146,7 @@ static void CalculatePixelDeliveryTimes(
 		double PSCL_THROUGHPUT[],
 		double PSCL_THROUGHPUT_CHROMA[],
 		double DPPCLK[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelC[],
 		enum scan_direction_class SourceScan[],
 		unsigned int NumberOfCursors[],
 		unsigned int CursorWidth[][DC__NUM_CURSOR__MAX],
@@ -6050,35 +6270,35 @@ static void CalculateMetaAndPTETimes(
 		bool GPUVMEnable,
 		int MetaChunkSize,
 		int MinMetaChunkSizeBytes,
-		int HTotal[],
+		unsigned int HTotal[],
 		double VRatio[],
 		double VRatioChroma[],
 		double DestinationLinesToRequestRowInVBlank[],
 		double DestinationLinesToRequestRowInImmediateFlip[],
 		bool DCCEnable[],
 		double PixelClock[],
-		int BytePerPixelY[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelY[],
+		unsigned int BytePerPixelC[],
 		enum scan_direction_class SourceScan[],
-		int dpte_row_height[],
-		int dpte_row_height_chroma[],
-		int meta_row_width[],
-		int meta_row_width_chroma[],
-		int meta_row_height[],
-		int meta_row_height_chroma[],
-		int meta_req_width[],
-		int meta_req_width_chroma[],
-		int meta_req_height[],
-		int meta_req_height_chroma[],
-		int dpte_group_bytes[],
-		int PTERequestSizeY[],
-		int PTERequestSizeC[],
-		int PixelPTEReqWidthY[],
-		int PixelPTEReqHeightY[],
-		int PixelPTEReqWidthC[],
-		int PixelPTEReqHeightC[],
-		int dpte_row_width_luma_ub[],
-		int dpte_row_width_chroma_ub[],
+		unsigned int dpte_row_height[],
+		unsigned int dpte_row_height_chroma[],
+		unsigned int meta_row_width[],
+		unsigned int meta_row_width_chroma[],
+		unsigned int meta_row_height[],
+		unsigned int meta_row_height_chroma[],
+		unsigned int meta_req_width[],
+		unsigned int meta_req_width_chroma[],
+		unsigned int meta_req_height[],
+		unsigned int meta_req_height_chroma[],
+		unsigned int dpte_group_bytes[],
+		unsigned int PTERequestSizeY[],
+		unsigned int PTERequestSizeC[],
+		unsigned int PixelPTEReqWidthY[],
+		unsigned int PixelPTEReqHeightY[],
+		unsigned int PixelPTEReqWidthC[],
+		unsigned int PixelPTEReqHeightC[],
+		unsigned int dpte_row_width_luma_ub[],
+		unsigned int dpte_row_width_chroma_ub[],
 		double DST_Y_PER_PTE_ROW_NOM_L[],
 		double DST_Y_PER_PTE_ROW_NOM_C[],
 		double DST_Y_PER_META_ROW_NOM_L[],
@@ -6223,18 +6443,18 @@ static void CalculateVMGroupAndRequestTimes(
 		bool GPUVMEnable,
 		unsigned int GPUVMMaxPageTableLevels,
 		unsigned int HTotal[],
-		int BytePerPixelC[],
+		unsigned int BytePerPixelC[],
 		double DestinationLinesToRequestVMInVBlank[],
 		double DestinationLinesToRequestVMInImmediateFlip[],
 		bool DCCEnable[],
 		double PixelClock[],
-		int dpte_row_width_luma_ub[],
-		int dpte_row_width_chroma_ub[],
-		int vm_group_bytes[],
+		unsigned int dpte_row_width_luma_ub[],
+		unsigned int dpte_row_width_chroma_ub[],
+		unsigned int vm_group_bytes[],
 		unsigned int dpde0_bytes_per_frame_ub_l[],
 		unsigned int dpde0_bytes_per_frame_ub_c[],
-		int meta_pte_bytes_per_frame_ub_l[],
-		int meta_pte_bytes_per_frame_ub_c[],
+		unsigned int meta_pte_bytes_per_frame_ub_l[],
+		unsigned int meta_pte_bytes_per_frame_ub_c[],
 		double TimePerVMGroupVBlank[],
 		double TimePerVMGroupFlip[],
 		double TimePerVMRequestVBlank[],
@@ -6342,29 +6562,29 @@ static void CalculateStutterEfficiency(
 		bool ProgressiveToInterlaceUnitInOPP,
 		bool Interlace[],
 		double MinTTUVBlank[],
-		int DPPPerPlane[],
+		unsigned int DPPPerPlane[],
 		unsigned int DETBufferSizeY[],
-		int BytePerPixelY[],
+		unsigned int BytePerPixelY[],
 		double BytePerPixelDETY[],
 		double SwathWidthY[],
-		int SwathHeightY[],
-		int SwathHeightC[],
+		unsigned int SwathHeightY[],
+		unsigned int SwathHeightC[],
 		double NetDCCRateLuma[],
 		double NetDCCRateChroma[],
 		double DCCFractionOfZeroSizeRequestsLuma[],
 		double DCCFractionOfZeroSizeRequestsChroma[],
-		int HTotal[],
-		int VTotal[],
+		unsigned int HTotal[],
+		unsigned int VTotal[],
 		double PixelClock[],
 		double VRatio[],
 		enum scan_direction_class SourceScan[],
-		int BlockHeight256BytesY[],
-		int BlockWidth256BytesY[],
-		int BlockHeight256BytesC[],
-		int BlockWidth256BytesC[],
-		int DCCYMaxUncompressedBlock[],
-		int DCCCMaxUncompressedBlock[],
-		int VActive[],
+		unsigned int BlockHeight256BytesY[],
+		unsigned int BlockWidth256BytesY[],
+		unsigned int BlockHeight256BytesC[],
+		unsigned int BlockWidth256BytesC[],
+		unsigned int DCCYMaxUncompressedBlock[],
+		unsigned int DCCCMaxUncompressedBlock[],
+		unsigned int VActive[],
 		bool DCCEnable[],
 		bool WritebackEnable[],
 		double ReadBandwidthPlaneLuma[],
@@ -6649,42 +6869,42 @@ static void CalculateSwathAndDETConfiguration(
 		enum scan_direction_class SourceScan[],
 		enum source_format_class SourcePixelFormat[],
 		enum dm_swizzle_mode SurfaceTiling[],
-		int ViewportWidth[],
-		int ViewportHeight[],
-		int SurfaceWidthY[],
-		int SurfaceWidthC[],
-		int SurfaceHeightY[],
-		int SurfaceHeightC[],
-		int Read256BytesBlockHeightY[],
-		int Read256BytesBlockHeightC[],
-		int Read256BytesBlockWidthY[],
-		int Read256BytesBlockWidthC[],
+		unsigned int ViewportWidth[],
+		unsigned int ViewportHeight[],
+		unsigned int SurfaceWidthY[],
+		unsigned int SurfaceWidthC[],
+		unsigned int SurfaceHeightY[],
+		unsigned int SurfaceHeightC[],
+		unsigned int Read256BytesBlockHeightY[],
+		unsigned int Read256BytesBlockHeightC[],
+		unsigned int Read256BytesBlockWidthY[],
+		unsigned int Read256BytesBlockWidthC[],
 		enum odm_combine_mode ODMCombineEnabled[],
-		int BlendingAndTiming[],
-		int BytePerPixY[],
-		int BytePerPixC[],
+		unsigned int BlendingAndTiming[],
+		unsigned int BytePerPixY[],
+		unsigned int BytePerPixC[],
 		double BytePerPixDETY[],
 		double BytePerPixDETC[],
-		int HActive[],
+		unsigned int HActive[],
 		double HRatio[],
 		double HRatioChroma[],
-		int DPPPerPlane[],
-		int swath_width_luma_ub[],
-		int swath_width_chroma_ub[],
+		unsigned int DPPPerPlane[],
+		unsigned int swath_width_luma_ub[],
+		unsigned int swath_width_chroma_ub[],
 		double SwathWidth[],
 		double SwathWidthChroma[],
-		int SwathHeightY[],
-		int SwathHeightC[],
+		unsigned int SwathHeightY[],
+		unsigned int SwathHeightC[],
 		unsigned int DETBufferSizeY[],
 		unsigned int DETBufferSizeC[],
 		bool ViewportSizeSupportPerPlane[],
 		bool *ViewportSizeSupport)
 {
 	(void)HRatioChroma;
-	int MaximumSwathHeightY[DC__NUM_DPP__MAX];
-	int MaximumSwathHeightC[DC__NUM_DPP__MAX];
-	int MinimumSwathHeightY;
-	int MinimumSwathHeightC;
+	unsigned int MaximumSwathHeightY[DC__NUM_DPP__MAX];
+	unsigned int MaximumSwathHeightC[DC__NUM_DPP__MAX];
+	unsigned int MinimumSwathHeightY;
+	unsigned int MinimumSwathHeightC;
 	unsigned int RoundedUpMaxSwathSizeBytesY;
 	unsigned int RoundedUpMaxSwathSizeBytesC;
 	unsigned int RoundedUpMinSwathSizeBytesY;
@@ -6829,31 +7049,31 @@ static void CalculateSwathWidth(
 		int NumberOfActivePlanes,
 		enum source_format_class SourcePixelFormat[],
 		enum scan_direction_class SourceScan[],
-		int ViewportWidth[],
-		int ViewportHeight[],
-		int SurfaceWidthY[],
-		int SurfaceWidthC[],
-		int SurfaceHeightY[],
-		int SurfaceHeightC[],
+		unsigned int ViewportWidth[],
+		unsigned int ViewportHeight[],
+		unsigned int SurfaceWidthY[],
+		unsigned int SurfaceWidthC[],
+		unsigned int SurfaceHeightY[],
+		unsigned int SurfaceHeightC[],
 		enum odm_combine_mode ODMCombineEnabled[],
-		int BytePerPixY[],
-		int BytePerPixC[],
-		int Read256BytesBlockHeightY[],
-		int Read256BytesBlockHeightC[],
-		int Read256BytesBlockWidthY[],
-		int Read256BytesBlockWidthC[],
-		int BlendingAndTiming[],
-		int HActive[],
+		unsigned int BytePerPixY[],
+		unsigned int BytePerPixC[],
+		unsigned int Read256BytesBlockHeightY[],
+		unsigned int Read256BytesBlockHeightC[],
+		unsigned int Read256BytesBlockWidthY[],
+		unsigned int Read256BytesBlockWidthC[],
+		unsigned int BlendingAndTiming[],
+		unsigned int HActive[],
 		double HRatio[],
-		int DPPPerPlane[],
+		unsigned int DPPPerPlane[],
 		double SwathWidthSingleDPPY[],
 		double SwathWidthSingleDPPC[],
 		double SwathWidthY[],
 		double SwathWidthC[],
-		int MaximumSwathHeightY[],
-		int MaximumSwathHeightC[],
-		int swath_width_luma_ub[],
-		int swath_width_chroma_ub[])
+		unsigned int MaximumSwathHeightY[],
+		unsigned int MaximumSwathHeightC[],
+		unsigned int swath_width_luma_ub[],
+		unsigned int swath_width_chroma_ub[])
 {
 	(void)BytePerPixY;
 	enum odm_combine_mode MainPlaneODMCombine;
@@ -6960,8 +7180,8 @@ static double CalculateExtraLatency(
 		bool GPUVMEnable,
 		bool HostVMEnable,
 		int NumberOfActivePlanes,
-		int NumberOfDPP[],
-		int dpte_group_bytes[],
+		unsigned int NumberOfDPP[],
+		unsigned int dpte_group_bytes[],
 		double HostVMInefficiencyFactor,
 		double HostVMMinPageSize,
 		int HostVMMaxNonCachedPageTableLevels)
@@ -7006,8 +7226,8 @@ static double CalculateExtraLatencyBytes(
 		bool GPUVMEnable,
 		bool HostVMEnable,
 		int NumberOfActivePlanes,
-		int NumberOfDPP[],
-		int dpte_group_bytes[],
+		unsigned int NumberOfDPP[],
+		unsigned int dpte_group_bytes[],
 		double HostVMInefficiencyFactor,
 		double HostVMMinPageSize,
 		int HostVMMaxNonCachedPageTableLevels)
@@ -7055,13 +7275,36 @@ static double CalculateUrgentLatency(
 	return ret;
 }
 
+static double RequiredDTBCLK(
+		bool DSCEnable,
+		double PixelClock,
+		enum output_format_class OutputFormat,
+		double OutputBPP,
+		int DSCSlices,
+		int HTotal,
+		int HActive,
+		int AudioRate,
+		int AudioLayout)
+{
+	if (DSCEnable != true) {
+		return dml_max(PixelClock / 4.0 * OutputBPP / 24.0, 25.0);
+	} else {
+		double PixelWordRate = PixelClock / (OutputFormat == dm_444 ? 1 : 2);
+		double HCActive = dml_ceil(DSCSlices * dml_ceil(OutputBPP * dml_ceil(HActive / DSCSlices, 1) / 8.0, 1) / 3.0, 1);
+		double HCBlank = 64 + 32 * dml_ceil(AudioRate * (AudioLayout == 1 ? 1.0 : 0.25) * HTotal / (PixelClock * 1000), 1);
+		double AverageTribyteRate = PixelWordRate * (HCActive + HCBlank) / HTotal;
+		double HActiveTribyteRate = PixelWordRate * HCActive / HActive;
+		return dml_max4(PixelWordRate / 4.0, AverageTribyteRate / 4.0, HActiveTribyteRate / 4.0, 25.0) * 1.002;
+	}
+}
+
 static noinline_for_stack void UseMinimumDCFCLK(
 		struct display_mode_lib *mode_lib,
 		int MaxPrefetchMode,
 		int ReorderingBytes)
 {
 	struct vba_vars_st *v = &mode_lib->vba;
-	int dummy1;
+	unsigned int dummy1;
 	unsigned int j, k;
 	unsigned int i;
 	double NormalEfficiency,  dummy2, dummy3;
@@ -7081,7 +7324,7 @@ static noinline_for_stack void UseMinimumDCFCLK(
 			double ExtraLatencyBytes;
 			double ExtraLatencyCycles;
 			double DCFCLKRequiredForPeakBandwidth;
-			int NoOfDPPState[DC__NUM_DPP__MAX];
+			unsigned int NoOfDPPState[DC__NUM_DPP__MAX];
 			double MinimumTvmPlus2Tr0;
 
 			TotalMaxPrefetchFlipDPTERowBandwidth[i][j] = 0;
@@ -7226,7 +7469,7 @@ static void CalculateUnboundedRequestAndCompressedBufferSize(
 		int CompressedBufferSegmentSizeInkByteFinal,
 		enum output_encoder_class *Output,
 		bool *UnboundedRequestEnabled,
-		int *CompressedBufferSizeInkByte)
+		unsigned int *CompressedBufferSizeInkByte)
 {
 	double actDETBufferSizeInKByte = dml_ceil(DETBufferSizeInKByte, 64);
 
@@ -7244,7 +7487,7 @@ static void CalculateUnboundedRequestAndCompressedBufferSize(
 	dml_print("DML::%s: UseUnboundedRequestingFinal = %d\n", __func__, UseUnboundedRequestingFinal);
 	dml_print("DML::%s: actDETBufferSizeInKByte = %f\n", __func__, actDETBufferSizeInKByte);
 	dml_print("DML::%s: UnboundedRequestEnabled = %d\n", __func__, *UnboundedRequestEnabled);
-	dml_print("DML::%s: CompressedBufferSizeInkByte = %d\n", __func__, *CompressedBufferSizeInkByte);
+	dml_print("DML::%s: CompressedBufferSizeInkByte = %u\n", __func__, *CompressedBufferSizeInkByte);
 #endif
 }
 

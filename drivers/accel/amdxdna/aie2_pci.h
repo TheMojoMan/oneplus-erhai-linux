@@ -15,8 +15,9 @@
 #include "amdxdna_mailbox.h"
 
 /* Firmware determines device memory base address and size */
-#define AIE2_DEVM_BASE	0x4000000
-#define AIE2_DEVM_SIZE	SZ_64M
+#define AIE2_DEVM_BASE		0x4000000
+#define AIE2_DEVM_SIZE		SZ_64M
+#define AIE2_DEVM_MAX_SIZE	SZ_512M
 
 #define NDEV2PDEV(ndev) (to_pci_dev((ndev)->aie.xdna->ddev.dev))
 
@@ -76,29 +77,6 @@ struct amdxdna_client;
 struct amdxdna_fw_ver;
 struct amdxdna_hwctx;
 struct amdxdna_sched_job;
-
-struct aie_version {
-	u16 major;
-	u16 minor;
-};
-
-struct aie_tile_metadata {
-	u16 row_count;
-	u16 row_start;
-	u16 dma_channel_count;
-	u16 lock_count;
-	u16 event_reg_count;
-};
-
-struct aie_metadata {
-	u32 size;
-	u16 cols;
-	u16 rows;
-	struct aie_version version;
-	struct aie_tile_metadata core;
-	struct aie_tile_metadata mem;
-	struct aie_tile_metadata shim;
-};
 
 enum rt_config_category {
 	AIE2_RT_CFG_INIT,
@@ -177,8 +155,7 @@ struct amdxdna_dev_hdl {
 	void			__iomem *mbox_base;
 
 	u32				total_col;
-	struct aie_version		version;
-	struct aie_metadata		metadata;
+	struct amdxdna_drm_query_aie_version version;
 	struct aie2_exec_msg_ops	*exec_msg_ops;
 
 	/* power management and clock*/
@@ -222,6 +199,7 @@ enum aie2_fw_feature {
 	AIE2_PREEMPT,
 	AIE2_TEMPORAL_ONLY,
 	AIE2_APP_HEALTH,
+	AIE2_ADD_HOST_BUFFER,
 	AIE2_UPDATE_PROPERTY,
 	AIE2_GET_DEV_REVISION,
 	AIE2_FEATURE_MAX
@@ -283,8 +261,10 @@ int aie2_resume_fw(struct amdxdna_dev_hdl *ndev);
 int aie2_set_runtime_cfg(struct amdxdna_dev_hdl *ndev, u32 type, u64 value);
 int aie2_get_runtime_cfg(struct amdxdna_dev_hdl *ndev, u32 type, u64 *value);
 int aie2_assign_mgmt_pasid(struct amdxdna_dev_hdl *ndev, u16 pasid);
-int aie2_query_aie_version(struct amdxdna_dev_hdl *ndev, struct aie_version *version);
-int aie2_query_aie_metadata(struct amdxdna_dev_hdl *ndev, struct aie_metadata *metadata);
+int aie2_query_aie_version(struct amdxdna_dev_hdl *ndev,
+			   struct amdxdna_drm_query_aie_version *version);
+int aie2_query_aie_metadata(struct amdxdna_dev_hdl *ndev,
+			    struct amdxdna_drm_query_aie_metadata *metadata);
 int aie2_query_firmware_version(struct amdxdna_dev_hdl *ndev,
 				struct amdxdna_fw_ver *fw_ver);
 int aie2_query_app_health(struct amdxdna_dev_hdl *ndev, u32 context_id,
@@ -293,6 +273,7 @@ int aie2_get_dev_revision(struct amdxdna_dev_hdl *ndev, enum aie2_dev_revision *
 int aie2_create_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_hwctx *hwctx);
 int aie2_destroy_context(struct amdxdna_dev_hdl *ndev, struct amdxdna_hwctx *hwctx);
 int aie2_map_host_buf(struct amdxdna_dev_hdl *ndev, u32 context_id, u64 addr, u64 size);
+int aie2_add_host_buf(struct amdxdna_dev_hdl *ndev, u32 context_id, u64 addr, u64 size);
 int aie2_query_status(struct amdxdna_dev_hdl *ndev, char __user *buf, u32 size, u32 *cols_filled);
 int aie2_query_telemetry(struct amdxdna_dev_hdl *ndev,
 			 char __user *buf, u32 size,
@@ -314,10 +295,6 @@ int aie2_sync_bo(struct amdxdna_hwctx *hwctx, struct amdxdna_sched_job *job,
 int aie2_config_debug_bo(struct amdxdna_hwctx *hwctx, struct amdxdna_sched_job *job,
 			 int (*notify_cb)(void *, void __iomem *, size_t));
 int aie2_update_prop_time_quota(struct amdxdna_dev_hdl *ndev, u32 us);
-void *aie2_alloc_msg_buffer(struct amdxdna_dev_hdl *ndev, u32 *size,
-			    dma_addr_t *dma_addr);
-void aie2_free_msg_buffer(struct amdxdna_dev_hdl *ndev, size_t size,
-			  void *cpu_addr, dma_addr_t dma_addr);
 
 /* aie2_hwctx.c */
 int aie2_hwctx_init(struct amdxdna_hwctx *hwctx);
@@ -328,5 +305,6 @@ void aie2_hwctx_suspend(struct amdxdna_client *client);
 int aie2_hwctx_resume(struct amdxdna_client *client);
 int aie2_cmd_submit(struct amdxdna_hwctx *hwctx, struct amdxdna_sched_job *job, u64 *seq);
 void aie2_hmm_invalidate(struct amdxdna_gem_obj *abo, unsigned long cur_seq);
+int aie2_hwctx_heap_expand(struct amdxdna_hwctx *hwctx, struct amdxdna_gem_obj *heap);
 
 #endif /* _AIE2_PCI_H_ */

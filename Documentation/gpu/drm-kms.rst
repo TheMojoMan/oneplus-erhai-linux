@@ -1,3 +1,6 @@
+
+.. _drm-kms:
+
 =========================
 Kernel Mode Setting (KMS)
 =========================
@@ -14,6 +17,8 @@ be setup by initializing the following fields.
 
 -  struct drm_mode_config_funcs \*funcs;
    Mode setting functions.
+
+.. contents::
 
 Overview
 ========

@@ -584,6 +584,7 @@ struct intel_connector {
 
 		struct {
 			u8 dpcd[EDP_PSR_RECEIVER_CAP_SIZE];
+			u8 intel_wa_dpcd;
 
 			bool support;
 			bool su_support;
@@ -1034,6 +1035,7 @@ struct intel_crtc_state {
 		/* logical state of LUTs */
 		struct drm_property_blob *degamma_lut, *gamma_lut, *ctm;
 		struct drm_display_mode mode, pipe_mode, adjusted_mode;
+		u32 background_color;
 		enum drm_scaling_filter scaling_filter;
 		u8 sharpness_strength;
 	} hw;
@@ -1662,7 +1664,7 @@ struct intel_plane {
 	container_of_const((fb), struct intel_framebuffer, base)
 
 struct intel_hdmi {
-	i915_reg_t hdmi_reg;
+	intel_reg_t hdmi_reg;
 	struct {
 		enum drm_dp_dual_mode_type type;
 		int max_tmds_clock;
@@ -1789,10 +1791,12 @@ struct intel_psr {
 	u8 active_non_psr_pipes;
 
 	const char *no_psr_reason;
+
+	struct ref_tracker *vblank_wakeref;
 };
 
 struct intel_dp {
-	i915_reg_t output_reg;
+	intel_reg_t output_reg;
 	u32 DP;
 	int link_rate;
 	u8 lane_count;
@@ -1819,6 +1823,7 @@ struct intel_dp {
 	/* intersection of source and sink rates */
 	int num_common_rates;
 	int common_rates[DP_MAX_SUPPORTED_RATES];
+	int max_common_lane_count;
 	struct {
 		/* TODO: move the rest of link specific fields to here */
 		bool active;
@@ -1871,6 +1876,7 @@ struct intel_dp {
 	/* connector directly attached - won't be use for modeset in mst world */
 	struct intel_connector *attached_connector;
 	bool as_sdp_supported;
+	bool as_sdp_v2_supported;
 
 	struct drm_dp_tunnel *tunnel;
 	bool tunnel_suspended:1;
@@ -1889,8 +1895,8 @@ struct intel_dp {
 	u32 (*get_aux_send_ctl)(struct intel_dp *dp, int send_bytes,
 				u32 aux_clock_divider);
 
-	i915_reg_t (*aux_ch_ctl_reg)(struct intel_dp *dp);
-	i915_reg_t (*aux_ch_data_reg)(struct intel_dp *dp, int index);
+	intel_reg_t (*aux_ch_ctl_reg)(struct intel_dp *dp);
+	intel_reg_t (*aux_ch_data_reg)(struct intel_dp *dp, int index);
 
 	/* This is called before a link training is starterd */
 	void (*prepare_link_retrain)(struct intel_dp *intel_dp,
@@ -2117,7 +2123,7 @@ static inline bool intel_encoder_is_dp(struct intel_encoder *encoder)
 		return true;
 	case INTEL_OUTPUT_DDI:
 		/* Skip pure HDMI/DVI DDI encoders */
-		return i915_mmio_reg_valid(enc_to_intel_dp(encoder)->output_reg);
+		return intel_reg_valid(enc_to_intel_dp(encoder)->output_reg);
 	default:
 		return false;
 	}
@@ -2130,7 +2136,7 @@ static inline bool intel_encoder_is_hdmi(struct intel_encoder *encoder)
 		return true;
 	case INTEL_OUTPUT_DDI:
 		/* See if the HDMI encoder is valid. */
-		return i915_mmio_reg_valid(enc_to_intel_hdmi(encoder)->hdmi_reg);
+		return intel_reg_valid(enc_to_intel_hdmi(encoder)->hdmi_reg);
 	default:
 		return false;
 	}

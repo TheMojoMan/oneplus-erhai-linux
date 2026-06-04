@@ -147,7 +147,7 @@ static void update_dsc_on_stream(struct pipe_ctx *pipe_ctx, bool enable)
 
 // Given any pipe_ctx, return the total ODM combine factor, and optionally return
 // the OPPids which are used
-static unsigned int get_odm_config(struct pipe_ctx *pipe_ctx, unsigned int *opp_instances)
+static unsigned int get_odm_config(struct pipe_ctx *pipe_ctx, int *opp_instances)
 {
 	unsigned int opp_count = 1;
 	struct pipe_ctx *odm_pipe;
@@ -335,7 +335,8 @@ unsigned int dcn314_calculate_dccg_k1_k2_values(struct pipe_ctx *pipe_ctx, unsig
 	two_pix_per_container = pipe_ctx->stream_res.tg->funcs->is_two_pixels_per_container(&stream->timing);
 	odm_combine_factor = get_odm_config(pipe_ctx, NULL);
 
-	if (stream->ctx->dc->link_srv->dp_is_128b_132b_signal(pipe_ctx)) {
+	if (dc_is_hdmi_frl_signal(pipe_ctx->stream->signal) ||
+			stream->ctx->dc->link_srv->dp_is_128b_132b_signal(pipe_ctx)) {
 		*k1_div = PIXEL_RATE_DIV_BY_1;
 		*k2_div = PIXEL_RATE_DIV_BY_1;
 	} else if (dc_is_hdmi_tmds_signal(pipe_ctx->stream->signal) || dc_is_dvi_signal(pipe_ctx->stream->signal)) {
