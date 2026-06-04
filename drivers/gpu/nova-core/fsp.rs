@@ -257,7 +257,8 @@ impl Fsp {
     }
 
     /// Sends a message to FSP and waits for the response.
-    fn send_sync_fsp<M>(&mut self, dev: &device::Device, bar: Bar0<'_>, msg: &M) -> Result
+    /// Returns the full response buffer on success.
+    fn send_sync_fsp<M>(&mut self, dev: &device::Device, bar: Bar0<'_>, msg: &M) -> Result<KVec<u8>>
     where
         M: MessageToFsp,
     {
@@ -315,7 +316,7 @@ impl Fsp {
             return Err(EIO);
         }
 
-        Ok(())
+        Ok(response_buf)
     }
 
     /// Boots GSP FMC via FSP Chain of Trust.
@@ -336,7 +337,7 @@ impl Fsp {
             GFP_KERNEL,
         )?;
 
-        self.send_sync_fsp(dev, bar, &*msg)?;
+        let _response_buf = self.send_sync_fsp(dev, bar, &*msg)?;
 
         dev_dbg!(dev, "FSP Chain of Trust completed successfully\n");
         Ok(())
