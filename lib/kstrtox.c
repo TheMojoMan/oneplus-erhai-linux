@@ -45,6 +45,7 @@ const char *_parse_integer_fixup_radix(const char *s, unsigned int *base)
  * @base: Radix
  * @p: Where to store result
  * @max_chars: Maximum amount of characters to convert
+ * @init: Initial value of the multiply-accumulate result
  *
  * Convert non-negative integer string representation in explicitly given
  * radix to an integer. If overflow occurs, value at @p is set to ULLONG_MAX.
@@ -56,12 +57,12 @@ const char *_parse_integer_fixup_radix(const char *s, unsigned int *base)
  */
 noinline
 unsigned int _parse_integer_limit(const char *s, unsigned int base, unsigned long long *p,
-				  size_t max_chars)
+				  size_t max_chars, unsigned long long init)
 {
 	unsigned int rv, overflow = 0;
 	unsigned long long res;
 
-	res = 0;
+	res = init;
 	for (rv = 0; rv < max_chars; rv++, s++) {
 		unsigned int c = *s;
 		unsigned int lc = _tolower(c);
