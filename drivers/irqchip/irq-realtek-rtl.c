@@ -175,64 +175,72 @@ out:
 
 static int __init realtek_setup_parents(struct device_node *node)
 {
-	int err, parent_irq, num_parents = of_irq_count(node);
+	int p, cnt, err, parent_irq, num_parents = of_irq_count(node);
 	struct realtek_ictl_output *output;
 	struct irq_data *parent_data;
 	struct of_phandle_args oirq;
 	struct irq_domain *domain;
 
-	output = kcalloc(1, sizeof(*output), GFP_KERNEL);
+	cnt = max(1, num_parents);
+	output = kcalloc(cnt, sizeof(*output), GFP_KERNEL);
 	if (!output)
 		return -ENOMEM;
 
-	if (WARN_ON(!num_parents)) {
-		/*
-		 * If DT contains no parent interrupts, assume MIPS IRQ 2 (HW0) is
-		 * connected to the first output. This is the case for all known hardware.
-		 */
-		oirq.np = of_find_compatible_node(NULL, NULL,
-						  "mti,cpu-interrupt-controller");
-		if (!oirq.np) {
+	for (p = 0; p < cnt; p++) {
+		if (WARN_ON(!num_parents)) {
+			/*
+			 * If DT contains no parent interrupts, assume MIPS IRQ 2 (HW0) is
+			 * connected to the first output. This is the case for all known hardware.
+			 */
+			oirq.np = of_find_compatible_node(NULL, NULL,
+							  "mti,cpu-interrupt-controller");
+			if (!oirq.np) {
+				err = -EINVAL;
+				goto err_out;
+			}
+
+			oirq.args_count = 1;
+			oirq.args[0] = 2;
+			parent_irq = irq_create_of_mapping(&oirq);
+			of_node_put(oirq.np);
+		} else {
+			parent_irq = of_irq_get(node, p);
+		}
+
+		if (parent_irq <= 0) {
+			err = parent_irq ? parent_irq : -ENODEV;
+			goto err_out;
+		}
+
+		parent_data = irq_get_irq_data(parent_irq);
+		if (!parent_data) {
 			err = -EINVAL;
 			goto err_out;
 		}
 
-		oirq.args_count = 1;
-		oirq.args[0] = 2;
-		parent_irq = irq_create_of_mapping(&oirq);
-		of_node_put(oirq.np);
-	} else {
-		parent_irq = of_irq_get(node, 0);
-	}
+		domain = irq_domain_create_linear(of_fwnode_handle(node), RTL_ICTL_NUM_INPUTS,
+						  &irq_domain_ops, &output[p]);
+		if (!domain) {
+			err = -ENOMEM;
+			goto err_out;
+		}
 
-	if (parent_irq <= 0) {
-		err = parent_irq ? parent_irq : -ENODEV;
-		goto err_out;
+		output[p].domain = domain;
+		output[p].fwnode = of_fwnode_handle(node);
+		output[p].index = p;
+		output[p].parent_irq = parent_irq;
+		output[p].parent_hwirq = irqd_to_hwirq(parent_data);
+		irq_set_chained_handler_and_data(parent_irq, realtek_irq_dispatch, &output[p]);
 	}
-
-	parent_data = irq_get_irq_data(parent_irq);
-	if (!parent_data) {
-		err = -EINVAL;
-		goto err_out;
-	}
-
-	domain = irq_domain_create_linear(of_fwnode_handle(node), RTL_ICTL_NUM_INPUTS,
-					  &irq_domain_ops, output);
-	if (!domain) {
-		err = -ENOMEM;
-		goto err_out;
-	}
-
-	output->domain = domain;
-	output->fwnode = of_fwnode_handle(node);
-	output->index = 0;
-	output->parent_irq = parent_irq;
-	output->parent_hwirq = irqd_to_hwirq(parent_data);
-	irq_set_chained_handler_and_data(parent_irq, realtek_irq_dispatch, output);
 
 	return 0;
 
 err_out:
+	while (p--) {
+		irq_set_chained_handler_and_data(output[p].parent_irq, NULL, NULL);
+		irq_domain_remove(output[p].domain);
+	}
+
 	kfree(output);
 
 	return err;
