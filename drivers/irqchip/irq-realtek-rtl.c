@@ -26,7 +26,9 @@
 #define REG(cpu, x)		(realtek_ictl_base[cpu] + x)
 
 struct realtek_ictl_output {
+	struct fwnode_handle	*fwnode;
 	struct irq_domain	*domain;
+	unsigned int		index;
 	u32			mask;
 };
 
@@ -125,9 +127,25 @@ static int intc_map(struct irq_domain *d, unsigned int irq, irq_hw_number_t hw_i
 	return 0;
 }
 
+static int intc_select(struct irq_domain *d, struct irq_fwspec *fwspec,
+		       enum irq_domain_bus_token bus_token)
+{
+	struct realtek_ictl_output *output = d->host_data;
+	unsigned int index = 0;
+
+	if (fwspec->fwnode != output->fwnode)
+		return false;
+
+	if (fwspec->param_count == 2)
+		index = fwspec->param[1];
+
+	return index == output->index;
+}
+
 static const struct irq_domain_ops irq_domain_ops = {
-	.map = intc_map,
-	.xlate = irq_domain_xlate_onecell,
+	.map	= intc_map,
+	.select	= intc_select,
+	.xlate	= irq_domain_xlate_onecell,
 };
 
 static void realtek_irq_dispatch(struct irq_desc *desc)
@@ -197,6 +215,8 @@ static int __init realtek_setup_parents(struct device_node *node)
 	}
 
 	output->domain = domain;
+	output->fwnode = of_fwnode_handle(node);
+	output->index = 0;
 	irq_set_chained_handler_and_data(parent_irq, realtek_irq_dispatch, output);
 
 	return 0;
