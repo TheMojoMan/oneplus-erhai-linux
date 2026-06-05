@@ -28,6 +28,8 @@
 struct realtek_ictl_output {
 	struct fwnode_handle	*fwnode;
 	struct irq_domain	*domain;
+	unsigned int		parent_irq;
+	unsigned int		parent_hwirq;
 	unsigned int		index;
 	u32			mask;
 };
@@ -122,7 +124,7 @@ static int intc_map(struct irq_domain *d, unsigned int irq, irq_hw_number_t hw_i
 	guard(raw_spinlock_irqsave)(&irq_lock);
 	output->mask |= BIT(hw_irq);
 	for_each_present_cpu(cpu)
-		write_irr(cpu, hw_irq, 1);
+		write_irr(cpu, hw_irq, output->parent_hwirq - 1);
 
 	return 0;
 }
@@ -175,6 +177,7 @@ static int __init realtek_setup_parents(struct device_node *node)
 {
 	int err, parent_irq, num_parents = of_irq_count(node);
 	struct realtek_ictl_output *output;
+	struct irq_data *parent_data;
 	struct of_phandle_args oirq;
 	struct irq_domain *domain;
 
@@ -207,6 +210,12 @@ static int __init realtek_setup_parents(struct device_node *node)
 		goto err_out;
 	}
 
+	parent_data = irq_get_irq_data(parent_irq);
+	if (!parent_data) {
+		err = -EINVAL;
+		goto err_out;
+	}
+
 	domain = irq_domain_create_linear(of_fwnode_handle(node), RTL_ICTL_NUM_INPUTS,
 					  &irq_domain_ops, output);
 	if (!domain) {
@@ -217,6 +226,8 @@ static int __init realtek_setup_parents(struct device_node *node)
 	output->domain = domain;
 	output->fwnode = of_fwnode_handle(node);
 	output->index = 0;
+	output->parent_irq = parent_irq;
+	output->parent_hwirq = irqd_to_hwirq(parent_data);
 	irq_set_chained_handler_and_data(parent_irq, realtek_irq_dispatch, output);
 
 	return 0;
