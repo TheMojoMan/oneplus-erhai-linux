@@ -813,7 +813,6 @@ static int xe_info_init_early(struct xe_device *xe,
 	xe_assert(xe, desc->max_gt_per_tile > 0);
 	xe_assert(xe, desc->max_gt_per_tile <= XE_MAX_GT_PER_TILE);
 	xe->info.max_gt_per_tile = desc->max_gt_per_tile;
-	xe->info.tile_count = 1 + desc->max_remote_tiles;
 
 	err = xe_tile_init_early(xe_device_get_root_tile(xe), xe, 0);
 	if (err)
@@ -825,13 +824,16 @@ static int xe_info_init_early(struct xe_device *xe,
 /*
  * Possibly override number of tile based on configuration register.
  */
-static void xe_info_probe_tile_count(struct xe_device *xe)
+static void xe_info_probe_tile_count(struct xe_device *xe,
+				     const struct xe_device_desc *desc)
 {
 	struct xe_mmio *mmio;
 	u8 tile_count;
 	u32 mtcfg;
 
-	KUNIT_STATIC_STUB_REDIRECT(xe_info_probe_tile_count, xe);
+	KUNIT_STATIC_STUB_REDIRECT(xe_info_probe_tile_count, xe, desc);
+
+	xe->info.tile_count = 1 + desc->max_remote_tiles;
 
 	/*
 	 * Probe for tile count only for platforms that support multiple
@@ -1037,7 +1039,7 @@ static int xe_info_init(struct xe_device *xe,
 		xe->info.has_soc_remapper_telem = 0;
 	}
 
-	xe_info_probe_tile_count(xe);
+	xe_info_probe_tile_count(xe, desc);
 
 	for_each_remote_tile(tile, xe, id) {
 		int err;

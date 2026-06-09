@@ -311,9 +311,10 @@ const void *xe_pci_id_gen_param(struct kunit *test, const void *prev, char *desc
 }
 EXPORT_SYMBOL_IF_KUNIT(xe_pci_id_gen_param);
 
-static void fake_xe_info_probe_tile_count(struct xe_device *xe)
+static void fake_xe_info_probe_tile_count(struct xe_device *xe,
+					  const struct xe_device_desc *desc)
 {
-	/* Nothing to do, just use the statically defined value. */
+	xe->info.tile_count = 1 + desc->max_remote_tiles;
 }
 
 static int fake_probe_info(struct xe_device *xe,
