@@ -338,13 +338,21 @@ static void fake_xe_info_probe_tile_count(struct xe_device *xe)
 	/* Nothing to do, just use the statically defined value. */
 }
 
+static int fake_probe_info(struct xe_device *xe,
+			   struct xe_probed_info *probed_info)
+{
+	return 0;
+}
+
 int xe_pci_fake_device_init(struct xe_device *xe)
 {
 	struct kunit *test = kunit_get_current_test();
 	struct xe_pci_fake_data *data = test->priv;
+	struct xe_probed_info probed_info = {};
 	const struct pci_device_id *ent = pciidlist;
 	const struct xe_device_desc *desc;
 	const struct xe_subplatform_desc *subplatform_desc;
+	int err;
 
 	if (!data) {
 		desc = (const void *)ent->driver_data;
@@ -379,8 +387,12 @@ done:
 	kunit_activate_static_stub(test, xe_info_probe_tile_count,
 				   fake_xe_info_probe_tile_count);
 
-	xe_info_init_early(xe, desc, subplatform_desc);
-	xe_info_init(xe, desc);
+	err = fake_probe_info(xe, &probed_info);
+	if (err)
+		return err;
+
+	xe_info_init_early(xe, desc, subplatform_desc, &probed_info);
+	xe_info_init(xe, desc, &probed_info);
 
 	return 0;
 }

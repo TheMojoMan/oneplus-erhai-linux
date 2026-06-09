@@ -739,13 +739,27 @@ static void init_devid(struct xe_device *xe)
 	xe->info.revid = pdev->revision;
 }
 
+struct xe_probed_info {
+	/* Nothing for now. */
+};
+
+/*
+ * Probe from the hardware the info required by xe_info_init_early().
+ */
+static int xe_probe_info_early(struct xe_device *xe,
+			       struct xe_probed_info *probed_info)
+{
+	return 0;
+}
+
 /*
  * Initialize device info content that only depends on static driver_data
  * passed to the driver at probe time from PCI ID table.
  */
 static int xe_info_init_early(struct xe_device *xe,
 			      const struct xe_device_desc *desc,
-			      const struct xe_subplatform_desc *subplatform_desc)
+			      const struct xe_subplatform_desc *subplatform_desc,
+			      struct xe_probed_info *probed_info)
 {
 	int err;
 
@@ -913,13 +927,23 @@ static struct xe_gt *alloc_media_gt(struct xe_tile *tile,
 }
 
 /*
+ * Probe from the hardware the info required by xe_info_init().
+ */
+static int xe_probe_info(struct xe_device *xe,
+			 struct xe_probed_info *probed_info)
+{
+	return 0;
+}
+
+/*
  * Initialize device info content that does require knowledge about
  * graphics / media IP version.
  * Make sure that GT / tile structures allocated by the driver match the data
  * present in device info.
  */
 static int xe_info_init(struct xe_device *xe,
-			const struct xe_device_desc *desc)
+			const struct xe_device_desc *desc,
+			struct xe_probed_info *probed_info)
 {
 	u32 graphics_gmdid_revid = 0, media_gmdid_revid = 0;
 	const struct xe_ip *graphics_ip;
@@ -1075,6 +1099,7 @@ static void xe_pci_remove(struct pci_dev *pdev)
  */
 static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
+	struct xe_probed_info probed_info = {};
 	const struct xe_device_desc *desc = (const void *)ent->driver_data;
 	const struct xe_subplatform_desc *subplatform_desc;
 	struct xe_device *xe;
@@ -1127,7 +1152,11 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 
 	pci_set_master(pdev);
 
-	err = xe_info_init_early(xe, desc, subplatform_desc);
+	err = xe_probe_info_early(xe, &probed_info);
+	if (err)
+		return err;
+
+	err = xe_info_init_early(xe, desc, subplatform_desc, &probed_info);
 	if (err)
 		return err;
 
@@ -1146,7 +1175,11 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		return err;
 
-	err = xe_info_init(xe, desc);
+	err = xe_probe_info(xe, &probed_info);
+	if (err)
+		return err;
+
+	err = xe_info_init(xe, desc, &probed_info);
 	if (err)
 		return err;
 
