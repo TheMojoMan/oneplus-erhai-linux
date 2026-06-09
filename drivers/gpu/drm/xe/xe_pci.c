@@ -810,7 +810,7 @@ static int xe_info_init_early(struct xe_device *xe,
 	xe->info.max_gt_per_tile = desc->max_gt_per_tile;
 	xe->info.tile_count = 1 + desc->max_remote_tiles;
 
-	xe_step_platform_get(xe, &xe->info.step);
+	xe_step_platform_get(xe->info.platform, xe->info.revid, &xe->info.step);
 
 	err = xe_tile_init_early(xe_device_get_root_tile(xe), xe, 0);
 	if (err)

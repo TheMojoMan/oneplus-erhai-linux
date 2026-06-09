@@ -110,13 +110,14 @@ __diag_pop();
 
 /**
  * xe_step_platform_get - Determine platform-level stepping from PCI revid
- * @xe: Xe device
+ * @platform: The Xe platform
+ * @revid: The PCI revid
  * @step: Pointer to the step struct to update
  *
  * Convert the PCI revid into a platform-level stepping value and store that
  * in @step->platform.
  */
-void xe_step_platform_get(struct xe_device *xe, struct xe_step_info *step)
+void xe_step_platform_get(enum xe_platform platform, u8 revid, struct xe_step_info *step)
 {
 	/*
 	 * Not all platforms map PCI revid directly into our symbolic stepping
@@ -127,8 +128,8 @@ void xe_step_platform_get(struct xe_device *xe, struct xe_step_info *step)
 	 * checks.
 	 */
 
-	if (xe->info.platform == XE_NOVALAKE_P)
-		step->platform = STEP_A0 + xe->info.revid;
+	if (platform == XE_NOVALAKE_P)
+		step->platform = STEP_A0 + revid;
 }
 
 /**
