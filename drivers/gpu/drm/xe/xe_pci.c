@@ -730,6 +730,7 @@ static int handle_gmdid(struct xe_device *xe,
 struct xe_probed_info {
 	u16 devid;
 	u8 revid;
+	u8 tile_count;
 	struct xe_step_info step;
 	const struct xe_ip *graphics_ip;
 	const struct xe_ip *media_ip;
@@ -821,25 +822,21 @@ static int xe_info_init_early(struct xe_device *xe,
 	return 0;
 }
 
-/*
- * Possibly override number of tile based on configuration register.
- */
-static void xe_info_probe_tile_count(struct xe_device *xe,
-				     const struct xe_device_desc *desc)
+static void xe_probe_tile_count(struct xe_device *xe,
+				const struct xe_device_desc *desc,
+				struct xe_probed_info *probed_info)
 {
 	struct xe_mmio *mmio;
 	u8 tile_count;
 	u32 mtcfg;
 
-	KUNIT_STATIC_STUB_REDIRECT(xe_info_probe_tile_count, xe, desc);
-
-	xe->info.tile_count = 1 + desc->max_remote_tiles;
+	probed_info->tile_count = 1 + desc->max_remote_tiles;
 
 	/*
 	 * Probe for tile count only for platforms that support multiple
 	 * tiles.
 	 */
-	if (xe->info.tile_count == 1)
+	if (probed_info->tile_count == 1)
 		return;
 
 	mmio = xe_root_tile_mmio(xe);
@@ -852,10 +849,10 @@ static void xe_info_probe_tile_count(struct xe_device *xe,
 	mtcfg = xe_mmio_read32(mmio, XEHP_MTCFG_ADDR);
 	tile_count = REG_FIELD_GET(TILE_COUNT, mtcfg) + 1;
 
-	if (tile_count < xe->info.tile_count) {
+	if (tile_count < probed_info->tile_count) {
 		drm_info(&xe->drm, "tile_count: %d, reduced_tile_count %d\n",
-			 xe->info.tile_count, tile_count);
-		xe->info.tile_count = tile_count;
+			 probed_info->tile_count, tile_count);
+		probed_info->tile_count = tile_count;
 	}
 }
 
@@ -977,6 +974,8 @@ static int xe_probe_info(struct xe_device *xe,
 {
 	int err;
 
+	xe_probe_tile_count(xe, desc, probed_info);
+
 	err = xe_probe_ips(xe, desc, probed_info);
 	if (err)
 		return err;
@@ -1004,6 +1003,8 @@ static int xe_info_init(struct xe_device *xe,
 
 	graphics_ip = probed_info->graphics_ip;
 	media_ip = probed_info->media_ip;
+
+	xe->info.tile_count = probed_info->tile_count;
 	xe->info.step.basedie = probed_info->step.basedie;
 	xe->info.step.graphics = probed_info->step.graphics;
 	xe->info.step.media = probed_info->step.media;
@@ -1038,8 +1039,6 @@ static int xe_info_init(struct xe_device *xe,
 		xe->info.has_soc_remapper_sysctrl = 0;
 		xe->info.has_soc_remapper_telem = 0;
 	}
-
-	xe_info_probe_tile_count(xe, desc);
 
 	for_each_remote_tile(tile, xe, id) {
 		int err;
