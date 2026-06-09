@@ -602,8 +602,6 @@ static int read_gmdid(struct xe_device *xe, enum xe_gmdid_type type, u32 *ver, u
 	struct xe_reg gmdid_reg = GMD_ID;
 	u32 val;
 
-	KUNIT_STATIC_STUB_REDIRECT(read_gmdid, xe, type, ver, revid);
-
 	if (IS_SRIOV_VF(xe)) {
 		/*
 		 * To get the value of the GMDID register, VFs must obtain it
@@ -733,6 +731,8 @@ struct xe_probed_info {
 	u16 devid;
 	u8 revid;
 	struct xe_step_info step;
+	const struct xe_ip *graphics_ip;
+	const struct xe_ip *media_ip;
 };
 
 /*
@@ -926,12 +926,59 @@ static struct xe_gt *alloc_media_gt(struct xe_tile *tile,
 	return gt;
 }
 
+static int xe_probe_ips(struct xe_device *xe,
+			const struct xe_device_desc *desc,
+			struct xe_probed_info *probed_info)
+{
+	/*
+	 * If this platform supports GMD_ID, we'll detect the proper IP
+	 * descriptor to use from hardware registers.
+	 * desc->pre_gmdid_graphics_ip will only ever be set at this point for
+	 * platforms before GMD_ID. In that case the IP descriptions and
+	 * versions are simply derived from that.
+	 */
+	if (desc->pre_gmdid_graphics_ip) {
+		probed_info->graphics_ip = desc->pre_gmdid_graphics_ip;
+		probed_info->media_ip = desc->pre_gmdid_media_ip;
+		xe_step_pre_gmdid_get(xe, &probed_info->step);
+	} else {
+		int err;
+		u32 graphics_revid, media_revid;
+
+		xe_assert(xe, !desc->pre_gmdid_media_ip);
+
+		err = handle_gmdid(xe, &probed_info->graphics_ip, &probed_info->media_ip,
+				   &graphics_revid, &media_revid);
+		if (err)
+			return err;
+
+		xe_step_gmdid_get(xe, graphics_revid, media_revid, &probed_info->step);
+	}
+
+	/*
+	 * If we couldn't detect the graphics IP, that's considered a fatal
+	 * error and we should abort driver load.  Failing to detect media
+	 * IP is non-fatal; we'll just proceed without enabling media support.
+	 */
+	if (!probed_info->graphics_ip)
+		return -ENODEV;
+
+	return 0;
+}
+
 /*
  * Probe from the hardware the info required by xe_info_init().
  */
 static int xe_probe_info(struct xe_device *xe,
+			 const struct xe_device_desc *desc,
 			 struct xe_probed_info *probed_info)
 {
+	int err;
+
+	err = xe_probe_ips(xe, desc, probed_info);
+	if (err)
+		return err;
+
 	return 0;
 }
 
@@ -945,44 +992,19 @@ static int xe_info_init(struct xe_device *xe,
 			const struct xe_device_desc *desc,
 			struct xe_probed_info *probed_info)
 {
-	u32 graphics_gmdid_revid = 0, media_gmdid_revid = 0;
 	const struct xe_ip *graphics_ip;
 	const struct xe_ip *media_ip;
 	const struct xe_graphics_desc *graphics_desc;
 	const struct xe_media_desc *media_desc;
 	struct xe_tile *tile;
 	struct xe_gt *gt;
-	int ret;
 	u8 id;
 
-	/*
-	 * If this platform supports GMD_ID, we'll detect the proper IP
-	 * descriptor to use from hardware registers.
-	 * desc->pre_gmdid_graphics_ip will only ever be set at this point for
-	 * platforms before GMD_ID. In that case the IP descriptions and
-	 * versions are simply derived from that.
-	 */
-	if (desc->pre_gmdid_graphics_ip) {
-		graphics_ip = desc->pre_gmdid_graphics_ip;
-		media_ip = desc->pre_gmdid_media_ip;
-		xe_step_pre_gmdid_get(xe, &xe->info.step);
-	} else {
-		xe_assert(xe, !desc->pre_gmdid_media_ip);
-		ret = handle_gmdid(xe, &graphics_ip, &media_ip,
-				   &graphics_gmdid_revid, &media_gmdid_revid);
-		if (ret)
-			return ret;
-
-		xe_step_gmdid_get(xe, graphics_gmdid_revid, media_gmdid_revid, &xe->info.step);
-	}
-
-	/*
-	 * If we couldn't detect the graphics IP, that's considered a fatal
-	 * error and we should abort driver load.  Failing to detect media
-	 * IP is non-fatal; we'll just proceed without enabling media support.
-	 */
-	if (!graphics_ip)
-		return -ENODEV;
+	graphics_ip = probed_info->graphics_ip;
+	media_ip = probed_info->media_ip;
+	xe->info.step.basedie = probed_info->step.basedie;
+	xe->info.step.graphics = probed_info->step.graphics;
+	xe->info.step.media = probed_info->step.media;
 
 	xe->info.graphics_verx100 = graphics_ip->verx100;
 	xe->info.graphics_name = graphics_ip->name;
@@ -1175,7 +1197,7 @@ static int xe_pci_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	if (err)
 		return err;
 
-	err = xe_probe_info(xe, &probed_info);
+	err = xe_probe_info(xe, desc, &probed_info);
 	if (err)
 		return err;
 
