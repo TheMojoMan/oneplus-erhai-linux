@@ -111,11 +111,12 @@ __diag_pop();
 /**
  * xe_step_platform_get - Determine platform-level stepping from PCI revid
  * @xe: Xe device
+ * @step: Pointer to the step struct to update
  *
  * Convert the PCI revid into a platform-level stepping value and store that
- * in the device info.
+ * in @step->platform.
  */
-void xe_step_platform_get(struct xe_device *xe)
+void xe_step_platform_get(struct xe_device *xe, struct xe_step_info *step)
 {
 	/*
 	 * Not all platforms map PCI revid directly into our symbolic stepping
@@ -127,17 +128,20 @@ void xe_step_platform_get(struct xe_device *xe)
 	 */
 
 	if (xe->info.platform == XE_NOVALAKE_P)
-		xe->info.step.platform = STEP_A0 + xe->info.revid;
+		step->platform = STEP_A0 + xe->info.revid;
 }
 
 /**
  * xe_step_pre_gmdid_get - Determine IP steppings from PCI revid
  * @xe: Xe device
+ * @step: Pointer to the step struct to update
  *
- * Convert the PCI revid into proper IP steppings.  This should only be
- * used on platforms that do not have GMD_ID support.
+ * Convert the PCI revid into proper IP steppings and update @step->basedie,
+ * @step->graphics and @step->media accordingly.
+ *
+ * This should only be used on platforms that do not have GMD_ID support.
  */
-void xe_step_pre_gmdid_get(struct xe_device *xe)
+void xe_step_pre_gmdid_get(struct xe_device *xe, struct xe_step_info *step)
 {
 	const struct xe_step_info *revids = NULL;
 	u16 revid = xe->info.revid;
@@ -234,9 +238,9 @@ void xe_step_pre_gmdid_get(struct xe_device *xe)
 	}
 
 done:
-	xe->info.step.graphics = graphics;
-	xe->info.step.media = media;
-	xe->info.step.basedie = basedie;
+	step->graphics = graphics;
+	step->media = media;
+	step->basedie = basedie;
 }
 
 /**
@@ -244,8 +248,10 @@ done:
  * @xe: Xe device
  * @graphics_gmdid_revid: value of graphics GMD_ID register's revid field
  * @media_gmdid_revid: value of media GMD_ID register's revid field
+ * @step: Poninter to the step struct to update.
  *
- * Convert the revid fields of the GMD_ID registers into proper IP steppings.
+ * Convert the revid fields of the GMD_ID registers into proper IP steppings
+ * and update @step->graphics and @step->media accordingly.
  *
  * GMD_ID revid values are currently expected to have consistent meanings on
  * all platforms:  major steppings (A0, B0, etc.) are 4 apart, with minor
@@ -253,7 +259,8 @@ done:
  */
 void xe_step_gmdid_get(struct xe_device *xe,
 		       u32 graphics_gmdid_revid,
-		       u32 media_gmdid_revid)
+		       u32 media_gmdid_revid,
+		       struct xe_step_info *step)
 {
 	u8 graphics = STEP_A0 + graphics_gmdid_revid;
 	u8 media = STEP_A0 + media_gmdid_revid;
@@ -270,8 +277,8 @@ void xe_step_gmdid_get(struct xe_device *xe,
 			media_gmdid_revid);
 	}
 
-	xe->info.step.graphics = graphics;
-	xe->info.step.media = media;
+	step->graphics = graphics;
+	step->media = media;
 }
 
 #define STEP_NAME_CASE(name)	\
