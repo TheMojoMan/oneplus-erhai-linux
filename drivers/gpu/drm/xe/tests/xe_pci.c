@@ -388,6 +388,9 @@ done:
 	xe_info_init_early(xe, desc, subplatform_desc, &probed_info);
 	xe_info_init(xe, desc, &probed_info);
 
+	if (data && !data->graphics_verx100)
+		xe->info.step = data->step;
+
 	return 0;
 }
 EXPORT_SYMBOL_IF_KUNIT(xe_pci_fake_device_init);
