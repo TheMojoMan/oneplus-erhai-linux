@@ -729,18 +729,9 @@ static int handle_gmdid(struct xe_device *xe,
 	return 0;
 }
 
-static void init_devid(struct xe_device *xe)
-{
-	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
-
-	KUNIT_STATIC_STUB_REDIRECT(init_devid, xe);
-
-	xe->info.devid = pdev->device;
-	xe->info.revid = pdev->revision;
-}
-
 struct xe_probed_info {
-	/* Nothing for now. */
+	u16 devid;
+	u8 revid;
 };
 
 /*
@@ -749,6 +740,11 @@ struct xe_probed_info {
 static int xe_probe_info_early(struct xe_device *xe,
 			       struct xe_probed_info *probed_info)
 {
+	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
+
+	probed_info->devid = pdev->device;
+	probed_info->revid = pdev->revision;
+
 	return 0;
 }
 
@@ -763,12 +759,13 @@ static int xe_info_init_early(struct xe_device *xe,
 {
 	int err;
 
+	xe->info.devid = probed_info->devid;
+	xe->info.revid = probed_info->revid;
+
 	xe->info.platform_name = desc->platform_name;
 	xe->info.platform = desc->platform;
 	xe->info.subplatform = subplatform_desc ?
 		subplatform_desc->subplatform : XE_SUBPLATFORM_NONE;
-
-	init_devid(xe);
 
 	xe->info.dma_mask_size = desc->dma_mask_size;
 	xe->info.va_bits = desc->va_bits;
