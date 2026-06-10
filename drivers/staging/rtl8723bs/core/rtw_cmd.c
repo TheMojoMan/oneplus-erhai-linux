@@ -1714,6 +1714,8 @@ static void c2h_wk_callback(struct work_struct *work)
 					kfree(c2h_evt);
 					continue;
 				}
+			} else {
+				continue;
 			}
 		}
 
