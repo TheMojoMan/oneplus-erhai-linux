@@ -468,11 +468,9 @@ impl<const N: usize> ModInfoBuilder<N> {
 /// that scheme before nova-core becomes stable, which means this module will eventually be
 /// removed.
 mod elf {
-    use core::mem::size_of;
-
     use kernel::{
         bindings,
-        str::CStr,
+        prelude::*,
         transmute::FromBytes, //
     };
 
