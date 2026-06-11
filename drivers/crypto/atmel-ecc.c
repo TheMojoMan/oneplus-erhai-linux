@@ -30,7 +30,6 @@ static struct atmel_ecc_driver_data driver_data;
  * @client: I2C client device
  * @fallback: ECDH fallback used for caller-provided private keys
  * @public_key: cached public key for the device-generated private key
- * @curve_id: elliptic curve id
  * @do_fallback: true when ECDH operations should use @fallback
  *
  * The caller must not invoke set_secret() while generate_public_key()
@@ -40,7 +39,6 @@ struct atmel_ecdh_ctx {
 	struct i2c_client *client;
 	struct crypto_kpp *fallback;
 	const u8 *public_key;
-	unsigned int curve_id;
 	bool do_fallback;
 };
 
@@ -240,7 +238,6 @@ static int atmel_ecdh_init_tfm(struct crypto_kpp *tfm)
 	struct crypto_kpp *fallback;
 	struct atmel_ecdh_ctx *ctx = kpp_tfm_ctx(tfm);
 
-	ctx->curve_id = ECC_CURVE_NIST_P256;
 	ctx->client = atmel_ecc_i2c_client_alloc();
 	if (IS_ERR(ctx->client)) {
 		pr_err("tfm - i2c_client binding failed\n");
