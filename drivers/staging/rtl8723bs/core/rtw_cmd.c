@@ -1008,7 +1008,6 @@ exit:
 	return res;
 }
 
-/* add for CONFIG_IEEE80211W, none 11w can use it */
 u8 rtw_reset_securitypriv_cmd(struct adapter *padapter)
 {
 	struct cmd_obj *ph2c;
@@ -1769,7 +1768,6 @@ u8 rtw_drvextra_cmd_hdl(struct adapter *padapter, unsigned char *pbuf)
 	case CHECK_HIQ_WK_CID:
 		rtw_chk_hi_queue_hdl(padapter);
 		break;
-	/* add for CONFIG_IEEE80211W, none 11w can use it */
 	case RESET_SECURITYPRIV:
 		rtw_reset_securitypriv(padapter);
 		break;

@@ -620,7 +620,7 @@ static void construct_mic_iv(u8 *mic_iv,
 			     u8 *mpdu,
 			     uint payload_length,
 			     u8 *pn_vector,
-			     uint frtype) /* add for CONFIG_IEEE80211W, none 11w also can use */
+			     uint frtype)
 {
 		signed int i;
 
@@ -656,7 +656,7 @@ static void construct_mic_iv(u8 *mic_iv,
 static void construct_mic_header1(u8 *mic_header1,
 				  signed int header_length,
 				  u8 *mpdu,
-				  uint frtype) /* for CONFIG_IEEE80211W, none 11w also can use */
+				  uint frtype)
 {
 		mic_header1[0] = (u8)((header_length - 2) / 256);
 		mic_header1[1] = (u8)((header_length - 2) % 256);
@@ -739,7 +739,7 @@ static void construct_ctr_preload(u8 *ctr_preload,
 				  u8 *mpdu,
 				  u8 *pn_vector,
 				  signed int c,
-				  uint frtype) /* for CONFIG_IEEE80211W, none 11w also can use */
+				  uint frtype)
 {
 	signed int i = 0;
 
@@ -799,7 +799,7 @@ static signed int aes_cipher(u8 *key, uint	hdrlen,
 		if (hdrlen !=  WLAN_HDR_A3_QOS_LEN)
 			hdrlen += 2;
 
-	} else if ((frtype == WIFI_DATA) && /*  add for CONFIG_IEEE80211W, none 11w also can use */
+	} else if ((frtype == WIFI_DATA) &&
 		   ((frsubtype == 0x08) ||
 		   (frsubtype == 0x09) ||
 		   (frsubtype == 0x0a) ||
@@ -825,12 +825,12 @@ static signed int aes_cipher(u8 *key, uint	hdrlen,
 			 pframe,	 /* message, */
 			 plen,
 			 pn_vector,
-			 frtype); /*  add for CONFIG_IEEE80211W, none 11w also can use */
+			 frtype);
 
 	construct_mic_header1(mic_header1,
 			      hdrlen,
 			      pframe,	/* message */
-			      frtype); /*  add for CONFIG_IEEE80211W, none 11w also can use */
+			      frtype);
 
 	construct_mic_header2(mic_header2,
 			      pframe,	/* message, */
@@ -879,7 +879,6 @@ static signed int aes_cipher(u8 *key, uint	hdrlen,
 	for (i = 0; i < num_blocks; i++) {
 		construct_ctr_preload(ctr_preload, a4_exists, qc_exists, pframe, /* message, */
 				      pn_vector, i + 1, frtype);
-		/*  add for CONFIG_IEEE80211W, none 11w also can use */
 		aes128k128d(key, ctr_preload, aes_out);
 		crypto_xor_cpy(chain_buffer, aes_out, &pframe[payload_index], 16);
 		for (j = 0; j < 16; j++)
@@ -891,7 +890,6 @@ static signed int aes_cipher(u8 *key, uint	hdrlen,
 		/* encrypt it and copy the unpadded part back   */
 		construct_ctr_preload(ctr_preload, a4_exists, qc_exists, pframe, /* message, */
 				      pn_vector, num_blocks + 1, frtype);
-		/*  add for CONFIG_IEEE80211W, none 11w also can use */
 
 		for (j = 0; j < 16; j++)
 			padded_buffer[j] = 0x00;
@@ -907,7 +905,6 @@ static signed int aes_cipher(u8 *key, uint	hdrlen,
 	/* Encrypt the MIC */
 	construct_ctr_preload(ctr_preload, a4_exists, qc_exists, pframe, /* message, */
 			      pn_vector, 0, frtype);
-	/*  add for CONFIG_IEEE80211W, none 11w also can use */
 
 	for (j = 0; j < 16; j++)
 		padded_buffer[j] = 0x00;
@@ -1018,7 +1015,7 @@ static signed int aes_decipher(u8 *key, uint	hdrlen,
 		if (hdrlen !=  WLAN_HDR_A3_QOS_LEN)
 			hdrlen += 2;
 
-	} else if ((frtype == WIFI_DATA) && /* only for data packet . add for CONFIG_IEEE80211W, none 11w also can use */
+	} else if ((frtype == WIFI_DATA) &&
 		   ((frsubtype == 0x08) ||
 		   (frsubtype == 0x09) ||
 		   (frsubtype == 0x0a) ||
@@ -1039,7 +1036,7 @@ static signed int aes_decipher(u8 *key, uint	hdrlen,
 		construct_ctr_preload(ctr_preload, a4_exists,
 				      qc_exists, pframe,
 				      pn_vector, i + 1,
-				      frtype); /*  add for CONFIG_IEEE80211W, none 11w also can use */
+				      frtype);
 
 		aes128k128d(key, ctr_preload, aes_out);
 		crypto_xor_cpy(chain_buffer, aes_out, &pframe[payload_index], 16);
@@ -1053,7 +1050,6 @@ static signed int aes_decipher(u8 *key, uint	hdrlen,
 		/* encrypt it and copy the unpadded part back   */
 		construct_ctr_preload(ctr_preload, a4_exists, qc_exists, pframe, pn_vector,
 				      num_blocks + 1, frtype);
-		/*  add for CONFIG_IEEE80211W, none 11w also can use */
 
 		for (j = 0; j < 16; j++)
 			padded_buffer[j] = 0x00;
@@ -1078,10 +1074,8 @@ static signed int aes_decipher(u8 *key, uint	hdrlen,
 	pn_vector[5] = pframe[hdrlen + 7];
 
 	construct_mic_iv(mic_iv, qc_exists, a4_exists, message, plen - 8, pn_vector, frtype);
-	/*  add for CONFIG_IEEE80211W, none 11w also can use */
 
 	construct_mic_header1(mic_header1, hdrlen, message, frtype);
-	/*  add for CONFIG_IEEE80211W, none 11w also can use */
 	construct_mic_header2(mic_header2, message, a4_exists, qc_exists);
 
 	payload_remainder = (plen - 8) % 16;
@@ -1126,7 +1120,6 @@ static signed int aes_decipher(u8 *key, uint	hdrlen,
 	for (i = 0; i < num_blocks; i++) {
 		construct_ctr_preload(ctr_preload, a4_exists, qc_exists, message, pn_vector, i + 1,
 				      frtype);
-		/*  add for CONFIG_IEEE80211W, none 11w also can use */
 		aes128k128d(key, ctr_preload, aes_out);
 		crypto_xor_cpy(chain_buffer, aes_out, &message[payload_index], 16);
 		for (j = 0; j < 16; j++)
@@ -1138,7 +1131,6 @@ static signed int aes_decipher(u8 *key, uint	hdrlen,
 		/* encrypt it and copy the unpadded part back   */
 		construct_ctr_preload(ctr_preload, a4_exists, qc_exists, message, pn_vector,
 				      num_blocks + 1, frtype);
-		/*  add for CONFIG_IEEE80211W, none 11w also can use */
 
 		for (j = 0; j < 16; j++)
 			padded_buffer[j] = 0x00;
@@ -1153,7 +1145,6 @@ static signed int aes_decipher(u8 *key, uint	hdrlen,
 
 	/* Encrypt the MIC */
 	construct_ctr_preload(ctr_preload, a4_exists, qc_exists, message, pn_vector, 0, frtype);
-	/*  add for CONFIG_IEEE80211W, none 11w also can use */
 
 	for (j = 0; j < 16; j++)
 		padded_buffer[j] = 0x00;
@@ -1427,7 +1418,6 @@ static int omac1_aes_128_vector(u8 *key, size_t num_elem,
  * This is a mode for using block cipher (AES in this case) for authentication.
  * OMAC1 was standardized with the name CMAC by NIST in a Special Publication
  * (SP) 800-38B.
- * modify for CONFIG_IEEE80211W
  */
 int omac1_aes_128(u8 *key, u8 *data, size_t data_len, u8 *mac)
 {

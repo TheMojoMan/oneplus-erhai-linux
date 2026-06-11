@@ -133,8 +133,8 @@ enum {
 	INTEl_WIDI_WK_CID,
 	C2H_WK_CID,
 	RTP_TIMER_CFG_WK_CID,
-	RESET_SECURITYPRIV, /*  add for CONFIG_IEEE80211W, none 11w also can use */
-	FREE_ASSOC_RESOURCES, /*  add for CONFIG_IEEE80211W, none 11w also can use */
+	RESET_SECURITYPRIV,
+	FREE_ASSOC_RESOURCES,
 	DM_IN_LPS_WK_CID,
 	DM_RA_MSK_WK_CID, /* add for STA update RAMask when bandwidth change. */
 	BEAMFORMING_WK_CID,
@@ -594,7 +594,6 @@ extern u8 rtw_setfwdig_cmd(struct adapter *padapter, u8 type);
 extern u8 rtw_setfwra_cmd(struct adapter *padapter, u8 type);
 
 extern u8 rtw_addbareq_cmd(struct adapter *padapter, u8 tid, u8 *addr);
-/*  add for CONFIG_IEEE80211W, none 11w also can use */
 extern u8 rtw_reset_securitypriv_cmd(struct adapter *padapter);
 extern u8 rtw_free_assoc_resources_cmd(struct adapter *padapter);
 extern u8 rtw_dynamic_chk_wk_cmd(struct adapter *adapter);

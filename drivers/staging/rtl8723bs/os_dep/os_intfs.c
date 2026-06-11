@@ -661,7 +661,6 @@ u8 rtw_init_drv_sw(struct adapter *padapter)
 
 	if (_rtw_init_recv_priv(&padapter->recvpriv, padapter) == _FAIL)
 		goto free_xmit_priv;
-	/*  add for CONFIG_IEEE80211W, none 11w also can use */
 	spin_lock_init(&padapter->security_key_mutex);
 
 	/*  We don't need to memset padapter->XXX to zero, because adapter is allocated by vzalloc(). */
