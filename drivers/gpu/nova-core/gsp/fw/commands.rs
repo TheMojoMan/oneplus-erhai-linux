@@ -30,7 +30,6 @@ static_assert!(size_of::<GspSetSystemInfo>() < GSP_PAGE_SIZE);
 
 impl GspSetSystemInfo {
     /// Returns an in-place initializer for the `GspSetSystemInfo` command.
-    #[allow(non_snake_case)]
     pub(crate) fn init<'a>(
         dev: &'a pci::Device<device::Bound>,
         chipset: Chipset,
@@ -102,7 +101,6 @@ pub(crate) struct PackedRegistryTable {
 }
 
 impl PackedRegistryTable {
-    #[allow(non_snake_case)]
     pub(crate) fn init(num_entries: u32, size: u32) -> impl Init<Self> {
         type InnerPackedRegistryTable = bindings::PACKED_REGISTRY_TABLE;
         let init_inner = init!(InnerPackedRegistryTable {
