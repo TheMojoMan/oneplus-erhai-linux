@@ -451,39 +451,26 @@ static int ssd130x_init(struct ssd130x_device *ssd130x)
 	bool scan_mode;
 	int ret;
 
-	/* Set initial contrast */
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD13XX_CONTRAST, ssd130x->contrast);
-	if (ret < 0)
-		return ret;
-
 	/* Set segment re-map */
 	seg_remap = (SSD13XX_SET_SEG_REMAP |
 		     SSD13XX_SET_SEG_REMAP_SET(ssd130x->seg_remap));
-	ret = ssd130x_write_cmd(ssd130x, 1, seg_remap);
-	if (ret < 0)
-		return ret;
-
 	/* Set COM direction */
 	com_invdir = (SSD130X_SET_COM_SCAN_DIR |
 		      SSD130X_SET_COM_SCAN_DIR_SET(ssd130x->com_invdir));
-	ret = ssd130x_write_cmd(ssd130x,  1, com_invdir);
-	if (ret < 0)
-		return ret;
-
-	/* Set multiplex ratio value */
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD13XX_SET_MULTIPLEX_RATIO, ssd130x->height - 1);
-	if (ret < 0)
-		return ret;
-
-	/* set display offset value */
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD130X_SET_DISPLAY_OFFSET, ssd130x->com_offset);
-	if (ret < 0)
-		return ret;
-
 	/* Set clock frequency */
 	dclk = (SSD130X_SET_CLOCK_DIV_SET(ssd130x->dclk_div - 1) |
 		SSD130X_SET_CLOCK_FREQ_SET(ssd130x->dclk_frq));
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD130X_SET_CLOCK_FREQ, dclk);
+
+	const u8 *cmds = (const u8[]) {
+		2, SSD13XX_CONTRAST, ssd130x->contrast,
+		1, seg_remap,
+		1, com_invdir, 0,
+		2, SSD13XX_SET_MULTIPLEX_RATIO, ssd130x->height - 1,
+		2, SSD130X_SET_DISPLAY_OFFSET, ssd130x->com_offset,
+		2, SSD130X_SET_CLOCK_FREQ, dclk,
+		0,
+	};
+	ret = ssd130x_run_cmd_seq(ssd130x, cmds);
 	if (ret < 0)
 		return ret;
 
@@ -505,9 +492,6 @@ static int ssd130x_init(struct ssd130x_device *ssd130x)
 	/* Set precharge period in number of ticks from the internal clock */
 	precharge = (SSD130X_SET_PRECHARGE_PERIOD1_SET(ssd130x->prechargep1) |
 		     SSD130X_SET_PRECHARGE_PERIOD2_SET(ssd130x->prechargep2));
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD130X_SET_PRECHARGE_PERIOD, precharge);
-	if (ret < 0)
-		return ret;
 
 	/* Set COM pins configuration */
 	compins = BIT(1);
@@ -519,22 +503,20 @@ static int ssd130x_init(struct ssd130x_device *ssd130x)
 	scan_mode = !ssd130x->com_seq;
 	compins |= (SSD130X_SET_COM_PINS_CONFIG1_SET(scan_mode) |
 		    SSD130X_SET_COM_PINS_CONFIG2_SET(ssd130x->com_lrremap));
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD130X_SET_COM_PINS_CONFIG, compins);
-	if (ret < 0)
-		return ret;
-
-	/* Set VCOMH */
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD130X_SET_VCOMH, ssd130x->vcomh);
-	if (ret < 0)
-		return ret;
 
 	/* Turn on the DC-DC Charge Pump */
 	chargepump = BIT(4);
-
 	if (ssd130x->device_info->need_chargepump)
 		chargepump |= BIT(2);
 
-	ret = ssd130x_write_cmd(ssd130x, 2, SSD130X_CHARGE_PUMP, chargepump);
+	cmds = (const u8[]) {
+		2, SSD130X_SET_PRECHARGE_PERIOD, precharge,
+		2, SSD130X_SET_COM_PINS_CONFIG, compins,
+		2, SSD130X_SET_VCOMH, ssd130x->vcomh,
+		2, SSD130X_CHARGE_PUMP, chargepump,
+		0
+	};
+	ret = ssd130x_run_cmd_seq(ssd130x, cmds);
 	if (ret < 0)
 		return ret;
 
