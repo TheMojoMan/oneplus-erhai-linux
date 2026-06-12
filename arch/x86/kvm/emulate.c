@@ -3298,8 +3298,12 @@ static int em_dr_write(struct x86_emulate_ctxt *ctxt)
 	else
 		val = ctxt->src.val & ~0U;
 
-	/* #UD condition is already handled. */
-	if (ctxt->ops->set_dr(ctxt, ctxt->modrm_reg, val))
+	/*
+	 * A #GP due to an illegal value should be impossible at this point, as
+	 * such #GPs have priority over MOV DR intercepts on SVM, i.e. KVM must
+	 * manually check the value *before* emulating the write.
+	 */
+	if (WARN_ON_ONCE(ctxt->ops->set_dr(ctxt, ctxt->modrm_reg, val)))
 		return emulate_gp(ctxt, 0);
 
 	/* Disable writeback. */
