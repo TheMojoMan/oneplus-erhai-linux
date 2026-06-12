@@ -3869,10 +3869,13 @@ static int check_dr_write(struct x86_emulate_ctxt *ctxt)
 
 	switch (ctxt->modrm_reg) {
 	case 4:
-	case 5:
 	case 6:
+		if (!kvm_dr6_valid(new_val))
+			return emulate_gp(ctxt, 0);
+		break;
+	case 5:
 	case 7:
-		if (new_val & 0xffffffff00000000ULL)
+		if (!kvm_dr7_valid(new_val))
 			return emulate_gp(ctxt, 0);
 		break;
 	default:
