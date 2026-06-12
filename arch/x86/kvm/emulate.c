@@ -3834,6 +3834,7 @@ static int check_cr_access(struct x86_emulate_ctxt *ctxt)
 
 static int check_dr_read(struct x86_emulate_ctxt *ctxt)
 {
+	bool is_intel = ctxt->ops->guest_cpuid_is_intel_compatible(ctxt);
 	int dr = ctxt->modrm_reg;
 	u64 cr4;
 
@@ -3844,11 +3845,15 @@ static int check_dr_read(struct x86_emulate_ctxt *ctxt)
 	if ((cr4 & X86_CR4_DE) && (dr == 4 || dr == 5))
 		return emulate_ud(ctxt);
 
-	if (ctxt->ops->cpl(ctxt))
+	/* Intel CPUs prioritize the DR7.GD=1 #DB over the CPL>0 #GP. */
+	if (!is_intel && ctxt->ops->cpl(ctxt))
 		return emulate_gp(ctxt, 0);
 
 	if (ctxt->ops->get_effective_dr7(ctxt) & DR7_GD)
 		return emulate_db(ctxt, DR6_BD);
+
+	if (is_intel && ctxt->ops->cpl(ctxt))
+		return emulate_gp(ctxt, 0);
 
 	return X86EMUL_CONTINUE;
 }
