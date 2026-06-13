@@ -217,12 +217,12 @@ struct mlme_priv {
 	u8 *wps_beacon_ie;
 	/* u8 *wps_probe_req_ie; */
 	u8 *wps_probe_resp_ie;
-	u8 *wps_assoc_resp_ie; /*  for CONFIG_IOCTL_CFG80211, this IE could include p2p ie / wfd ie */
+	u8 *wps_assoc_resp_ie; /* this IE could include p2p ie / wfd ie */
 
 	u32 wps_beacon_ie_len;
 	/* u32 wps_probe_req_ie_len; */
 	u32 wps_probe_resp_ie_len;
-	u32 wps_assoc_resp_ie_len; /*  for CONFIG_IOCTL_CFG80211, this IE len could include p2p ie / wfd ie */
+	u32 wps_assoc_resp_ie_len; /* this IE len could include p2p ie / wfd ie */
 
 	u8 *p2p_beacon_ie;
 	u8 *p2p_probe_req_ie;
