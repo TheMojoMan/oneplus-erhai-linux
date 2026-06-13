@@ -9921,7 +9921,7 @@ void kvm_arch_destroy_vm(struct kvm *kvm)
 	if (kvm->arch.created_mediated_pmu)
 		perf_release_mediated_pmu();
 	kvm_destroy_vcpus(kvm);
-	kvm_free_msr_filter(srcu_dereference_check(kvm->arch.msr_filter, &kvm->srcu, 1));
+	kvm_free_msr_filter((void * __force)kvm->arch.msr_filter);
 #ifdef CONFIG_KVM_IOAPIC
 	kvm_pic_destroy(kvm);
 	kvm_ioapic_destroy(kvm);
