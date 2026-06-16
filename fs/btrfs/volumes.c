@@ -480,7 +480,12 @@ btrfs_get_bdev_and_sb(const char *device_path, blk_mode_t flags, void *holder,
 	struct block_device *bdev;
 	int ret;
 
-	*bdev_file = bdev_file_open_by_path(device_path, flags, holder, &fs_holder_ops);
+	if (holder)
+		*bdev_file = fs_bdev_file_open_by_path(device_path, flags,
+						       holder, holder);
+	else
+		*bdev_file = bdev_file_open_by_path(device_path, flags, NULL,
+						    NULL);
 
 	if (IS_ERR(*bdev_file)) {
 		ret = PTR_ERR(*bdev_file);
@@ -495,7 +500,7 @@ btrfs_get_bdev_and_sb(const char *device_path, blk_mode_t flags, void *holder,
 	if (holder) {
 		ret = set_blocksize(*bdev_file, BTRFS_BDEV_BLOCKSIZE);
 		if (ret) {
-			bdev_fput(*bdev_file);
+			fs_bdev_file_release(*bdev_file, holder);
 			goto error;
 		}
 	}
@@ -503,7 +508,10 @@ btrfs_get_bdev_and_sb(const char *device_path, blk_mode_t flags, void *holder,
 	*disk_super = btrfs_read_disk_super(bdev, 0, false);
 	if (IS_ERR(*disk_super)) {
 		ret = PTR_ERR(*disk_super);
-		bdev_fput(*bdev_file);
+		if (holder)
+			fs_bdev_file_release(*bdev_file, holder);
+		else
+			bdev_fput(*bdev_file);
 		goto error;
 	}
 
@@ -727,7 +735,7 @@ static int btrfs_open_one_device(struct btrfs_fs_devices *fs_devices,
 
 error_free_page:
 	btrfs_release_disk_super(disk_super);
-	bdev_fput(bdev_file);
+	fs_bdev_file_release(bdev_file, holder);
 
 	return -EINVAL;
 }
@@ -1087,7 +1095,7 @@ static void __btrfs_free_extra_devids(struct btrfs_fs_devices *fs_devices,
 			continue;
 
 		if (device->bdev_file) {
-			bdev_fput(device->bdev_file);
+			fs_bdev_file_release(device->bdev_file, device->bdev_file->private_data);
 			device->bdev = NULL;
 			device->bdev_file = NULL;
 			fs_devices->open_devices--;
@@ -1127,10 +1135,12 @@ void btrfs_free_extra_devids(struct btrfs_fs_devices *fs_devices)
 /* Release a device that was made unfreezable for a membership change. */
 void btrfs_release_device_allow_freeze(struct file *bdev_file)
 {
+	struct super_block *sb = bdev_file->private_data;
+
 	/* Yield before allow (strand-safe); file still open for the allow (UAF-safe). */
 	bdev_yield_claim(bdev_file);
 	bdev_allow_freeze(file_bdev(bdev_file));
-	bdev_fput(bdev_file);
+	fs_bdev_file_release(bdev_file, sb);
 }
 
 static void btrfs_close_bdev(struct btrfs_device *device, bool allow_freeze)
@@ -1147,7 +1157,8 @@ static void btrfs_close_bdev(struct btrfs_device *device, bool allow_freeze)
 	if (allow_freeze)
 		btrfs_release_device_allow_freeze(device->bdev_file);
 	else
-		bdev_fput(device->bdev_file);
+		fs_bdev_file_release(device->bdev_file,
+				     device->bdev_file->private_data);
 }
 
 static void btrfs_close_one_device(struct btrfs_device *device)
@@ -2894,8 +2905,8 @@ struct file *btrfs_open_device_deny_freeze(const char *path,
 		return ERR_PTR(ret);
 	}
 
-	bdev_file = bdev_file_open_by_dev(file_bdev(probe_file)->bd_dev,
-					  BLK_OPEN_WRITE, sb, &fs_holder_ops);
+	bdev_file = fs_bdev_file_open_by_dev(file_bdev(probe_file)->bd_dev,
+					     BLK_OPEN_WRITE, sb, sb);
 	if (IS_ERR(bdev_file))
 		bdev_allow_freeze(file_bdev(probe_file));
 	bdev_fput(probe_file);
