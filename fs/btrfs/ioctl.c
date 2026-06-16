@@ -2622,7 +2622,7 @@ static long btrfs_ioctl_rm_dev_v2(struct file *file, void __user *arg)
 err_drop:
 	mnt_drop_write_file(file);
 	if (bdev_file)
-		bdev_fput(bdev_file);
+		btrfs_release_device_allow_freeze(bdev_file);
 out:
 	btrfs_put_dev_args_from_path(&args);
 	return ret;
@@ -2672,7 +2672,7 @@ static long btrfs_ioctl_rm_dev(struct file *file, void __user *arg)
 
 	mnt_drop_write_file(file);
 	if (bdev_file)
-		bdev_fput(bdev_file);
+		btrfs_release_device_allow_freeze(bdev_file);
 out:
 	btrfs_put_dev_args_from_path(&args);
 	return ret;
