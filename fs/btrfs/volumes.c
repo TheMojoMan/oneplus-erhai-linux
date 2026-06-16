@@ -1137,10 +1137,10 @@ void btrfs_release_device_allow_freeze(struct file *bdev_file)
 {
 	struct super_block *sb = bdev_file->private_data;
 
-	/* Yield before allow (strand-safe); file still open for the allow (UAF-safe). */
-	bdev_yield_claim(bdev_file);
+	/* Unregister before re-allowing (strand-safe); file still open (UAF-safe). */
+	fs_bdev_unregister(bdev_file, sb);
 	bdev_allow_freeze(file_bdev(bdev_file));
-	fs_bdev_file_release(bdev_file, sb);
+	bdev_fput(bdev_file);
 }
 
 static void btrfs_close_bdev(struct btrfs_device *device, bool allow_freeze)
