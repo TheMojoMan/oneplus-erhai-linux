@@ -501,7 +501,6 @@ static int super_dev_register(struct super_block *sb)
 	return err;
 }
 
-#ifdef CONFIG_BLOCK
 static struct super_dev *super_dev_get(struct rhlist_head *pos)
 {
 	struct super_dev *sb_dev;
@@ -535,7 +534,6 @@ static struct super_dev *super_dev_next(struct super_dev *prev)
 	super_dev_put(prev);
 	return sb_dev;
 }
-#endif
 
 static void kill_super_notify(struct super_block *sb)
 {
@@ -1044,29 +1042,19 @@ EXPORT_SYMBOL(iterate_supers_type);
 
 struct super_block *user_get_super(dev_t dev, bool excl)
 {
-	struct super_block *sb;
+	struct super_dev *sb_dev;
 
-	spin_lock(&sb_lock);
-	list_for_each_entry(sb, &super_blocks, s_list) {
-		bool locked;
+	for (sb_dev = super_dev_first(dev); sb_dev; sb_dev = super_dev_next(sb_dev)) {
+		struct super_block *sb = sb_dev->sd_sb;
 
-		if (sb->s_dev != dev)
+		if (!super_lock(sb, excl))
 			continue;
 
-		if (!refcount_inc_not_zero(&sb->s_passive))
-			continue;
-
-		spin_unlock(&sb_lock);
-
-		locked = super_lock(sb, excl);
-		if (locked)
-			return sb;
-
-		put_super(sb);
-		spin_lock(&sb_lock);
-		break;
+		/* The pinned entry holds a passive reference, take our own. */
+		refcount_inc(&sb->s_passive);
+		super_dev_put(sb_dev);
+		return sb;
 	}
-	spin_unlock(&sb_lock);
 	return NULL;
 }
 
