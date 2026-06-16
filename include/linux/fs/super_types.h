@@ -30,6 +30,7 @@ struct mount;
 struct mtd_info;
 struct quotactl_ops;
 struct shrinker;
+struct super_dev;
 struct unicode_map;
 struct user_namespace;
 struct workqueue_struct;
@@ -132,6 +133,7 @@ struct super_operations {
 struct super_block {
 	struct list_head			s_list;		/* Keep this first */
 	dev_t					s_dev;		/* search index; _not_ kdev_t */
+	struct super_dev			*s_super_dev;	/* sget_fc()'s device table claim */
 	unsigned char				s_blocksize_bits;
 	unsigned long				s_blocksize;
 	loff_t					s_maxbytes;	/* Max file size */

@@ -24,6 +24,7 @@
 #include <linux/export.h>
 #include <linux/slab.h>
 #include <linux/blkdev.h>
+#include <linux/rhashtable.h>
 #include <linux/mount.h>
 #include <linux/security.h>
 #include <linux/writeback.h>		/* for the emergency remount stuff */
@@ -272,6 +273,8 @@ static unsigned long super_cache_count(struct shrinker *shrink,
 	return total_objects;
 }
 
+static struct super_dev *super_dev_alloc(dev_t dev, struct super_block *sb);
+
 static void destroy_super_work(struct work_struct *work)
 {
 	struct super_block *s = container_of(work, struct super_block,
@@ -279,6 +282,8 @@ static void destroy_super_work(struct work_struct *work)
 	fsnotify_sb_free(s);
 	security_sb_free(s);
 	put_user_ns(s->s_user_ns);
+	/* Only an unregistered entry is still owned by the superblock. */
+	kfree(s->s_super_dev);
 	kfree(s->s_subtype);
 	for (int i = 0; i < SB_FREEZE_LEVELS; i++)
 		percpu_free_rwsem(&s->s_writers.rw_sem[i]);
@@ -392,6 +397,10 @@ static struct super_block *alloc_super(struct file_system_type *type, int flags,
 		goto fail;
 	if (list_lru_init_memcg(&s->s_inode_lru, s->s_shrink))
 		goto fail;
+	s->s_super_dev = super_dev_alloc(0, s);
+	if (!s->s_super_dev)
+		goto fail;
+
 	s->s_min_writeback_pages = MIN_WRITEBACK_PAGES;
 	return s;
 
@@ -421,6 +430,77 @@ void put_super(struct super_block *s)
 	}
 }
 
+struct super_dev {
+	dev_t			sd_dev;
+	struct super_block	*sd_sb;
+	refcount_t		sd_ref;
+	struct rhlist_head	sd_node;
+	struct rcu_head		sd_rcu;
+};
+
+static struct rhltable super_dev_table;
+static const struct rhashtable_params super_dev_params = {
+	.key_len	= sizeof(dev_t),
+	.key_offset	= offsetof(struct super_dev, sd_dev),
+	.head_offset	= offsetof(struct super_dev, sd_node),
+};
+
+static struct super_dev *super_dev_alloc(dev_t dev, struct super_block *sb)
+{
+	struct super_dev *fsd;
+
+	fsd = kzalloc_obj(*fsd);
+	if (!fsd)
+		return NULL;
+	fsd->sd_dev = dev;
+	fsd->sd_sb = sb;
+	refcount_set(&fsd->sd_ref, 1);
+	return fsd;
+}
+
+static void super_dev_put(struct super_dev *fsd)
+{
+	/* Unlink only once unpinned, so a cursor never resumes from a removed node. */
+	if (fsd && refcount_dec_and_test(&fsd->sd_ref)) {
+		rhltable_remove(&super_dev_table, &fsd->sd_node, super_dev_params);
+		put_super(fsd->sd_sb);
+		kfree_rcu(fsd, sd_rcu);
+	}
+}
+
+void __init super_dev_init(void)
+{
+	if (rhltable_init(&super_dev_table, &super_dev_params))
+		panic("VFS: Cannot initialise super_dev_table\n");
+}
+
+static int super_dev_insert(struct super_dev *fsd)
+{
+	int err;
+
+	err = rhltable_insert(&super_dev_table, &fsd->sd_node, super_dev_params);
+	if (!err)
+		refcount_inc(&fsd->sd_sb->s_passive);
+	return err;
+}
+
+/* Register @sb under @sb->s_dev as the final fallible act of a set callback. */
+static int super_dev_register(struct super_block *sb)
+{
+	struct super_dev *fsd = sb->s_super_dev;
+	int err;
+
+	lockdep_assert_held(&sb_lock);
+	VFS_WARN_ON_ONCE(!sb->s_dev);
+	VFS_WARN_ON_ONCE(!fsd || fsd->sd_dev);
+
+	fsd->sd_dev = sb->s_dev;
+	err = super_dev_insert(fsd);
+	if (err)
+		fsd->sd_dev = 0;
+	return err;
+}
+
 static void kill_super_notify(struct super_block *sb)
 {
 	lockdep_assert_not_held(&sb->s_umount);
@@ -439,6 +519,12 @@ static void kill_super_notify(struct super_block *sb)
 	spin_lock(&sb_lock);
 	hlist_del_init(&sb->s_instances);
 	spin_unlock(&sb_lock);
+
+	/* Drop sget_fc()'s claim; a never-registered entry stays with the sb. */
+	if (sb->s_super_dev->sd_dev) {
+		super_dev_put(sb->s_super_dev);
+		sb->s_super_dev = NULL;
+	}
 
 	/*
 	 * Let concurrent mounts know that this thing is really dead.
@@ -750,6 +836,7 @@ retry:
 	}
 	if (!s) {
 		spin_unlock(&sb_lock);
+
 		s = alloc_super(fc->fs_type, fc->sb_flags, user_ns);
 		if (!s)
 			return ERR_PTR(-ENOMEM);
@@ -759,11 +846,13 @@ retry:
 	s->s_fs_info = fc->s_fs_info;
 	err = set(s, fc);
 	if (err) {
+		VFS_WARN_ON_ONCE(s->s_super_dev->sd_dev);
 		s->s_fs_info = NULL;
 		spin_unlock(&sb_lock);
 		destroy_unused_super(s);
 		return ERR_PTR(err);
 	}
+	VFS_WARN_ON_ONCE(!s->s_super_dev->sd_dev);
 	fc->s_fs_info = NULL;
 	s->s_type = fc->fs_type;
 	s->s_iflags |= fc->s_iflags;
@@ -1217,7 +1306,16 @@ EXPORT_SYMBOL(free_anon_bdev);
 
 int set_anon_super(struct super_block *s, void *data)
 {
-	return get_anon_bdev(&s->s_dev);
+	int error;
+
+	error = get_anon_bdev(&s->s_dev);
+	if (error)
+		return error;
+
+	error = super_dev_register(s);
+	if (error)
+		free_anon_bdev(s->s_dev);
+	return error;
 }
 EXPORT_SYMBOL(set_anon_super);
 
@@ -1303,7 +1401,7 @@ EXPORT_SYMBOL(get_tree_keyed);
 static int set_bdev_super(struct super_block *s, void *data)
 {
 	s->s_dev = *(dev_t *)data;
-	return 0;
+	return super_dev_register(s);
 }
 
 static int super_s_dev_set(struct super_block *s, struct fs_context *fc)
