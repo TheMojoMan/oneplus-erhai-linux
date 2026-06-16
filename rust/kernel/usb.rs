@@ -382,6 +382,7 @@ impl<Ctx: device::DeviceContext> AsRef<Device> for Interface<Ctx> {
 
 // SAFETY: Instances of `Interface` are always reference-counted.
 unsafe impl AlwaysRefCounted for Interface {
+    #[inline]
     fn inc_ref(&self) {
         // SAFETY: The invariants of `Interface` guarantee that `self.as_raw()`
         // returns a valid `struct usb_interface` pointer, for which we will
@@ -389,6 +390,7 @@ unsafe impl AlwaysRefCounted for Interface {
         unsafe { bindings::usb_get_intf(self.as_raw()) };
     }
 
+    #[inline]
     unsafe fn dec_ref(obj: NonNull<Self>) {
         // SAFETY: The safety requirements guarantee that the refcount is non-zero.
         unsafe { bindings::usb_put_intf(obj.cast().as_ptr()) }
@@ -433,6 +435,7 @@ kernel::impl_device_context_into_aref!(Device);
 
 // SAFETY: Instances of `Device` are always reference-counted.
 unsafe impl AlwaysRefCounted for Device {
+    #[inline]
     fn inc_ref(&self) {
         // SAFETY: The invariants of `Device` guarantee that `self.as_raw()`
         // returns a valid `struct usb_device` pointer, for which we will
@@ -440,6 +443,7 @@ unsafe impl AlwaysRefCounted for Device {
         unsafe { bindings::usb_get_dev(self.as_raw()) };
     }
 
+    #[inline]
     unsafe fn dec_ref(obj: NonNull<Self>) {
         // SAFETY: The safety requirements guarantee that the refcount is non-zero.
         unsafe { bindings::usb_put_dev(obj.cast().as_ptr()) }
