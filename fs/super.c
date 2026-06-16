@@ -1548,13 +1548,15 @@ static void fs_bdev_sync(struct block_device *bdev)
  * devices is frozen once per device and stays frozen until all are thawed; the
  * block layer nests these freezes so the count stays balanced.
  *
- * Return: 0, or the first error from freezing a superblock or syncing the
- *         block device.
+ * Return: 0, or the error from the one superblock on a single-fs device.  When
+ *         several superblocks share @bdev a per-superblock failure is swallowed
+ *         (see below), but a sync_blockdev() failure is always reported.
  */
 static int fs_bdev_freeze(struct block_device *bdev)
 {
 	dev_t dev = bdev->bd_dev;
 	struct super_dev *sb_dev;
+	unsigned int count = 0;
 	int error = 0, err;
 
 	lockdep_assert_held(&bdev->bd_fsfreeze_mutex);
@@ -1568,8 +1570,17 @@ static int fs_bdev_freeze(struct block_device *bdev)
 		if (err && !error)
 			error = err;
 		deactivate_super(sb_dev->sd_sb);
+		count++;
 	}
 
+	/*
+	 * When several superblocks share the device, keep it frozen even if some
+	 * of them failed to freeze and swallow the error: rolling the rest back
+	 * via thaw_super() can fail too, so neither is a clear win. A single
+	 * filesystem (count == 1) still reports its error.
+	 */
+	if (error && count > 1)
+		error = 0;
 	if (!error)
 		error = sync_blockdev(bdev);
 	return error;
@@ -1583,12 +1594,14 @@ static int fs_bdev_freeze(struct block_device *bdev)
  * A zero return does not imply a superblock is fully unfrozen; it may have been
  * frozen more than once (by the kernel or via another device).
  *
- * Return: 0, or the first error from thawing a superblock.
+ * Return: 0, or the first error on a single-fs device; a shared device swallows
+ *         per-superblock errors, as fs_bdev_freeze() does.
  */
 static int fs_bdev_thaw(struct block_device *bdev)
 {
 	dev_t dev = bdev->bd_dev;
 	struct super_dev *sb_dev;
+	unsigned int count = 0;
 	int error = 0, err;
 
 	lockdep_assert_held(&bdev->bd_fsfreeze_mutex);
@@ -1602,8 +1615,12 @@ static int fs_bdev_thaw(struct block_device *bdev)
 		if (err && !error)
 			error = err;
 		deactivate_super(sb_dev->sd_sb);
+		count++;
 	}
 
+	/* Shared device: swallow per-superblock errors, like fs_bdev_freeze(). */
+	if (error && count > 1)
+		error = 0;
 	return error;
 }
 
