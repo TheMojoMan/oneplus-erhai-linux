@@ -219,11 +219,13 @@ config SOC_IMX7ULP
 	  This enables support for Freescale i.MX7 Ultra Low Power processor.
 
 config SOC_IMXRT
-	bool "i.MXRT support"
+	bool "i.MXRT support (DEPRECATED)"
 	depends on ARM_SINGLE_ARMV7M
 	select ARMV7M_SYSTICK if ARM_SINGLE_ARMV7M
 	help
 	  This enables support for Freescale i.MXRT Crossover processor.
+
+	  This platform is scheduled for removal in early 2027
 
 config SOC_VF610
 	bool "Vybrid Family VF610 support"
