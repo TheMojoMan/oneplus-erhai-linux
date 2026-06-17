@@ -30,8 +30,14 @@ struct xe_rtp_action {
 	 */
 	u32 clr_bits;
 
-	/** @set_bits: bits to set when updating register */
-	u32 set_bits;
+	union {
+		/** @set_bits: bits to set when updating register */
+		u32 set_bits;
+
+		/** @set_func: function to provide bits to set when updating register */
+		u32 (*set_func)(struct xe_gt *gt,
+				struct xe_hw_engine *hwe);
+	};
 
 #define XE_RTP_NOCHECK		.read_mask = 0
 	/** @read_mask: mask for bits to consider when reading value back */
@@ -40,6 +46,13 @@ struct xe_rtp_action {
 #define XE_RTP_ACTION_FLAG_ENGINE_BASE		BIT(0)
 	/** @flags: flags to apply on rule evaluation or action */
 	u8 flags;
+
+	/**
+	 * @use_func:
+	 *   Internal flag indicating @set_func should be called instead of
+	 *   using @set_bits.
+	 */
+	u8 use_func:1;
 };
 
 enum {
