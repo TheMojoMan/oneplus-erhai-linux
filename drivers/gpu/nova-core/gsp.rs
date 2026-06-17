@@ -39,10 +39,12 @@ use crate::{
         Falcon, //
     },
     gpu::Chipset,
-    gsp::cmdq::Cmdq,
-    gsp::fw::{
-        GspArgumentsPadded,
-        LibosMemoryRegionInitArgument, //
+    gsp::{
+        cmdq::Cmdq,
+        fw::{
+            GspArgumentsPadded,
+            LibosMemoryRegionInitArgument, //
+        },
     },
     num,
 };
@@ -207,6 +209,11 @@ impl Gsp {
                 },
             }))
         })
+    }
+
+    /// Query the GSP for the static GPU information.
+    pub(crate) fn get_static_info(&self, bar: Bar0<'_>) -> Result<commands::GetGspStaticInfoReply> {
+        self.cmdq.send_command(bar, commands::GetGspStaticInfo)
     }
 }
 
