@@ -778,7 +778,8 @@ config CPU_LITTLE_ENDIAN
 	  space builds.
 
 config CPU_BIG_ENDIAN
-	bool "Build big-endian kernel"
+	bool "Build big-endian kernel (DEPRECATED)"
+	depends on ARCH_MULTI_V5 || BROKEN
 	depends on !LD_IS_LLD
 	help
 	  Say Y if you plan on running a kernel in big-endian mode.
