@@ -10,8 +10,6 @@
 #include <dt-bindings/pwm/pwm.h>
 #include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
 
-#include "monaco.dtsi"
-#include "monaco-pmics.dtsi"
 #include "monaco-monza-som.dtsi"
 
 / {
