@@ -96,4 +96,29 @@ struct xe_ras_get_counter_response {
 	u32 reserved[57];
 } __packed;
 
+/**
+ * struct xe_ras_clear_counter_request - Request structure for clear counter
+ */
+struct xe_ras_clear_counter_request {
+	/** @counter: Counter class to be cleared */
+	struct xe_ras_error_class counter;
+	/** @reserved: Reserved for future use */
+	u32 reserved;
+} __packed;
+
+/**
+ * struct xe_ras_clear_counter_response - Response structure for clear counter
+ */
+struct xe_ras_clear_counter_response {
+	/** @counter: Counter class that was cleared */
+	struct xe_ras_error_class counter;
+	/** @reserved: Reserved */
+	u32 reserved;
+	/** @timestamp: Timestamp when the counter was cleared */
+	u64 timestamp;
+	/** @status: Status of the clear operation */
+	u32 status;
+	/** @reserved1: Reserved for future use */
+	u32 reserved1[3];
+} __packed;
 #endif
