@@ -51,7 +51,7 @@ static inline u32 tb10x_reg_read(struct tb10x_gpio *gpio, unsigned int offs)
 	return ioread32(gpio->base + offs);
 }
 
-static int tb10x_gpio_to_irq(struct gpio_chip *chip, unsigned offset)
+static int tb10x_gpio_to_irq(struct gpio_chip *chip, unsigned int offset)
 {
 	struct tb10x_gpio *tb10x_gpio = gpiochip_get_data(chip);
 
