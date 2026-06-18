@@ -4,6 +4,7 @@
  */
 
 #include "xe_device.h"
+#include "xe_drm_ras.h"
 #include "xe_pm.h"
 #include "xe_printk.h"
 #include "xe_ras.h"
@@ -267,4 +268,18 @@ int xe_ras_clear_counter(struct xe_device *xe, u8 severity, u8 component)
 	       sev_to_str(counter->common.severity));
 
 	return 0;
+}
+
+/**
+ * xe_ras_init - Initialize Xe RAS
+ * @xe: xe device instance
+ *
+ * Register drm_ras nodes
+ */
+void xe_ras_init(struct xe_device *xe)
+{
+	if (xe->info.platform != XE_PVC)
+		return;
+
+	xe_drm_ras_init(xe);
 }
