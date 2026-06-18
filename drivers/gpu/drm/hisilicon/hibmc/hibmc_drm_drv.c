@@ -14,6 +14,7 @@
 #include <linux/aperture.h>
 #include <linux/module.h>
 #include <linux/pci.h>
+#include <linux/sizes.h>
 
 #include <drm/clients/drm_client_setup.h>
 #include <drm/drm_atomic_helper.h>
@@ -106,11 +107,26 @@ static const struct dev_pm_ops hibmc_pm_ops = {
 				hibmc_pm_resume)
 };
 
+static struct drm_framebuffer *hibmc_mode_config_fb_create(struct drm_device *dev,
+							   struct drm_file *file_priv,
+							   const struct drm_format_info *info,
+							   const struct drm_mode_fb_cmd2 *mode_cmd)
+{
+	int i;
+
+	for (i = 0; i < info->num_planes; ++i) {
+		if (mode_cmd->pitches[i] % SZ_128)
+			return ERR_PTR(-EINVAL);
+	}
+
+	return drm_gem_fb_create(dev, file_priv, info, mode_cmd);
+}
+
 static const struct drm_mode_config_funcs hibmc_mode_funcs = {
 	.mode_valid = drm_vram_helper_mode_valid,
 	.atomic_check = drm_atomic_helper_check,
 	.atomic_commit = drm_atomic_helper_commit,
-	.fb_create = drm_gem_fb_create,
+	.fb_create = hibmc_mode_config_fb_create,
 };
 
 static int hibmc_kms_init(struct hibmc_drm_private *priv)
