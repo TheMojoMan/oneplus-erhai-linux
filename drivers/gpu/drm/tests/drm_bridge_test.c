@@ -116,7 +116,7 @@ static const struct drm_bridge_funcs drm_test_bridge_atomic_funcs = {
 	.atomic_disable		= drm_test_bridge_atomic_disable,
 	.atomic_destroy_state	= drm_atomic_helper_bridge_destroy_state,
 	.atomic_duplicate_state	= drm_atomic_helper_bridge_duplicate_state,
-	.atomic_reset		= drm_atomic_helper_bridge_reset,
+	.atomic_create_state	= drm_atomic_helper_bridge_create_state,
 };
 
 static int dummy_clear_infoframe(struct drm_bridge *bridge)
@@ -134,7 +134,7 @@ static const struct drm_bridge_funcs drm_test_bridge_bus_fmts_funcs = {
 	.atomic_get_output_bus_fmts	= drm_atomic_helper_bridge_get_hdmi_output_bus_fmts,
 	.atomic_destroy_state		= drm_atomic_helper_bridge_destroy_state,
 	.atomic_duplicate_state		= drm_atomic_helper_bridge_duplicate_state,
-	.atomic_reset			= drm_atomic_helper_bridge_reset,
+	.atomic_create_state		= drm_atomic_helper_bridge_create_state,
 	.hdmi_write_avi_infoframe	= dummy_write_infoframe,
 	.hdmi_write_hdmi_infoframe	= dummy_write_infoframe,
 	.hdmi_clear_avi_infoframe	= dummy_clear_infoframe,
@@ -301,7 +301,7 @@ static const struct drm_bridge_funcs (ident) = {						\
 	.atomic_disable			= drm_test_bridge_atomic_disable,			\
 	.atomic_destroy_state		= drm_atomic_helper_bridge_destroy_state,		\
 	.atomic_duplicate_state		= drm_atomic_helper_bridge_duplicate_state,		\
-	.atomic_reset			= drm_atomic_helper_bridge_reset,			\
+	.atomic_create_state		= drm_atomic_helper_bridge_create_state,		\
 	.atomic_get_input_bus_fmts	= (input_fmts_func),					\
 	.atomic_get_output_bus_fmts	= (output_fmts_func),					\
 	.hdmi_write_avi_infoframe	= (hdmi_write_infoframe_func),				\
