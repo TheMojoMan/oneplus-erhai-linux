@@ -873,8 +873,7 @@ EXPORT_SYMBOL(drm_atomic_helper_bridge_duplicate_state);
  * @state: bridge state to destroy
  *
  * Destroys a bridge state previously created by
- * &drm_atomic_helper_bridge_create_state(),
- * &drm_atomic_helper_bridge_reset() or
+ * &drm_atomic_helper_bridge_create_state() or
  * &drm_atomic_helper_bridge_duplicate_state(). This helper is meant to be
  * used as a bridge &drm_bridge_funcs.atomic_destroy_state hook for bridges
  * that don't subclass the bridge state.
@@ -906,22 +905,6 @@ void __drm_atomic_helper_bridge_state_init(struct drm_bridge_state *state,
 	state->bridge = bridge;
 }
 EXPORT_SYMBOL(__drm_atomic_helper_bridge_state_init);
-
-/**
- * drm_atomic_helper_bridge_reset() - Allocate and initialize a bridge state
- *				      to its default
- * @bridge: the bridge this state refers to
- *
- * Allocates the bridge state and initializes it to default values. This helper
- * is meant to be used as a bridge &drm_bridge_funcs.atomic_reset hook for
- * bridges that don't subclass the bridge state.
- */
-struct drm_bridge_state *
-drm_atomic_helper_bridge_reset(struct drm_bridge *bridge)
-{
-	return drm_atomic_helper_bridge_create_state(bridge);
-}
-EXPORT_SYMBOL(drm_atomic_helper_bridge_reset);
 
 /**
  * drm_atomic_helper_bridge_create_state - default
