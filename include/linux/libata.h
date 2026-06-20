@@ -139,30 +139,35 @@ enum {
 	ATA_DFLAG_NCQ_SEND_RECV = (1UL << 11), /* device supports NCQ SEND and RECV */
 	ATA_DFLAG_NCQ_PRIO	= (1UL << 12), /* device supports NCQ priority */
 	ATA_DFLAG_CDL		= (1UL << 13), /* supports cmd duration limits */
-	ATA_DFLAG_CFG_MASK	= (1UL << 14) - 1,
+	ATA_DFLAG_DEPOP		= (1UL << 14), /* supports depopulation capability */
+	ATA_DFLAG_DEPOP_RESTORE	= (1UL << 15), /* supports depopulation restoration */
+	ATA_DFLAG_DEPOP_MODIFY	= (1UL << 16), /* supports zoned depopulation */
+	ATA_DFLAG_CFG_MASK	= (1UL << 17) - 1,
 
-	ATA_DFLAG_PIO		= (1UL << 14), /* device limited to PIO mode */
-	ATA_DFLAG_NCQ_OFF	= (1UL << 15), /* device limited to non-NCQ mode */
-	ATA_DFLAG_SLEEPING	= (1UL << 16), /* device is sleeping */
-	ATA_DFLAG_DUBIOUS_XFER	= (1UL << 17), /* data transfer not verified */
-	ATA_DFLAG_NO_UNLOAD	= (1UL << 18), /* device doesn't support unload */
-	ATA_DFLAG_UNLOCK_HPA	= (1UL << 19), /* unlock HPA */
-	ATA_DFLAG_INIT_MASK	= (1UL << 20) - 1,
+	ATA_DFLAG_PIO		= (1UL << 17), /* device limited to PIO mode */
+	ATA_DFLAG_NCQ_OFF	= (1UL << 18), /* device limited to non-NCQ mode */
+	ATA_DFLAG_SLEEPING	= (1UL << 19), /* device is sleeping */
+	ATA_DFLAG_DUBIOUS_XFER	= (1UL << 20), /* data transfer not verified */
+	ATA_DFLAG_NO_UNLOAD	= (1UL << 21), /* device doesn't support unload */
+	ATA_DFLAG_UNLOCK_HPA	= (1UL << 22), /* unlock HPA */
+	ATA_DFLAG_INIT_MASK	= (1UL << 23) - 1,
 
-	ATA_DFLAG_NCQ_PRIO_ENABLED = (1UL << 20), /* Priority cmds sent to dev */
-	ATA_DFLAG_CDL_ENABLED	= (1UL << 21), /* cmd duration limits is enabled */
-	ATA_DFLAG_RESUMING	= (1UL << 22),  /* Device is resuming */
-	ATA_DFLAG_DETACH	= (1UL << 24),
-	ATA_DFLAG_DETACHED	= (1UL << 25),
-	ATA_DFLAG_DA		= (1UL << 26), /* device supports Device Attention */
-	ATA_DFLAG_DEVSLP	= (1UL << 27), /* device supports Device Sleep */
-	ATA_DFLAG_ACPI_DISABLED = (1UL << 28), /* ACPI for the device is disabled */
-	ATA_DFLAG_D_SENSE	= (1UL << 29), /* Descriptor sense requested */
+	ATA_DFLAG_NCQ_PRIO_ENABLED = (1UL << 23), /* Priority cmds sent to dev */
+	ATA_DFLAG_CDL_ENABLED	= (1UL << 24), /* cmd duration limits is enabled */
+	ATA_DFLAG_RESUMING	= (1UL << 25),  /* Device is resuming */
+	ATA_DFLAG_DETACH	= (1UL << 26),
+	ATA_DFLAG_DETACHED	= (1UL << 27),
+	ATA_DFLAG_DA		= (1UL << 28), /* device supports Device Attention */
+	ATA_DFLAG_DEVSLP	= (1UL << 29), /* device supports Device Sleep */
+	ATA_DFLAG_ACPI_DISABLED = (1UL << 30), /* ACPI for the device is disabled */
+	ATA_DFLAG_D_SENSE	= (1UL << 31), /* Descriptor sense requested */
 
 	ATA_DFLAG_FEATURES_MASK	= (ATA_DFLAG_TRUSTED | ATA_DFLAG_DA |	\
 				   ATA_DFLAG_DEVSLP | ATA_DFLAG_NCQ_SEND_RECV | \
 				   ATA_DFLAG_NCQ_PRIO | ATA_DFLAG_FUA | \
-				   ATA_DFLAG_CDL)
+				   ATA_DFLAG_CDL | ATA_DFLAG_DEPOP | \
+				   ATA_DFLAG_DEPOP_RESTORE |
+				   ATA_DFLAG_DEPOP_MODIFY)
 };
 
 enum {

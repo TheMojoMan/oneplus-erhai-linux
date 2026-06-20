@@ -2705,6 +2705,71 @@ not_supported:
 	ata_dev_cleanup_cdl_resources(dev);
 }
 
+static void ata_dev_config_depop(struct ata_device *dev)
+{
+	unsigned int err_mask;
+	u64 val;
+
+	/* Ignore old drives. */
+	if (ata_id_major_version(dev->id) < 11)
+		goto not_supported;
+
+	/* NCQ Autosense is required. */
+	if (!ata_identify_page_supported(dev, ATA_LOG_SUPPORTED_CAPABILITIES) ||
+	    !ata_id_has_ncq_autosense(dev->id))
+		goto not_supported;
+
+	err_mask = ata_read_log_page(dev, ATA_LOG_IDENTIFY_DEVICE,
+				     ATA_LOG_SUPPORTED_CAPABILITIES,
+				     dev->sector_buf, 1);
+	if (err_mask)
+		goto not_supported;
+
+	/* Check depopulation capabilities bits. */
+	val = get_unaligned_le64(&dev->sector_buf[152]);
+	if (!(val & BIT_ULL(63)))
+		goto not_supported;
+
+	/*
+	 * Support for at least the GET PHYSICAL ELEMENT STATUS and
+	 * REMOVE ELEMENT AND TRUNCATE commands is mandated.
+	 */
+	if (!(val & BIT_ULL(0)) || !(val & BIT_ULL(1)))
+		goto not_supported;
+
+	dev->flags |= ATA_DFLAG_DEPOP;
+
+	/* Check if RESTORE ELEMENTS AND REBUILD is supported. */
+	if (val & BIT_ULL(2))
+		dev->flags |= ATA_DFLAG_DEPOP_RESTORE;
+
+	/*
+	 * For ZAC devices, check if REMOVE ELEMENT AND MODIFY ZONES is
+	 * supported.
+	 */
+	if (dev->class != ATA_DEV_ZAC)
+		return;
+
+	err_mask = ata_read_log_page(dev, ATA_LOG_IDENTIFY_DEVICE,
+				     ATA_LOG_ZONED_INFORMATION,
+				     dev->sector_buf, 1);
+	if (err_mask)
+		return;
+
+	val = get_unaligned_le64(&dev->sector_buf[8]);
+	if (!(val & BIT_ULL(63)))
+		return;
+
+	if (val & BIT_ULL(1))
+		dev->flags |= ATA_DFLAG_DEPOP_MODIFY;
+
+	return;
+
+not_supported:
+	dev->flags &= ~(ATA_DFLAG_DEPOP | ATA_DFLAG_DEPOP_RESTORE |
+			ATA_DFLAG_DEPOP_MODIFY);
+}
+
 static int ata_dev_config_lba(struct ata_device *dev)
 {
 	const u16 *id = dev->id;
@@ -2942,7 +3007,7 @@ static void ata_dev_print_features(struct ata_device *dev)
 		return;
 
 	ata_dev_info(dev,
-		     "Features:%s%s%s%s%s%s%s%s%s%s\n",
+		     "Features:%s%s%s%s%s%s%s%s%s%s%s%s%s\n",
 		     dev->flags & ATA_DFLAG_FUA ? " FUA" : "",
 		     dev->flags & ATA_DFLAG_TRUSTED ? " Trust" : "",
 		     dev->flags & ATA_DFLAG_DA ? " Dev-Attention" : "",
@@ -2952,7 +3017,10 @@ static void ata_dev_print_features(struct ata_device *dev)
 		     dev->flags & ATA_DFLAG_NCQ_SEND_RECV ? " NCQ-sndrcv" : "",
 		     dev->flags & ATA_DFLAG_NCQ_PRIO ? " NCQ-prio" : "",
 		     dev->flags & ATA_DFLAG_CDL ? " CDL" : "",
-		     dev->cpr_log ? " CPR" : "");
+		     dev->cpr_log ? " CPR" : "",
+		     dev->flags & ATA_DFLAG_DEPOP ? " Depop" : "",
+		     dev->flags & ATA_DFLAG_DEPOP_RESTORE ? " Depop-Restore" : "",
+		     dev->flags & ATA_DFLAG_DEPOP_MODIFY ? " Depop-Modify" : "");
 }
 
 /**
@@ -3115,6 +3183,7 @@ int ata_dev_configure(struct ata_device *dev)
 		ata_dev_config_trusted(dev);
 		ata_dev_config_cpr(dev);
 		ata_dev_config_cdl(dev);
+		ata_dev_config_depop(dev);
 		dev->cdb_len = 32;
 
 		if (print_info)
