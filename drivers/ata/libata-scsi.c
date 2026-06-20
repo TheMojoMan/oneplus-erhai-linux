@@ -3729,6 +3729,11 @@ static const struct ata_scsi_cmd ata_supported_cmds[] = {
 		.sa_valid = true,
 		.sa = SAI_GET_PHYSICAL_ELEMENT_STATUS
 	},
+	{
+		.op = SERVICE_ACTION_IN_16,	.cdb_len = 16,
+		.sa_valid = true,
+		.sa = SAI_REMOVE_ELEMENT_AND_TRUNCATE
+	},
 	{	.op = REPORT_LUNS,		.cdb_len = 12	},
 	{	.op = ATA_12,			.cdb_len = 12	},
 	{	.op = SECURITY_PROTOCOL_IN,	.cdb_len = 12	},
@@ -3812,6 +3817,7 @@ static bool ata_scsi_cmd_is_supported(struct ata_device *dev, u8 op, u16 sa,
 	case SERVICE_ACTION_IN_16:
 		switch (sa) {
 		case SAI_GET_PHYSICAL_ELEMENT_STATUS:
+		case SAI_REMOVE_ELEMENT_AND_TRUNCATE:
 			return dev->flags & ATA_DFLAG_DEPOP;
 		default:
 			return true;
@@ -4708,6 +4714,71 @@ ata_scsi_get_phys_element_status_xlat(struct ata_queued_cmd *qc)
 	return 0;
 }
 
+static void ata_scsi_depop_ua_cap_changed_complete(struct ata_queued_cmd *qc)
+{
+	struct scsi_cmnd *scmd = qc->scsicmd;
+	u8 *cdb = scmd->cmnd;
+	bool is_ata_passthru = cdb[0] == ATA_16 || cdb[0] == ATA_12;
+	bool is_success = qc->err_mask == 0;
+
+	/*
+	 * For successful non-passthrough commands, raise a UNIT ATTENTION with
+	 * the additional sense code set to CAPACITY DATA HAS CHANGED to be
+	 * raised. Note that this should be done only if the capacity has
+	 * actually changed, which may not be the case if the element that was
+	 * specified for depopulation was already depopulated. But a capacity
+	 * change unit attention is harmless, so always raise the unit attention.
+	 */
+	if (is_success && !is_ata_passthru)
+		ata_scsi_set_sense(qc->dev, scmd, UNIT_ATTENTION,
+				   UA_CHANGED_ASC, CAPACITY_CHANGED_ASCQ);
+	ata_scsi_qc_complete(qc);
+}
+
+static unsigned int
+ata_scsi_remove_element_and_truncate_xlat(struct ata_queued_cmd *qc)
+{
+	struct scsi_cmnd *scmd = qc->scsicmd;
+	const u8 *cdb = scmd->cmnd;
+	struct ata_device *dev = qc->dev;
+	struct ata_taskfile *tf = &qc->tf;
+	u64 req_capacity;
+	u32 id;
+
+	if (!(dev->flags & ATA_DFLAG_DEPOP)) {
+		ata_scsi_set_sense(dev, scmd, ILLEGAL_REQUEST, 0x20, 0x0);
+		return 1;
+	}
+
+	req_capacity = get_unaligned_be64(&cdb[2]);
+	if (req_capacity == 1) {
+		ata_scsi_set_invalid_field(dev, scmd, 2, 0);
+		return 1;
+	}
+
+	id = get_unaligned_be32(&cdb[10]);
+
+	tf->protocol = ATA_PROT_NODATA;
+	tf->command = ATA_CMD_REMOVE_ELEMENT_AND_TRUNCATE;
+	tf->hob_feature = (id >> 24) & 0xff;
+	tf->feature = (id >> 16) & 0xff;
+	tf->hob_nsect = (id >> 8) & 0xff;
+	tf->nsect = id & 0xff;
+	tf->hob_lbah = (req_capacity >> 40) & 0xff;
+	tf->hob_lbam = (req_capacity >> 32) & 0xff;
+	tf->hob_lbal = (req_capacity >> 24) & 0xff;
+	tf->lbah = (req_capacity >> 16) & 0xff;
+	tf->lbam = (req_capacity >> 8) & 0xff;
+	tf->lbal = req_capacity & 0xff;
+	tf->device = ATA_LBA;
+	tf->flags |= ATA_TFLAG_ISADDR | ATA_TFLAG_DEVICE | ATA_TFLAG_LBA48;
+
+	qc->flags |= ATA_QCFLAG_RESULT_TF;
+	qc->complete_fn = ata_scsi_depop_ua_cap_changed_complete;
+
+	return 0;
+}
+
 /**
  *	ata_scsi_var_len_cdb_xlat - SATL variable length CDB to Handler
  *	@qc: Command to be translated
@@ -4791,6 +4862,8 @@ static inline ata_xlat_func_t ata_get_xlat_func(struct ata_device *dev,
 		sa = cdb[1] & 0x1f;
 		if (sa == SAI_GET_PHYSICAL_ELEMENT_STATUS)
 			return ata_scsi_get_phys_element_status_xlat;
+		if (sa == SAI_REMOVE_ELEMENT_AND_TRUNCATE)
+			return ata_scsi_remove_element_and_truncate_xlat;
 		break;
 
 	case ZBC_IN:
