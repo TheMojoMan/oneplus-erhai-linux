@@ -2611,7 +2611,7 @@ static u64 logarithmic_accumulation(struct timekeeper *tk, u64 offset,
 	/*
 	 * When skewing, do so by adjusting ntp_error to impart an extra
 	 * target delta into ntp_error per tick, limited to what can be
-	 * drained from time_offset to avoid overshoot.
+	 * drained from time_offset / time_adjust to avoid overshoot.
 	 *
 	 * The base 'mult' value was calculated with the skew taken into
 	 * account, such that the per-tick choice of 'mult' vs. 'mult+1'
