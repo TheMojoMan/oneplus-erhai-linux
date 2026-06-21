@@ -514,6 +514,69 @@ s64 ntp_drain_skew(unsigned int tkid, s64 amount, unsigned int shift)
 	return amount - unclaimed;
 }
 
+/*
+ * time_offset (drained exponentially) and time_adjust (drained linearly at the
+ * MAX_TICKADJ rate) can be asked to slew the clock in opposite directions.
+ * second_overflow() only folds their *net* into skew_delta, so the cancelling
+ * part would never be drained from either tracker via the per-tick code -- and
+ * if they cancel exactly, skew_delta is zero and neither converges at all.
+ *
+ * Settle that cancelling phase directly between the two here. No clock motion
+ * results (the opposing slews annihilate), but both move toward zero so neither
+ * stalls. @amount is the phase to take off time_offset, in its (÷HZ) units and
+ * with its sign; the same real magnitude comes off time_adjust in the opposite
+ * direction. Clamped so neither tracker is driven past zero.
+ */
+static void ntp_transfer_offset_adjust(struct ntp_data *ntpdata, s64 amount)
+{
+	s64 frac_delta, carry;
+
+	/*
+	 * Don't drain time_offset past zero. @amount shares its sign and is
+	 * normally bounded below it by ntp_offset_chunk(), but the ±1 skew_delta
+	 * floor for a tiny time_offset can exceed it, so clamp.
+	 */
+	if (abs(amount) > abs(ntpdata->time_offset))
+		amount = ntpdata->time_offset;
+	if (!amount)
+		return;
+
+	/*
+	 * Remove the matching phase from time_adjust, in plain shifted-ns. No
+	 * clamp against time_adjust's zero is needed: @amount is bounded by the
+	 * adjtime chunk, which second_overflow() never lets exceed time_adjust's
+	 * own pending phase, so this cannot overshoot.
+	 */
+	frac_delta = amount * NTP_INTERVAL_FREQ;
+
+	ntpdata->time_offset -= amount;
+
+	/* Add the matching phase to time_adjust, carrying whole µs (O(1)). */
+	ntpdata->time_adjust_frac += frac_delta;
+	if (ntpdata->time_adjust_frac >= ONE_US_NS ||
+	    ntpdata->time_adjust_frac <= -ONE_US_NS) {
+		carry = div64_s64(ntpdata->time_adjust_frac, ONE_US_NS);
+		ntpdata->time_adjust	  += carry;
+		ntpdata->time_adjust_frac -= carry * ONE_US_NS;
+	}
+
+	/*
+	 * Keep time_adjust and its sub-µs remainder the same sign. The
+	 * truncating carry above can leave them opposed (e.g. +4 µs paired
+	 * with -250 ns), and ntp_drain_time_adjust() treats abs(time_adjust_frac)
+	 * as same-direction drawer capacity -- an opposing remainder there makes
+	 * it over-deliver phase that was never removed from the pile. Borrow or
+	 * repay a single whole µs to realign; the total phase is unchanged.
+	 */
+	if (ntpdata->time_adjust > 0 && ntpdata->time_adjust_frac < 0) {
+		ntpdata->time_adjust--;
+		ntpdata->time_adjust_frac += ONE_US_NS;
+	} else if (ntpdata->time_adjust < 0 && ntpdata->time_adjust_frac > 0) {
+		ntpdata->time_adjust++;
+		ntpdata->time_adjust_frac -= ONE_US_NS;
+	}
+}
+
 /**
  * ntp_get_next_leap - Returns the next leapsecond in CLOCK_REALTIME ktime_t
  * @tkid:	Timekeeper ID
@@ -649,6 +712,18 @@ int second_overflow(unsigned int tkid, time64_t secs)
 			adj_chunk = div_s64(adj, NTP_INTERVAL_FREQ);
 			if (!adj_chunk)
 				adj_chunk = signof(ntpdata->time_adjust_frac);
+		}
+
+		/*
+		 * If the two slews oppose, only their net would drive the
+		 * per-tick drain, so the cancelling part would never drain from
+		 * either tracker and an exact cancellation would stall both.
+		 * Settle that overlap directly between them (no clock motion).
+		 */
+		if (off_chunk && adj_chunk && signof(off_chunk) != signof(adj_chunk)) {
+			s64 conflict = min(abs(off_chunk), abs(adj_chunk));
+
+			ntp_transfer_offset_adjust(ntpdata, signof(off_chunk) * conflict);
 		}
 
 		/* Net is what the clock delivers; reduce to per-tick, then floor. */
