@@ -31,6 +31,9 @@
  * @time_state:		State of the clock synchronization
  * @time_status:	Clock status bits
  * @time_offset:	Time adjustment in nanoseconds
+ * @skew_delta:		Per-tick phase slew rate for the coming second, in
+ *			@time_offset units (shifted-ns / HZ). Set by
+ *			second_overflow().
  * @time_constant:	PLL time constant
  * @time_maxerror:	Maximum error in microseconds holding the NTP sync distance
  *			(NTP dispersion + delay / 2)
@@ -67,6 +70,7 @@ struct ntp_data {
 	int			time_state;
 	int			time_status;
 	s64			time_offset;
+	s64			skew_delta;
 	long			time_constant;
 	long			time_maxerror;
 	long			time_esterror;
@@ -349,6 +353,7 @@ static void __ntp_clear(struct ntp_data *ntpdata)
 
 	ntpdata->tick_length	= ntpdata->tick_length_base;
 	ntpdata->time_offset	= 0;
+	ntpdata->skew_delta	= 0;
 
 	ntpdata->ntp_next_leap_sec = TIME64_MAX;
 	/* Clear PPS state variables */
@@ -385,6 +390,55 @@ u64 ntp_tick_length(unsigned int tkid)
 	return tk_ntp_data[tkid].tick_length;
 }
 
+s64 ntp_get_skew_delta(unsigned int tkid)
+{
+	return tk_ntp_data[tkid].skew_delta;
+}
+
+/* Sign of @x as +1 or -1 (zero counts as positive; callers pass nonzero). */
+static inline int signof(s64 x)
+{
+	return x < 0 ? -1 : 1;
+}
+
+static s64 ntp_drain_time_offset(unsigned int tkid, s64 amount)
+{
+	struct ntp_data *ntpdata = &tk_ntp_data[tkid];
+
+	/* Only drain if amount and time_offset have the same sign */
+	if (!amount || signof(amount) != signof(ntpdata->time_offset))
+		return amount;
+
+	/* Clamp: don't overshoot zero */
+	if (abs(amount) > abs(ntpdata->time_offset)) {
+		s64 undrained = amount - ntpdata->time_offset;
+
+		ntpdata->time_offset = 0;
+		return undrained;
+	}
+
+	ntpdata->time_offset -= amount;
+	return 0;
+}
+
+/*
+ * Drain one accumulation's worth of intentional skew as it is delivered.
+ *
+ * @amount is the total intentional per-tick skew for this accumulation
+ * (skew_delta << shift), in time_offset units (shifted_ns / HZ). Returns
+ * the amount actually claimed (same ÷HZ units).
+ */
+s64 ntp_drain_skew(unsigned int tkid, s64 amount, unsigned int shift)
+{
+	s64 unclaimed = ntp_drain_time_offset(tkid, amount);
+
+	/*
+	 * Return the amount actually drained from the intentional
+	 * phase offset in time_offset.
+	 */
+	return amount - unclaimed;
+}
+
 /**
  * ntp_get_next_leap - Returns the next leapsecond in CLOCK_REALTIME ktime_t
  * @tkid:	Timekeeper ID
@@ -419,7 +473,6 @@ ktime_t ntp_get_next_leap(unsigned int tkid)
 int second_overflow(unsigned int tkid, time64_t secs)
 {
 	struct ntp_data *ntpdata = &tk_ntp_data[tkid];
-	s64 delta;
 	int leap = 0;
 	s32 rem;
 
@@ -481,12 +534,37 @@ int second_overflow(unsigned int tkid, time64_t secs)
 	/* Compute the phase adjustment for the next second */
 	ntpdata->tick_length	 = ntpdata->tick_length_base;
 
-	delta			 = ntp_offset_chunk(ntpdata, ntpdata->time_offset);
-	ntpdata->time_offset	-= delta;
-	ntpdata->tick_length	+= delta;
-
 	/* Check PPS signal */
 	pps_dec_valid(ntpdata);
+
+	/*
+	 * Set the per-tick skew rate for the next second. This is in
+	 * the same units as time_offset: (ns << NTP_SCALE_SHIFT) / HZ.
+	 * If the result is so low that the skew imparted would round
+	 * to zero, pass the bare minimum ±1 to ensure that it *does*
+	 * actually drain completely to zero. It won't overshoot because
+	 * logarithmic_accumulation() only drains what it can from
+	 * time_offset and the rest ends up in ntp_error which drives
+	 * the selection of 'mult' immediately each tick.
+	 */
+	if (ntpdata->time_offset) {
+		s64 off_chunk = ntp_offset_chunk(ntpdata, ntpdata->time_offset);
+
+		/*
+		 * Once the exponential chunk rounds to zero, deliver the last
+		 * remaining offset this second so it converges to zero instead
+		 * of stalling just above it.
+		 */
+		if (!off_chunk)
+			off_chunk = ntpdata->time_offset;
+
+		/* Reduce to per-tick, then floor. */
+		ntpdata->skew_delta = div_s64(off_chunk, NTP_INTERVAL_FREQ);
+		if (!ntpdata->skew_delta)
+			ntpdata->skew_delta = signof(off_chunk);
+	} else {
+		ntpdata->skew_delta = 0;
+	}
 
 	if (!ntpdata->time_adjust)
 		goto out;
