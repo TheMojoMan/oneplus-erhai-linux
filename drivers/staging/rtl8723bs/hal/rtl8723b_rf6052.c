@@ -81,7 +81,6 @@ void PHY_RF6052SetBandwidth8723B(
 static int phy_RF6052_Config_ParaFile(struct adapter *Adapter)
 {
 	u32 u4RegValue = 0;
-	u8 eRFPath = 0;
 	struct bb_register_def *pPhyReg;
 	struct hal_com_data *pHalData = GET_HAL_DATA(Adapter);
 
@@ -89,17 +88,10 @@ static int phy_RF6052_Config_ParaFile(struct adapter *Adapter)
 	/* 3 <2> Initialize RF */
 	/* 3----------------------------------------------------------------- */
 
-	pPhyReg = &pHalData->PHYRegDef[eRFPath];
+	pPhyReg = &pHalData->PHYRegDef[RF_PATH_A];
 
 	/*----Store original RFENV control type----*/
-	switch (eRFPath) {
-	case RF_PATH_A:
-		u4RegValue = PHY_QueryBBReg(Adapter, pPhyReg->rfintfs, bRFSI_RFENV);
-		break;
-	case RF_PATH_B:
-		u4RegValue = PHY_QueryBBReg(Adapter, pPhyReg->rfintfs, bRFSI_RFENV << 16);
-		break;
-	}
+	u4RegValue = PHY_QueryBBReg(Adapter, pPhyReg->rfintfs, bRFSI_RFENV);
 
 	/*----Set RF_ENV enable----*/
 	PHY_SetBBReg(Adapter, pPhyReg->rfintfe, bRFSI_RFENV << 16, 0x1);
@@ -117,23 +109,10 @@ static int phy_RF6052_Config_ParaFile(struct adapter *Adapter)
 	udelay(1);/* PlatformStallExecution(1); */
 
 	/*----Initialize RF fom connfiguration file----*/
-	switch (eRFPath) {
-	case RF_PATH_A:
-	case RF_PATH_B:
-		ODM_ConfigRFWithHeaderFile(&pHalData->odmpriv,
-					   CONFIG_RF_RADIO, eRFPath);
-		break;
-	}
+	ODM_ConfigRFWithHeaderFile(&pHalData->odmpriv, CONFIG_RF_RADIO, RF_PATH_A);
 
 	/*----Restore RFENV control type----*/
-	switch (eRFPath) {
-	case RF_PATH_A:
-		PHY_SetBBReg(Adapter, pPhyReg->rfintfs, bRFSI_RFENV, u4RegValue);
-		break;
-	case RF_PATH_B:
-		PHY_SetBBReg(Adapter, pPhyReg->rfintfs, bRFSI_RFENV << 16, u4RegValue);
-		break;
-	}
+	PHY_SetBBReg(Adapter, pPhyReg->rfintfs, bRFSI_RFENV, u4RegValue);
 
 	/* 3 ----------------------------------------------------------------- */
 	/* 3 Configuration of Tx Power Tracking */
