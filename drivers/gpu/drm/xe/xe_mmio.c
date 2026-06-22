@@ -17,6 +17,7 @@
 #include "xe_device.h"
 #include "xe_gt_sriov_vf.h"
 #include "xe_sriov.h"
+#include "xe_tile_printk.h"
 #include "xe_trace.h"
 #include "xe_wa.h"
 
@@ -128,6 +129,11 @@ void xe_mmio_init(struct xe_mmio *mmio, struct xe_tile *tile, void __iomem *ptr,
 	mmio->tile = tile;
 }
 
+static bool mmio_available(struct xe_mmio *mmio)
+{
+	return !xe_tile_WARN_ON_ONCE(mmio->tile, !mmio->tile->xe->mmio.regs);
+}
+
 static void mmio_flush_pending_writes(struct xe_mmio *mmio)
 {
 #define DUMMY_REG_OFFSET	0x130030
@@ -146,6 +152,9 @@ u8 xe_mmio_read8(struct xe_mmio *mmio, struct xe_reg reg)
 	u32 addr = xe_mmio_adjusted_addr(mmio, reg.addr);
 	u8 val;
 
+	if (!mmio_available(mmio))
+		return 0;
+
 	mmio_flush_pending_writes(mmio);
 
 	val = readb(mmio->regs + addr);
@@ -158,6 +167,9 @@ void xe_mmio_write8(struct xe_mmio *mmio, struct xe_reg reg, u8 val)
 {
 	u32 addr = xe_mmio_adjusted_addr(mmio, reg.addr);
 
+	if (!mmio_available(mmio))
+		return;
+
 	trace_xe_reg_rw(mmio, true, addr, val, sizeof(val));
 
 	writeb(val, mmio->regs + addr);
@@ -167,6 +179,9 @@ u16 xe_mmio_read16(struct xe_mmio *mmio, struct xe_reg reg)
 {
 	u32 addr = xe_mmio_adjusted_addr(mmio, reg.addr);
 	u16 val;
+
+	if (!mmio_available(mmio))
+		return 0;
 
 	mmio_flush_pending_writes(mmio);
 
@@ -179,6 +194,9 @@ u16 xe_mmio_read16(struct xe_mmio *mmio, struct xe_reg reg)
 void xe_mmio_write32(struct xe_mmio *mmio, struct xe_reg reg, u32 val)
 {
 	u32 addr = xe_mmio_adjusted_addr(mmio, reg.addr);
+
+	if (!mmio_available(mmio))
+		return;
 
 	trace_xe_reg_rw(mmio, true, addr, val, sizeof(val));
 
@@ -193,6 +211,9 @@ u32 xe_mmio_read32(struct xe_mmio *mmio, struct xe_reg reg)
 {
 	u32 addr = xe_mmio_adjusted_addr(mmio, reg.addr);
 	u32 val;
+
+	if (!mmio_available(mmio))
+		return 0;
 
 	mmio_flush_pending_writes(mmio);
 
