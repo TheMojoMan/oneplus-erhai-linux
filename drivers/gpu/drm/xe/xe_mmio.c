@@ -24,16 +24,6 @@
 
 #include "generated/xe_device_wa_oob.h"
 
-static void tiles_fini(void *arg)
-{
-	struct xe_device *xe = arg;
-	struct xe_tile *tile;
-	int id;
-
-	for_each_remote_tile(tile, xe, id)
-		tile->mmio.regs = NULL;
-}
-
 /*
  * On multi-tile devices, partition the BAR space for MMIO on each tile,
  * possibly accounting for register override on the number of tiles available.
@@ -74,8 +64,7 @@ int xe_mmio_probe_tiles(struct xe_device *xe)
 	size_t tile_mmio_size = SZ_16M;
 
 	mmio_multi_tile_setup(xe, tile_mmio_size);
-
-	return devm_add_action_or_reset(xe->drm.dev, tiles_fini, xe);
+	return 0;
 }
 
 static void mmio_fini(void *arg)
