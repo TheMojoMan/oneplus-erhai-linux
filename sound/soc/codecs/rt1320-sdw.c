@@ -893,6 +893,42 @@ static int rt1320_check_fw_ready(struct rt1320_sdw_priv *rt1320)
 	return 0;
 }
 
+static int rt1320_dspfw_status(struct rt1320_sdw_priv *rt1320)
+{
+	struct device *dev = &rt1320->sdw_slave->dev;
+	unsigned int fw_status_addr, fw_ready;
+	unsigned int dspfw_run;
+
+	switch (rt1320->dev_id) {
+	case RT1320_DEV_ID:
+		fw_status_addr = RT1320_DSPFW_STATUS_ADDR;
+		break;
+	case RT1321_DEV_ID:
+		fw_status_addr = RT1321_DSPFW_STATUS_ADDR;
+		break;
+	default:
+		dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
+		return -EINVAL;
+	}
+
+	regmap_read(rt1320->regmap, fw_status_addr, &fw_ready);
+	fw_ready &= 0x1;
+
+	if (rt1320->dev_id == RT1321_DEV_ID) {
+		regmap_read(rt1320->regmap, 0xf01e, &dspfw_run);
+		dspfw_run &= 0x1;
+		fw_ready = (!dspfw_run && fw_ready);
+	}
+
+	if (fw_ready) {
+		dev_dbg(dev, "%s, DSP FW was already\n", __func__);
+		return 1;
+	}
+
+	dev_dbg(dev, "%s, DSP FW is NOT ready. Please load DSP FW first\n", __func__);
+	return 0;
+}
+
 static int rt1320_check_power_state_ready(struct rt1320_sdw_priv *rt1320, enum rt1320_power_state ps)
 {
 	struct device *dev = &rt1320->sdw_slave->dev;
@@ -1126,29 +1162,17 @@ static void rt1320_calibrate(struct rt1320_sdw_priv *rt1320)
 	struct device *dev = &rt1320->sdw_slave->dev;
 	struct rt1320_datafixpoint audfixpoint[2];
 	unsigned int reg_c5fb, reg_c570, reg_cd00;
-	unsigned int vol_reg[4], fw_ready;
+	unsigned int vol_reg[4];
 	unsigned long long l_meanr0, r_meanr0;
-	unsigned int fw_status_addr;
 	int l_re[5], r_re[5];
 	int ret, tmp;
 	unsigned long long factor = (1 << 27);
 	unsigned short l_advancegain, r_advancegain;
 	unsigned int delay_s = 7; /* delay seconds for the calibration */
+	int dspfw_status;
 
 	if (!rt1320->component)
 		return;
-
-	switch (rt1320->dev_id) {
-	case RT1320_DEV_ID:
-		fw_status_addr = RT1320_DSPFW_STATUS_ADDR;
-		break;
-	case RT1321_DEV_ID:
-		fw_status_addr = RT1321_DSPFW_STATUS_ADDR;
-		break;
-	default:
-		dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
-		return;
-	}
 
 	/* set volume 0dB */
 	regmap_read(rt1320->regmap, 0xdd0b, &vol_reg[3]);
@@ -1172,9 +1196,8 @@ static void rt1320_calibrate(struct rt1320_sdw_priv *rt1320)
 		goto _finish_;
 	}
 
-	regmap_read(rt1320->regmap, fw_status_addr, &fw_ready);
-	fw_ready &= 0x1;
-	if (!fw_ready) {
+	dspfw_status = rt1320_dspfw_status(rt1320);
+	if (dspfw_status <= 0) {
 		dev_dbg(dev, "%s, DSP FW is NOT ready. Please load DSP FW first\n", __func__);
 		goto _finish_;
 	}
@@ -1383,30 +1406,17 @@ static void rt1320_vab_preset(struct rt1320_sdw_priv *rt1320)
 static void rt1320_t0_load(struct rt1320_sdw_priv *rt1320, unsigned int l_t0, unsigned int r_t0)
 {
 	struct device *dev = &rt1320->sdw_slave->dev;
-	unsigned int factor = (1 << 22), fw_ready;
+	unsigned int factor = (1 << 22);
 	int l_t0_data[38], r_t0_data[38];
-	unsigned int fw_status_addr;
-
-	switch (rt1320->dev_id) {
-	case RT1320_DEV_ID:
-		fw_status_addr = RT1320_DSPFW_STATUS_ADDR;
-		break;
-	case RT1321_DEV_ID:
-		fw_status_addr = RT1321_DSPFW_STATUS_ADDR;
-		break;
-	default:
-		dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
-		return;
-	}
+	int dspfw_status;
 
 	regmap_write(rt1320->regmap,
 			SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23,
 				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x00);
 	rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, 0x00);
 
-	regmap_read(rt1320->regmap, fw_status_addr, &fw_ready);
-	fw_ready &= 0x1;
-	if (!fw_ready) {
+	dspfw_status = rt1320_dspfw_status(rt1320);
+	if (dspfw_status <= 0) {
 		dev_warn(dev, "%s, DSP FW is NOT ready\n", __func__);
 		goto _exit_;
 	}
@@ -1599,8 +1609,7 @@ struct rt1320_dspfwheader {
 
 	struct snd_soc_dapm_context *dapm = snd_soc_component_to_dapm(rt1320->component);
 	struct device *dev = &rt1320->sdw_slave->dev;
-	unsigned int val, i, fw_offset, fw_ready;
-	unsigned int fw_status_addr;
+	unsigned int val, i, fw_offset;
 	struct rt1320_dspfwheader *fwheader;
 	struct rt1320_imageinfo *ptr_img;
 	struct sdw_bpt_section sec[10];
@@ -1612,18 +1621,6 @@ struct rt1320_dspfwheader {
 	const char *dmi_vendor, *dmi_product, *dmi_sku;
 	int len_vendor, len_product, len_sku;
 	char filename[512];
-
-	switch (rt1320->dev_id) {
-	case RT1320_DEV_ID:
-		fw_status_addr = RT1320_DSPFW_STATUS_ADDR;
-		break;
-	case RT1321_DEV_ID:
-		fw_status_addr = RT1321_DSPFW_STATUS_ADDR;
-		break;
-	default:
-		dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
-		return;
-	}
 
 	dmi_vendor = dmi_get_system_info(DMI_SYS_VENDOR);
 	dmi_product = dmi_get_system_info(DMI_PRODUCT_NAME);
@@ -1654,9 +1651,7 @@ struct rt1320_dspfwheader {
 				RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x00);
 	rt1320_pde_transition_delay(rt1320, FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, 0x00);
 
-	regmap_read(rt1320->regmap, fw_status_addr, &fw_ready);
-	fw_ready &= 0x1;
-	if (fw_ready) {
+	if (rt1320_dspfw_status(rt1320)) {
 		dev_dbg(dev, "%s, DSP FW was already\n", __func__);
 		rt1320->fw_load_done = true;
 		goto _exit_;
@@ -2327,24 +2322,11 @@ static const DECLARE_TLV_DB_SCALE(in_vol_tlv, -1725, 75, 0);
 static int rt1320_r0_load(struct rt1320_sdw_priv *rt1320)
 {
 	struct device *dev = regmap_get_device(rt1320->regmap);
-	unsigned int fw_status_addr;
-	unsigned int fw_ready;
+	int dspfw_status;
 	int ret = 0;
 
 	if (!rt1320->r0_l_reg || !rt1320->r0_r_reg)
 		return -EINVAL;
-
-	switch (rt1320->dev_id) {
-	case RT1320_DEV_ID:
-		fw_status_addr = RT1320_DSPFW_STATUS_ADDR;
-		break;
-	case RT1321_DEV_ID:
-		fw_status_addr = RT1321_DSPFW_STATUS_ADDR;
-		break;
-	default:
-		dev_err(dev, "%s: Unknown device ID %d\n", __func__, rt1320->dev_id);
-		return -EINVAL;
-	}
 
 	regmap_write(rt1320->regmap,
 		SDW_SDCA_CTL(FUNC_NUM_AMP, RT1320_SDCA_ENT_PDE23, RT1320_SDCA_CTL_REQ_POWER_STATE, 0), 0x00);
@@ -2354,9 +2336,8 @@ static int rt1320_r0_load(struct rt1320_sdw_priv *rt1320)
 		goto _timeout_;
 	}
 
-	regmap_read(rt1320->regmap, fw_status_addr, &fw_ready);
-	fw_ready &= 0x1;
-	if (!fw_ready) {
+	dspfw_status = rt1320_dspfw_status(rt1320);
+	if (dspfw_status <= 0) {
 		dev_dbg(dev, "%s, DSP FW is NOT ready\n", __func__);
 		goto _timeout_;
 	}
