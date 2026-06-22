@@ -16,6 +16,7 @@
 #include "regs/xe_bars.h"
 #include "xe_device.h"
 #include "xe_gt_sriov_vf.h"
+#include "xe_printk.h"
 #include "xe_sriov.h"
 #include "xe_tile_printk.h"
 #include "xe_trace.h"
@@ -80,27 +81,30 @@ int xe_mmio_probe_tiles(struct xe_device *xe)
 static void mmio_fini(void *arg)
 {
 	struct xe_device *xe = arg;
-	struct xe_tile *root_tile = xe_device_get_root_tile(xe);
 
-	pci_iounmap(to_pci_dev(xe->drm.dev), xe->mmio.regs);
 	xe->mmio.regs = NULL;
-	root_tile->mmio.regs = NULL;
 }
 
+/**
+ * xe_mmio_probe_early() - Probe and initialize device's MMIO
+ * @xe: the &xe_device
+ *
+ * Map the entire GTTMMADR_BAR and initialize the first tile's MMIO instance.
+ *
+ * The first 16MB of the GTTMMADR_BAR always belongs to the root tile, and
+ * includes: registers (0-4MB), reserved space (4MB-8MB) and GGTT (8MB-16MB).
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
 int xe_mmio_probe_early(struct xe_device *xe)
 {
 	struct xe_tile *root_tile = xe_device_get_root_tile(xe);
 	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
 
-	/*
-	 * Map the entire BAR.
-	 * The first 16MB of the BAR, belong to the root tile, and include:
-	 * registers (0-4MB), reserved space (4MB-8MB) and GGTT (8MB-16MB).
-	 */
 	xe->mmio.size = pci_resource_len(pdev, GTTMMADR_BAR);
-	xe->mmio.regs = pci_iomap(pdev, GTTMMADR_BAR, 0);
+	xe->mmio.regs = pcim_iomap(pdev, GTTMMADR_BAR, 0);
 	if (!xe->mmio.regs) {
-		drm_err(&xe->drm, "failed to map registers\n");
+		xe_err(xe, "Failed to map GTTMMADR_BAR\n");
 		return -EIO;
 	}
 
