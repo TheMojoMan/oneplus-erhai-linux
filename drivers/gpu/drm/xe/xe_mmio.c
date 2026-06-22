@@ -11,7 +11,6 @@
 #include <linux/pci.h>
 
 #include <drm/drm_managed.h>
-#include <drm/drm_print.h>
 
 #include "regs/xe_bars.h"
 #include "xe_device.h"
@@ -315,8 +314,8 @@ u64 xe_mmio_read64_2x32(struct xe_mmio *mmio, struct xe_reg reg)
 		oldudw = udw;
 	}
 
-	drm_WARN(&mmio->tile->xe->drm, retries == 0,
-		 "64-bit read of %#x did not stabilize\n", reg.addr);
+	xe_tile_WARN(mmio->tile, retries == 0,
+		     "MMIO: 64-bit read of %#x did not stabilize\n", reg.addr);
 
 	return (u64)udw << 32 | ldw;
 }
