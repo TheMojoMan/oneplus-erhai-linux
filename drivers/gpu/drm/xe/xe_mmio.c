@@ -48,20 +48,34 @@ static void mmio_multi_tile_setup(struct xe_device *xe, size_t tile_mmio_size)
 	struct xe_tile *tile;
 	u8 id;
 
+	for_each_remote_tile(tile, xe, id)
+		xe_mmio_init(&tile->mmio, tile, xe->mmio.regs + id * tile_mmio_size, SZ_4M);
+}
+
+/**
+ * xe_mmio_probe_tiles() - Initialize all tiles' MMIO
+ * @xe: the &xe_device
+ *
+ * Initialize the remaining tiles' MMIO instances.
+ *
+ * Return: 0 on success or a negative error code on failure.
+ */
+int xe_mmio_probe_tiles(struct xe_device *xe)
+{
+	size_t tile_mmio_size = SZ_16M;
+
 	/*
 	 * Nothing to be done as tile 0 has already been setup earlier with the
 	 * entire BAR mapped - see xe_mmio_probe_early()
 	 */
 	if (xe->info.tile_count == 1)
-		return;
+		return 0;
 
-	for_each_remote_tile(tile, xe, id)
-		xe_mmio_init(&tile->mmio, tile, xe->mmio.regs + id * tile_mmio_size, SZ_4M);
-}
-
-int xe_mmio_probe_tiles(struct xe_device *xe)
-{
-	size_t tile_mmio_size = SZ_16M;
+	if (xe->mmio.size < xe->info.tile_count * tile_mmio_size) {
+		xe_err(xe, "GTTMMADR_BAR is too small for %d tiles: %zu\n",
+		       xe->info.tile_count, xe->mmio.size);
+		return -EIO;
+	}
 
 	mmio_multi_tile_setup(xe, tile_mmio_size);
 	return 0;
