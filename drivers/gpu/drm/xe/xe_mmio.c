@@ -101,10 +101,15 @@ int xe_mmio_probe_early(struct xe_device *xe)
 	struct xe_tile *root_tile = xe_device_get_root_tile(xe);
 	struct pci_dev *pdev = to_pci_dev(xe->drm.dev);
 
-	xe->mmio.size = pci_resource_len(pdev, GTTMMADR_BAR);
 	xe->mmio.regs = pcim_iomap(pdev, GTTMMADR_BAR, 0);
 	if (!xe->mmio.regs) {
 		xe_err(xe, "Failed to map GTTMMADR_BAR\n");
+		return -EIO;
+	}
+
+	xe->mmio.size = pci_resource_len(pdev, GTTMMADR_BAR);
+	if (xe->mmio.size < SZ_16M) {
+		xe_err(xe, "GTTMMADR_BAR is too small: %zu\n", xe->mmio.size);
 		return -EIO;
 	}
 
