@@ -329,7 +329,7 @@ static void metrousb_unthrottle(struct tty_struct *tty)
 	spin_unlock_irqrestore(&metro_priv->lock, flags);
 
 	/* Submit the urb to read from the port. */
-	result = usb_submit_urb(port->interrupt_in_urb, GFP_ATOMIC);
+	result = usb_submit_urb(port->interrupt_in_urb, GFP_KERNEL);
 	if (result)
 		dev_err(&port->dev,
 			"failed submitting interrupt in urb error code=%d\n",
