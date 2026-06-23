@@ -143,7 +143,6 @@ module_param(rtw_wifi_spec, int, 0644);
 module_param(rtw_antdiv_cfg, int, 0644);
 module_param(rtw_antdiv_type, int, 0644);
 
-
 module_param(rtw_hw_wps_pbc, int, 0644);
 
 static uint rtw_max_roaming_times = 2;
@@ -237,7 +236,6 @@ static void loadparam(struct adapter *padapter, struct net_device *pnetdev)
 
 	registry_par->lowrate_two_xmit = (u8)rtw_lowrate_two_xmit;
 	registry_par->low_power = (u8)rtw_low_power;
-
 
 	registry_par->wifi_spec = (u8)rtw_wifi_spec;
 
@@ -334,7 +332,6 @@ static unsigned int rtw_classify8021d(struct sk_buff *skb)
 
 	return dscp >> 5;
 }
-
 
 static u16 rtw_select_queue(struct net_device *dev, struct sk_buff *skb,
 			    struct net_device *sb_dev)
@@ -633,7 +630,6 @@ void rtw_reset_drv_sw(struct adapter *padapter)
 	rtw_set_signal_stat_timer(&padapter->recvpriv);
 }
 
-
 u8 rtw_init_drv_sw(struct adapter *padapter)
 {
 	int res;
@@ -889,7 +885,6 @@ netdev_open_error:
 
 	return _FAIL;
 }
-
 
 int rtw_ips_pwr_up(struct adapter *padapter)
 {
