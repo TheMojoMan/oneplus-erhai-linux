@@ -144,14 +144,14 @@ void intel_dp_link_caps_get_forced_params(struct intel_dp_link_caps *link_caps,
 }
 
 static int intel_dp_link_config_rate(struct intel_dp_link_caps *link_caps,
-				     const struct intel_dp_link_config_entry *lc)
+				     const struct intel_dp_link_config_entry *lce)
 {
-	return intel_dp_common_rate(link_caps, lc->link_rate_idx);
+	return intel_dp_common_rate(link_caps, lce->link_rate_idx);
 }
 
-static int intel_dp_link_config_lane_count(const struct intel_dp_link_config_entry *lc)
+static int intel_dp_link_config_lane_count(const struct intel_dp_link_config_entry *lce)
 {
-	return 1 << lc->lane_count_exp;
+	return 1 << lce->lane_count_exp;
 }
 
 static void set_max_link_limits_no_update(struct intel_dp_link_caps *link_caps,
@@ -236,10 +236,10 @@ void intel_dp_link_caps_reset_max_limits(struct intel_dp_link_caps *link_caps)
 }
 
 static int intel_dp_link_config_bw(struct intel_dp_link_caps *link_caps,
-				   const struct intel_dp_link_config_entry *lc)
+				   const struct intel_dp_link_config_entry *lce)
 {
-	return drm_dp_max_dprx_data_rate(intel_dp_link_config_rate(link_caps, lc),
-					 intel_dp_link_config_lane_count(lc));
+	return drm_dp_max_dprx_data_rate(intel_dp_link_config_rate(link_caps, lce),
+					 intel_dp_link_config_lane_count(lce));
 }
 
 static int link_config_cmp_by_bw(const void *a, const void *b, const void *p)
@@ -247,16 +247,16 @@ static int link_config_cmp_by_bw(const void *a, const void *b, const void *p)
 	struct intel_dp *intel_dp = (struct intel_dp *)p;	/* remove const */
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 
-	const struct intel_dp_link_config_entry *lc_a = a;
-	const struct intel_dp_link_config_entry *lc_b = b;
-	int bw_a = intel_dp_link_config_bw(link_caps, lc_a);
-	int bw_b = intel_dp_link_config_bw(link_caps, lc_b);
+	const struct intel_dp_link_config_entry *lce_a = a;
+	const struct intel_dp_link_config_entry *lce_b = b;
+	int bw_a = intel_dp_link_config_bw(link_caps, lce_a);
+	int bw_b = intel_dp_link_config_bw(link_caps, lce_b);
 
 	if (bw_a != bw_b)
 		return bw_a - bw_b;
 
-	return intel_dp_link_config_rate(link_caps, lc_a) -
-	       intel_dp_link_config_rate(link_caps, lc_b);
+	return intel_dp_link_config_rate(link_caps, lce_a) -
+	       intel_dp_link_config_rate(link_caps, lce_b);
 }
 
 /* Return %true if the supported link parameters have changed. */
@@ -265,7 +265,7 @@ bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
 {
 	struct intel_dp *intel_dp = link_caps->dp;
 	struct intel_display *display = to_intel_display(intel_dp);
-	struct intel_dp_link_config_entry *lc;
+	struct intel_dp_link_config_entry *lce;
 	bool link_params_changed = false;
 	int num_common_lane_configs;
 	int i;
@@ -298,13 +298,13 @@ bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
 
 	link_caps->num_configs = num_rates * num_common_lane_configs;
 
-	lc = &link_caps->configs[0];
+	lce = &link_caps->configs[0];
 	for (i = 0; i < link_caps->num_rates; i++) {
 		for (j = 0; j < num_common_lane_configs; j++) {
-			lc->lane_count_exp = j;
-			lc->link_rate_idx = i;
+			lce->lane_count_exp = j;
+			lce->link_rate_idx = i;
 
-			lc++;
+			lce++;
 		}
 	}
 
@@ -320,15 +320,15 @@ void intel_dp_link_config_get(struct intel_dp_link_caps *link_caps,
 			      int idx, int *link_rate, int *lane_count)
 {
 	struct intel_display *display = to_intel_display(link_caps->dp);
-	const struct intel_dp_link_config_entry *lc;
+	const struct intel_dp_link_config_entry *lce;
 
 	if (drm_WARN_ON(display->drm, idx < 0 || idx >= link_caps->num_configs))
 		idx = 0;
 
-	lc = &link_caps->configs[idx];
+	lce = &link_caps->configs[idx];
 
-	*link_rate = intel_dp_link_config_rate(link_caps, lc);
-	*lane_count = intel_dp_link_config_lane_count(lc);
+	*link_rate = intel_dp_link_config_rate(link_caps, lce);
+	*lane_count = intel_dp_link_config_lane_count(lce);
 }
 
 int intel_dp_link_config_index(struct intel_dp_link_caps *link_caps,
@@ -340,10 +340,10 @@ int intel_dp_link_config_index(struct intel_dp_link_caps *link_caps,
 	int i;
 
 	for (i = 0; i < link_caps->num_configs; i++) {
-		const struct intel_dp_link_config_entry *lc = &link_caps->configs[i];
+		const struct intel_dp_link_config_entry *lce = &link_caps->configs[i];
 
-		if (lc->lane_count_exp == lane_count_exp &&
-		    lc->link_rate_idx == link_rate_idx)
+		if (lce->lane_count_exp == lane_count_exp &&
+		    lce->link_rate_idx == link_rate_idx)
 			return i;
 	}
 
