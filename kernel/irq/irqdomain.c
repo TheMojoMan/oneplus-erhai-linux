@@ -1965,7 +1965,7 @@ EXPORT_SYMBOL_GPL(irq_domain_free_irqs_parent);
 
 static void __irq_domain_deactivate_irq(struct irq_data *irq_data)
 {
-	if (irq_data && irq_data->domain) {
+	if (irq_data->domain) {
 		struct irq_domain *domain = irq_data->domain;
 
 		if (domain->ops->deactivate)
@@ -1979,7 +1979,7 @@ static int __irq_domain_activate_irq(struct irq_data *irqd, bool reserve)
 {
 	int ret = 0;
 
-	if (irqd && irqd->domain) {
+	if (irqd->domain) {
 		struct irq_domain *domain = irqd->domain;
 
 		if (irqd->parent_data)
