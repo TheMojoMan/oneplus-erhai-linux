@@ -109,7 +109,7 @@ static void metrousb_read_int_callback(struct urb *urb)
 	unsigned char *data = urb->transfer_buffer;
 	unsigned long flags;
 	int throttled = 0;
-	int result = 0;
+	int result;
 
 	dev_dbg(&port->dev, "%s\n", __func__);
 
@@ -173,7 +173,7 @@ static int metrousb_open(struct tty_struct *tty, struct usb_serial_port *port)
 	struct usb_serial *serial = port->serial;
 	struct metrousb_private *metro_priv = usb_get_serial_port_data(port);
 	unsigned long flags;
-	int result = 0;
+	int result;
 
 	/* Set the private data information for the port. */
 	spin_lock_irqsave(&metro_priv->lock, flags);
@@ -327,7 +327,7 @@ static void metrousb_unthrottle(struct tty_struct *tty)
 	struct metrousb_private *metro_priv = usb_get_serial_port_data(port);
 	unsigned long flags;
 	int throttled;
-	int result = 0;
+	int result;
 
 	/* Set the private information for the port to resume reading data. */
 	spin_lock_irqsave(&metro_priv->lock, flags);
