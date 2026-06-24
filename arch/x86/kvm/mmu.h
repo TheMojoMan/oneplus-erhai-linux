@@ -4,10 +4,23 @@
 
 #include <linux/kvm_host.h>
 #include "regs.h"
-#include "x86.h"
 #include "cpuid.h"
 
+extern bool tdp_enabled;
+#ifdef CONFIG_X86_64
+extern bool tdp_mmu_enabled;
+#else
+#define tdp_mmu_enabled false
+#endif
 extern bool __read_mostly enable_mmio_caching;
+extern bool eager_page_split;
+
+#define KVM_MEMSLOT_PAGES_TO_MMU_PAGES_RATIO 50
+#define KVM_MIN_ALLOC_MMU_PAGES 64UL
+#define KVM_MMU_HASH_SHIFT 12
+#define KVM_NUM_MMU_PAGES (1 << KVM_MMU_HASH_SHIFT)
+#define KVM_MIN_FREE_MMU_PAGES 5
+#define KVM_REFILL_PAGES 25
 
 #define PT_WRITABLE_SHIFT 1
 #define PT_USER_SHIFT 2
@@ -90,6 +103,38 @@ static inline bool mmu_has_mbec(struct kvm_mmu *mmu)
 
 u8 kvm_mmu_get_max_tdp_level(void);
 
+void __init kvm_mmu_x86_module_init(void);
+int kvm_mmu_vendor_module_init(void);
+void kvm_mmu_vendor_module_exit(void);
+
+void kvm_mmu_destroy(struct kvm_vcpu *vcpu);
+int kvm_mmu_create(struct kvm_vcpu *vcpu);
+int kvm_mmu_init_vm(struct kvm *kvm);
+void kvm_mmu_uninit_vm(struct kvm *kvm);
+
+void kvm_mmu_init_memslot_memory_attributes(struct kvm *kvm,
+					    struct kvm_memory_slot *slot);
+
+void kvm_mmu_after_set_cpuid(struct kvm_vcpu *vcpu);
+void kvm_mmu_reset_context(struct kvm_vcpu *vcpu);
+void kvm_mmu_slot_remove_write_access(struct kvm *kvm,
+				      const struct kvm_memory_slot *memslot,
+				      int start_level);
+void kvm_mmu_slot_try_split_huge_pages(struct kvm *kvm,
+				       const struct kvm_memory_slot *memslot,
+				       int target_level);
+void kvm_mmu_try_split_huge_pages(struct kvm *kvm,
+				  const struct kvm_memory_slot *memslot,
+				  u64 start, u64 end,
+				  int target_level);
+void kvm_mmu_recover_huge_pages(struct kvm *kvm,
+				const struct kvm_memory_slot *memslot);
+void kvm_mmu_slot_leaf_clear_dirty(struct kvm *kvm,
+				   const struct kvm_memory_slot *memslot);
+void kvm_mmu_invalidate_mmio_sptes(struct kvm *kvm, u64 gen);
+void kvm_mmu_change_mmu_pages(struct kvm *kvm, unsigned long kvm_nr_mmu_pages);
+void kvm_zap_gfn_range(struct kvm *kvm, gfn_t gfn_start, gfn_t gfn_end);
+
 void kvm_mmu_set_mmio_spte_mask(u64 mmio_value, u64 mmio_mask, u64 access_mask);
 void kvm_mmu_set_mmio_spte_value(struct kvm *kvm, u64 mmio_value);
 void kvm_mmu_set_me_spte_mask(u64 me_value, u64 me_mask);
@@ -101,6 +146,19 @@ void kvm_init_shadow_npt_mmu(struct kvm_vcpu *vcpu, unsigned long cr4,
 void kvm_init_shadow_ept_mmu(struct kvm_vcpu *vcpu, bool execonly,
 			     int huge_page_level, bool accessed_dirty,
 			     bool mbec, gpa_t new_eptp);
+
+int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa, u64 error_code,
+		       void *insn, int insn_len);
+void kvm_mmu_print_sptes(struct kvm_vcpu *vcpu, gpa_t gpa, const char *msg);
+void kvm_mmu_invlpg(struct kvm_vcpu *vcpu, gva_t gva);
+void kvm_mmu_invalidate_addr(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
+			     u64 addr, unsigned long roots);
+void kvm_mmu_invpcid_gva(struct kvm_vcpu *vcpu, gva_t gva, unsigned long pcid);
+void kvm_mmu_new_pgd(struct kvm_vcpu *vcpu, gpa_t new_pgd);
+
+void kvm_configure_mmu(bool enable_tdp, int tdp_forced_root_level,
+		       int tdp_max_root_level, int tdp_huge_page_level);
+
 bool kvm_can_do_async_pf(struct kvm_vcpu *vcpu);
 int kvm_handle_page_fault(struct kvm_vcpu *vcpu, u64 error_code,
 				u64 fault_address, char *insn, int insn_len);
@@ -114,6 +172,25 @@ void kvm_mmu_sync_roots(struct kvm_vcpu *vcpu);
 void kvm_mmu_sync_prev_roots(struct kvm_vcpu *vcpu);
 void kvm_mmu_track_write(struct kvm_vcpu *vcpu, gpa_t gpa, const u8 *new,
 			 int bytes);
+
+bool __kvm_mmu_unprotect_gfn_and_retry(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
+				       bool always_retry);
+
+static inline bool kvm_mmu_unprotect_gfn_and_retry(struct kvm_vcpu *vcpu,
+						   gpa_t cr2_or_gpa)
+{
+	return __kvm_mmu_unprotect_gfn_and_retry(vcpu, cr2_or_gpa, false);
+}
+
+void kvm_mmu_free_roots(struct kvm *kvm, struct kvm_mmu *mmu,
+			ulong roots_to_free);
+void kvm_mmu_free_guest_mode_roots(struct kvm *kvm, struct kvm_mmu *mmu);
+gpa_t kvm_mmu_gva_to_gpa_read(struct kvm_vcpu *vcpu, gva_t gva,
+			      struct x86_exception *exception);
+gpa_t kvm_mmu_gva_to_gpa_write(struct kvm_vcpu *vcpu, gva_t gva,
+			       struct x86_exception *exception);
+gpa_t kvm_mmu_gva_to_gpa_system(struct kvm_vcpu *vcpu, gva_t gva,
+				struct x86_exception *exception);
 
 static inline int kvm_mmu_reload(struct kvm_vcpu *vcpu)
 {
@@ -261,12 +338,6 @@ static inline bool kvm_shadow_root_allocated(struct kvm *kvm)
 	return smp_load_acquire(&kvm->arch.shadow_root_allocated);
 }
 
-#ifdef CONFIG_X86_64
-extern bool tdp_mmu_enabled;
-#else
-#define tdp_mmu_enabled false
-#endif
-
 int kvm_tdp_mmu_map_private_pfn(struct kvm_vcpu *vcpu, gfn_t gfn, kvm_pfn_t pfn);
 
 static inline bool kvm_memslots_have_rmaps(struct kvm *kvm)
@@ -298,6 +369,11 @@ kvm_mmu_slot_lpages(struct kvm_memory_slot *slot, int level)
 static inline void kvm_update_page_stats(struct kvm *kvm, int level, int count)
 {
 	atomic64_add(count, &kvm->stat.pages[level - 1]);
+}
+
+static inline bool mmu_is_nested(struct kvm_vcpu *vcpu)
+{
+	return vcpu->arch.mmu == &vcpu->arch.guest_mmu;
 }
 
 static inline gpa_t kvm_translate_gpa(struct kvm_vcpu *vcpu,
