@@ -143,6 +143,9 @@ TEST(priv_hash)
 
 	/* First thread, expect to be 0, not yet initialized */
 	ret = futex_hash_slots_get();
+	if (ret < 0 && errno == EINVAL)
+		SKIP(return, "PR_FUTEX_HASH not supported by kernel");
+
 	ASSERT_EQ(ret, 0)
 		TH_LOG("futex_hash_slots_get() failed: %d, %s", ret, strerror(errno));
 

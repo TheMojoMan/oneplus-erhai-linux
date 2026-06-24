@@ -107,6 +107,9 @@ static void __test_futex(struct __test_metadata *_metadata, void *futex_ptr, int
 			break;
 		}
 		if (ret < 0) {
+			if (errno == ENOSYS || (errno == EINVAL && (futex_flags & FUTEX2_NUMA)))
+				SKIP(return, "futex2 or FUTEX2_NUMA not supported by kernel");
+
 			ASSERT_GE(ret, 0) {
 				TH_LOG("Failed futex2_wake(%d, 0x%x): %s",
 				       to_wake, futex_flags, strerror(errno));
