@@ -151,7 +151,7 @@ int kvm_mmu_page_fault(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa, u64 error_code,
 		       void *insn, int insn_len);
 void kvm_mmu_print_sptes(struct kvm_vcpu *vcpu, gpa_t gpa, const char *msg);
 void kvm_mmu_invlpg(struct kvm_vcpu *vcpu, gva_t gva);
-void kvm_mmu_invalidate_addr(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
+void kvm_mmu_invalidate_addr(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
 			     u64 addr, unsigned long roots);
 void kvm_mmu_invpcid_gva(struct kvm_vcpu *vcpu, gva_t gva, unsigned long pcid);
 void kvm_mmu_new_pgd(struct kvm_vcpu *vcpu, gpa_t new_pgd);
@@ -163,7 +163,7 @@ bool kvm_can_do_async_pf(struct kvm_vcpu *vcpu);
 int kvm_handle_page_fault(struct kvm_vcpu *vcpu, u64 error_code,
 				u64 fault_address, char *insn, int insn_len);
 void __kvm_mmu_refresh_passthrough_bits(struct kvm_vcpu *vcpu,
-					struct kvm_mmu *mmu);
+					struct kvm_pagewalk *pw);
 
 int kvm_mmu_load(struct kvm_vcpu *vcpu);
 void kvm_mmu_unload(struct kvm_vcpu *vcpu);
@@ -246,21 +246,21 @@ static inline void kvm_mmu_load_pgd(struct kvm_vcpu *vcpu)
 }
 
 static inline void kvm_mmu_refresh_passthrough_bits(struct kvm_vcpu *vcpu,
-						    struct kvm_mmu *mmu)
+						    struct kvm_pagewalk *w)
 {
 	/*
 	 * When EPT is enabled, KVM may passthrough CR0.WP to the guest, i.e.
-	 * @mmu's snapshot of CR0.WP and thus all related paging metadata may
+	 * @w's snapshot of CR0.WP and thus all related paging metadata may
 	 * be stale.  Refresh CR0.WP and the metadata on-demand when checking
 	 * for permission faults.  Exempt nested MMUs, i.e. MMUs for shadowing
-	 * nEPT and nNPT, as CR0.WP is ignored in both cases.  Note, KVM does
-	 * need to refresh nested_mmu, a.k.a. the walker used to translate L2
-	 * GVAs to GPAs, as that "MMU" needs to honor L2's CR0.WP.
+	 * nEPT and nNPT, as CR0.WP is ignored in both cases.  Note, KVM will
+	 * still refresh gva_walk, so as to honor L2's CR0.WP when translating
+	 * L2 GVAs to GPAs.
 	 */
-	if (!tdp_enabled || mmu == &vcpu->arch.guest_mmu)
+	if (!tdp_enabled || w == &vcpu->arch.ngpa_walk)
 		return;
 
-	__kvm_mmu_refresh_passthrough_bits(vcpu, mmu);
+	__kvm_mmu_refresh_passthrough_bits(vcpu, w);
 }
 
 /*
@@ -271,7 +271,7 @@ static inline void kvm_mmu_refresh_passthrough_bits(struct kvm_vcpu *vcpu,
  * Return zero if the access does not fault; return the page fault error code
  * if the access faults.
  */
-static inline u8 permission_fault(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
+static inline u8 permission_fault(struct kvm_vcpu *vcpu, struct kvm_pagewalk *w,
 				  unsigned pte_access, unsigned pte_pkey,
 				  u64 access)
 {
@@ -294,15 +294,16 @@ static inline u8 permission_fault(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 	u64 implicit_access = access & PFERR_IMPLICIT_ACCESS;
 	bool not_smap = ((rflags & X86_EFLAGS_AC) | implicit_access) == X86_EFLAGS_AC;
 	int index = (pfec | (not_smap ? PFERR_RSVD_MASK : 0)) >> 1;
+	struct kvm_page_format *fmt = &w->fmt;
 	u32 errcode = PFERR_PRESENT_MASK;
 	bool fault;
 
-	kvm_mmu_refresh_passthrough_bits(vcpu, mmu);
+	kvm_mmu_refresh_passthrough_bits(vcpu, w);
 
-	fault = (mmu->permissions[index] >> pte_access) & 1;
+	fault = (fmt->permissions[index] >> pte_access) & 1;
 
 	WARN_ON_ONCE(pfec & (PFERR_PK_MASK | PFERR_SS_MASK | PFERR_RSVD_MASK));
-	if (unlikely(mmu->pkru_mask)) {
+	if (unlikely(fmt->pkru_mask)) {
 		u32 pkru_bits, offset;
 
 		/*
@@ -316,7 +317,7 @@ static inline u8 permission_fault(struct kvm_vcpu *vcpu, struct kvm_mmu *mmu,
 		/* clear present bit, replace PFEC.RSVD with ACC_USER_MASK. */
 		offset = (pfec & ~1) | ((pte_access & PT_USER_MASK) ? PFERR_RSVD_MASK : 0);
 
-		pkru_bits &= mmu->pkru_mask >> offset;
+		pkru_bits &= fmt->pkru_mask >> offset;
 		errcode |= -pkru_bits & PFERR_PK_MASK;
 		fault |= (pkru_bits != 0);
 	}
@@ -377,12 +378,12 @@ static inline bool mmu_is_nested(struct kvm_vcpu *vcpu)
 }
 
 static inline gpa_t kvm_translate_gpa(struct kvm_vcpu *vcpu,
-				      struct kvm_mmu *mmu,
+				      struct kvm_pagewalk *w,
 				      gpa_t gpa, u64 access,
 				      struct x86_exception *exception,
 				      u64 pte_access)
 {
-	if (mmu != &vcpu->arch.nested_mmu)
+	if (!mmu_is_nested(vcpu) || w == &vcpu->arch.ngpa_walk)
 		return gpa;
 	return kvm_x86_ops.nested_ops->translate_nested_gpa(vcpu, gpa, access,
 							    exception,
