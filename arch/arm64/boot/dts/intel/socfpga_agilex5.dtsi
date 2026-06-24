@@ -385,7 +385,6 @@
 			interrupt-names = "eventq", "gerror", "priq";
 			dma-coherent;
 			#iommu-cells = <1>;
-			status = "disabled";
 		};
 
 		spi0: spi@10da4000 {
