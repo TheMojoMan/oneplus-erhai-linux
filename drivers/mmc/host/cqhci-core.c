@@ -819,8 +819,7 @@ static void cqhci_finish_mrq(struct mmc_host *mmc, unsigned int tag)
 	mmc_cqe_request_done(mmc, mrq);
 }
 
-irqreturn_t cqhci_irq(struct mmc_host *mmc, u32 intmask, int cmd_error,
-		      int data_error)
+irqreturn_t cqhci_irq(struct mmc_host *mmc, int cmd_error, int data_error)
 {
 	u32 status;
 	unsigned long tag = 0, comp_status;
