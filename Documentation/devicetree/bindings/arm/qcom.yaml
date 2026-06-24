@@ -413,6 +413,7 @@ properties:
               - shift,otter
               - thundercomm,minipc-g1iot
               - thundercomm,rubikpi3
+              - vicharak,axon-mini
           - const: qcom,qcm6490
 
       - items:
