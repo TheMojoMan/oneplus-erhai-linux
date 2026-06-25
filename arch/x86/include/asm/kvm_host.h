@@ -290,16 +290,6 @@ enum x86_intercept_stage;
 #define PFERR_PRIVATE_ACCESS   BIT_ULL(49)
 #define PFERR_SYNTHETIC_MASK   (PFERR_IMPLICIT_ACCESS | PFERR_PRIVATE_ACCESS)
 
-/* apic attention bits */
-#define KVM_APIC_CHECK_VAPIC	0
-/*
- * The following bit is set with PV-EOI, unset on EOI.
- * We detect PV-EOI changes by guest by comparing
- * this bit with PV-EOI in guest memory.
- * See the implementation in apic_update_pv_eoi.
- */
-#define KVM_APIC_PV_EOI_PENDING	1
-
 struct kvm_kernel_irqfd;
 struct kvm_kernel_irq_routing_entry;
 
