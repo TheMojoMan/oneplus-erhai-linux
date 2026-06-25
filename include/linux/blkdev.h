@@ -126,8 +126,6 @@ struct blk_integrity {
 	unsigned char				pi_tuple_size;
 };
 
-typedef unsigned int __bitwise blk_mode_t;
-
 /* open for reading */
 #define BLK_OPEN_READ		((__force blk_mode_t)(1 << 0))
 /* open for writing */
@@ -1769,13 +1767,6 @@ struct blk_holder_ops {
 	int (*thaw)(struct block_device *bdev)
 		__releases(&bdev->bd_holder_lock);
 };
-
-/*
- * For filesystems using @fs_holder_ops, the @holder argument passed to
- * helpers used to open and claim block devices via
- * bd_prepare_to_claim() must point to a superblock.
- */
-extern const struct blk_holder_ops fs_holder_ops;
 
 /*
  * Return the correct open flags for blkdev_get_by_* for super block flags
