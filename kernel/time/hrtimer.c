@@ -2060,13 +2060,6 @@ static void __run_hrtimer(struct hrtimer_cpu_base *cpu_base, struct hrtimer_cloc
 	base->running = NULL;
 }
 
-static __always_inline struct hrtimer *clock_base_next_timer_safe(struct hrtimer_clock_base *base)
-{
-	struct timerqueue_linked_node *next = timerqueue_linked_first(&base->active);
-
-	return next ? hrtimer_from_timerqueue_node(next) : NULL;
-}
-
 static void __hrtimer_run_queues(struct hrtimer_cpu_base *cpu_base, ktime_t now,
 				 unsigned long flags, unsigned int active_mask)
 {
