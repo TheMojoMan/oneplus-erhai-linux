@@ -1227,6 +1227,7 @@ static int ufshcd_tx_eqtr(struct ufs_hba *hba,
 {
 	struct ufs_pa_layer_attr old_pwr_info;
 	unsigned int noio_flag;
+	int notify_ret;
 	int ret;
 
 	/*
@@ -1256,14 +1257,19 @@ static int ufshcd_tx_eqtr(struct ufs_hba *hba,
 	}
 
 	ret = ufshcd_vops_tx_eqtr_notify(hba, PRE_CHANGE, pwr_mode);
-	if (ret)
+	if (ret) {
+		dev_err(hba->dev, "TX EQTR PRE_CHANGE notify failed: %d\n", ret);
 		goto out_unprepare;
+	}
 
 	ret = __ufshcd_tx_eqtr(hba, params, pwr_mode);
-	if (ret)
-		goto out_unprepare;
 
-	ret = ufshcd_vops_tx_eqtr_notify(hba, POST_CHANGE, pwr_mode);
+	notify_ret = ufshcd_vops_tx_eqtr_notify(hba, POST_CHANGE, pwr_mode);
+	if (notify_ret)
+		dev_err(hba->dev, "TX EQTR POST_CHANGE notify failed: %d\n", notify_ret);
+
+	if (!ret)
+		ret = notify_ret;
 
 out_unprepare:
 	if (ret)
