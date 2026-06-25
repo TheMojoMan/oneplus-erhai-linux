@@ -6,14 +6,14 @@
 #include "regs.h"
 #include "cpuid.h"
 
-extern bool tdp_enabled;
+extern bool __read_mostly tdp_enabled;
 #ifdef CONFIG_X86_64
-extern bool tdp_mmu_enabled;
+extern bool __read_mostly tdp_mmu_enabled;
 #else
 #define tdp_mmu_enabled false
 #endif
 extern bool __read_mostly enable_mmio_caching;
-extern bool eager_page_split;
+extern bool __read_mostly eager_page_split;
 
 #define KVM_MEMSLOT_PAGES_TO_MMU_PAGES_RATIO 50
 #define KVM_MIN_ALLOC_MMU_PAGES 64UL
