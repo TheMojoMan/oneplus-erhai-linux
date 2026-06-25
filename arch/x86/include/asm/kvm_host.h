@@ -1960,13 +1960,6 @@ static inline unsigned long read_msr(unsigned long msr)
 }
 #endif
 
-enum {
-	TASK_SWITCH_CALL = 0,
-	TASK_SWITCH_IRET = 1,
-	TASK_SWITCH_JMP = 2,
-	TASK_SWITCH_GATE = 3,
-};
-
 #define HF_GUEST_MASK		(1 << 0) /* VCPU is in guest-mode */
 
 #ifdef CONFIG_KVM_SMM
