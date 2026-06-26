@@ -24,6 +24,8 @@ const char *xe_guc_klv_key_to_string(u16 key)
 	/* GuC Global Config KLVs */
 	case GUC_KLV_GLOBAL_CFG_GROUP_SCHEDULING_AVAILABLE_KEY:
 		return "group_scheduling_available";
+	case GUC_KLV_GLOBAL_CFG_NUM_PAGING_ENGINE_INSTANCES_KEY:
+		return "num_paging_engine_instances";
 	/* VGT POLICY keys */
 	case GUC_KLV_VGT_POLICY_SCHED_IF_IDLE_KEY:
 		return "sched_if_idle";

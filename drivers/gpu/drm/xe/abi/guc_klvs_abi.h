@@ -52,6 +52,12 @@
  * _`GUC_KLV_GLOBAL_CFG_GROUP_SCHEDULING_AVAILABLE` : 0x3001
  *      Tells the driver whether scheduler groups are enabled or not.
  *      Requires GuC ABI 1.26+
+ *
+ * _`GUC_KLV_GLOBAL_CFG_NUM_PAGING_ENGINE_INSTANCES` : 0x3003
+ *      Tells the driver the paging engine configuration.
+ *      Paging engine logical instances are guaranteed to be dense starting at
+ *      index 0.
+ *      Requires GuC ABI 1.36+
  */
 
 #define GUC_KLV_GLOBAL_CFG_GMD_ID_KEY			0x3000u
@@ -59,6 +65,9 @@
 
 #define GUC_KLV_GLOBAL_CFG_GROUP_SCHEDULING_AVAILABLE_KEY	0x3001u
 #define GUC_KLV_GLOBAL_CFG_GROUP_SCHEDULING_AVAILABLE_LEN	1u
+
+#define GUC_KLV_GLOBAL_CFG_NUM_PAGING_ENGINE_INSTANCES_KEY	0x3003u
+#define GUC_KLV_GLOBAL_CFG_NUM_PAGING_ENGINE_INSTANCES_LEN	1u
 
 /**
  * DOC: GuC Self Config KLVs

@@ -658,7 +658,7 @@ err_name:
 	return err;
 }
 
-static void hw_engine_setup_logical_and_paging_mapping(struct xe_gt *gt)
+static int hw_engine_setup_logical_and_paging_mapping(struct xe_gt *gt)
 {
 	struct xe_device *xe = gt_to_xe(gt);
 	unsigned int num_copy_engines = 0, num_paging_engines = 0;
@@ -674,6 +674,29 @@ static void hw_engine_setup_logical_and_paging_mapping(struct xe_gt *gt)
 	/* We just reserve the highest BCS instance for USM */
 	if (num_copy_engines && xe->info.has_usm)
 		num_paging_engines = 1;
+
+	if (IS_SRIOV_VF(xe)) {
+		u32 vf_num_paging_engines;
+
+		/*
+		 * PF could in theory reserve multiple paging engines, which
+		 * internally the submission/scheduling backend can load balance
+		 * from. Not something we currently expect, but we are at the
+		 * mercy of the PF, so we just need try our best to mirror the
+		 * paging configuration.
+		 */
+		vf_num_paging_engines = xe_gt_sriov_vf_paging_engines(gt);
+		if (vf_num_paging_engines) {
+			/* This should only be non-zero on NVL-S+ */
+			if (xe_gt_WARN_ON(gt, xe->info.platform < XE_NOVALAKE_S))
+				return -EINVAL;
+
+			num_paging_engines = vf_num_paging_engines;
+		}
+	}
+
+	if (xe_gt_WARN_ON(gt, num_paging_engines > num_copy_engines))
+		return -EINVAL;
 
 	reserved_logical_bcs_start = num_copy_engines - num_paging_engines;
 
@@ -696,6 +719,8 @@ static void hw_engine_setup_logical_and_paging_mapping(struct xe_gt *gt)
 			}
 		}
 	}
+
+	return 0;
 }
 
 static void read_media_fuses(struct xe_gt *gt)
@@ -914,7 +939,10 @@ int xe_hw_engines_init(struct xe_gt *gt)
 			return err;
 	}
 
-	hw_engine_setup_logical_and_paging_mapping(gt);
+	err = hw_engine_setup_logical_and_paging_mapping(gt);
+	if (err)
+		return err;
+
 	err = xe_hw_engine_setup_groups(gt);
 	if (err)
 		return err;
