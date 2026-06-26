@@ -116,7 +116,7 @@ static inline struct xe_mmio *xe_root_tile_mmio(struct xe_device *xe)
 
 static inline bool xe_device_uc_enabled(struct xe_device *xe)
 {
-	return !xe->info.force_execlist;
+	return true;
 }
 
 #define for_each_tile(tile__, xe__, id__) \

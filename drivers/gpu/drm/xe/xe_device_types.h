@@ -144,8 +144,6 @@ struct xe_device {
 		 * Keep all flags below alphabetically sorted
 		 */
 
-		/** @info.force_execlist: Forced execlist submission */
-		u8 force_execlist:1;
 		/** @info.has_access_counter: Device supports access counter */
 		u8 has_access_counter:1;
 		/** @info.has_asid: Has address space ID */

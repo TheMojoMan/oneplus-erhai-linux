@@ -404,8 +404,7 @@ fallback:
 	 * Some older platforms don't have tables or don't have complete tables.
 	 * Newer platforms should always have the required info.
 	 */
-	if (GRAPHICS_VERx100(gt_to_xe(gt)) >= 2000 &&
-	    !gt_to_xe(gt)->info.force_execlist)
+	if (GRAPHICS_VERx100(gt_to_xe(gt)) >= 2000)
 		xe_gt_err(gt, "Slice/Subslice counts missing from hwconfig table; using typical fallback values\n");
 
 	if (gt_to_xe(gt)->info.platform == XE_PVC)
