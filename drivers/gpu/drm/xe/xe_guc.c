@@ -1873,8 +1873,8 @@ bool xe_guc_has_paging_engine(struct xe_guc *guc)
 	if (IS_SRIOV_VF(xe))
 		return xe_gt_sriov_vf_paging_engines(gt);
 
-	/* TODO: Have some way to query this from the GuC? */
-	return false;
+	return xe->info.platform >= XE_NOVALAKE_S &&
+	       GUC_FIRMWARE_VER_AT_LEAST(guc, 70, 69, 0);
 }
 
 /**
