@@ -1237,6 +1237,26 @@ ieee80211_chandef_max_power(struct cfg80211_chan_def *chandef)
 }
 
 /**
+ * cfg80211_chandef_s1g_pri_width - return S1G primary width in MHz
+ *
+ * An S1G interface may have a primary channel width of either 1
+ * or 2MHz depending on whether chandef::s1g_primary_2mhz is set.
+ *
+ * Note: There is _always_ a 1MHz primary subchannel, regardless
+ * of the primary width. So chandef::chan always points to this
+ * 1MHz primary channel.
+ *
+ * @chandef: the chandef to use
+ *
+ * Returns: width in MHz of the S1G primary channel in use
+ */
+static inline int
+cfg80211_chandef_s1g_pri_width(struct cfg80211_chan_def *chandef)
+{
+	return chandef->s1g_primary_2mhz ? 2 : 1;
+}
+
+/**
  * cfg80211_any_usable_channels - check for usable channels
  * @wiphy: the wiphy to check for
  * @band_mask: which bands to check on
