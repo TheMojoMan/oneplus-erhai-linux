@@ -27,7 +27,7 @@ static struct iosys_map engine_activity_map(struct xe_guc *guc, struct xe_hw_eng
 {
 	struct xe_guc_engine_activity *engine_activity = &guc->engine_activity;
 	struct engine_activity_buffer *buffer;
-	u16 guc_class = xe_engine_class_to_guc_class(hwe->class);
+	u16 guc_class = xe_hwe_to_guc_class(hwe);
 	size_t offset;
 
 	if (engine_activity->num_functions) {
@@ -150,7 +150,7 @@ static struct engine_activity *hw_engine_to_engine_activity(struct xe_hw_engine 
 {
 	struct xe_guc *guc = &hwe->gt->uc.guc;
 	struct engine_activity_group *eag = &guc->engine_activity.eag[index];
-	u16 guc_class = xe_engine_class_to_guc_class(hwe->class);
+	u16 guc_class = xe_hwe_to_guc_class(hwe);
 
 	return &eag->engine[guc_class][hwe->logical_instance];
 }

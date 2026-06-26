@@ -471,7 +471,7 @@ static void pf_sched_group_media_slices(struct xe_gt *gt, struct guc_sched_group
 		return;
 
 	for_each_hw_engine(hwe, gt, id) {
-		u8 guc_class = xe_engine_class_to_guc_class(hwe->class);
+		u8 guc_class = xe_hwe_to_guc_class(hwe);
 
 		switch (hwe->class) {
 		case XE_ENGINE_CLASS_VIDEO_DECODE:

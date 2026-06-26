@@ -35,9 +35,9 @@ static inline enum guc_capture_list_class_type xe_guc_class_to_capture_class(u16
 }
 
 static inline enum guc_capture_list_class_type
-xe_engine_class_to_guc_capture_class(enum xe_engine_class class)
+xe_hwe_to_guc_capture_class(struct xe_hw_engine *hwe)
 {
-	return xe_guc_class_to_capture_class(xe_engine_class_to_guc_class(class));
+	return xe_guc_class_to_capture_class(xe_hwe_to_guc_class(hwe));
 }
 
 void xe_guc_capture_process(struct xe_guc *guc);

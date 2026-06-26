@@ -279,7 +279,7 @@ static u32 engine_enable_mask(struct xe_gt *gt, u16 guc_class)
 	u32 mask = 0;
 
 	for_each_hw_engine(hwe, gt, id)
-		if (xe_engine_class_to_guc_class(hwe->class) == guc_class)
+		if (xe_hwe_to_guc_class(hwe) == guc_class)
 			mask |= BIT(hwe->instance);
 
 	return mask;
@@ -503,6 +503,27 @@ static void fill_engine_enable_masks(struct xe_gt *gt,
 			       engine_enable_mask(gt, guc_class));
 }
 
+u16 xe_hwe_to_guc_class(struct xe_hw_engine *hwe)
+{
+	switch (hwe->class) {
+	case XE_ENGINE_CLASS_RENDER:
+		return GUC_RENDER_CLASS;
+	case XE_ENGINE_CLASS_VIDEO_DECODE:
+		return GUC_VIDEO_CLASS;
+	case XE_ENGINE_CLASS_VIDEO_ENHANCE:
+		return GUC_VIDEOENHANCE_CLASS;
+	case XE_ENGINE_CLASS_COPY:
+		return GUC_BLITTER_CLASS;
+	case XE_ENGINE_CLASS_COMPUTE:
+		return GUC_COMPUTE_CLASS;
+	case XE_ENGINE_CLASS_OTHER:
+		return GUC_GSC_OTHER_CLASS;
+	default:
+		XE_WARN_ON(hwe->class);
+		return -1;
+	}
+}
+
 /*
  * Write the offsets corresponding to the golden LRCs. The actual data is
  * populated later by guc_golden_lrc_populate()
@@ -573,7 +594,7 @@ static void guc_mapping_table_init(struct xe_gt *gt,
 	for_each_hw_engine(hwe, gt, id) {
 		u8 guc_class;
 
-		guc_class = xe_engine_class_to_guc_class(hwe->class);
+		guc_class = xe_hwe_to_guc_class(hwe);
 		info_map_write(xe, info_map,
 			       mapping_table[guc_class][hwe->logical_instance],
 			       hwe->instance);
@@ -828,7 +849,7 @@ static void guc_mmio_reg_state_init(struct xe_guc_ads *ads)
 		 * 2. Record in the header (ads.reg_state_list) the address
 		 * location and number of entries
 		 */
-		gc = xe_engine_class_to_guc_class(hwe->class);
+		gc = xe_hwe_to_guc_class(hwe);
 		ads_blob_write(ads, ads.reg_state_list[gc][hwe->instance].address, addr);
 		ads_blob_write(ads, ads.reg_state_list[gc][hwe->instance].count, count);
 

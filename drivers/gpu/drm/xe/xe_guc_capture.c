@@ -440,7 +440,7 @@ static void guc_capture_alloc_steered_lists(struct xe_guc *guc)
 	 * to be extended
 	 */
 	for_each_hw_engine(hwe, gt, id) {
-		if (xe_engine_class_to_guc_capture_class(hwe->class) ==
+		if (xe_hwe_to_guc_capture_class(hwe) ==
 		    GUC_CAPTURE_LIST_CLASS_RENDER_COMPUTE) {
 			has_rcs_ccs = true;
 			break;
@@ -818,7 +818,7 @@ static int guc_capture_output_size_est(struct xe_guc *guc)
 	for_each_hw_engine(hwe, gt, id) {
 		enum guc_capture_list_class_type capture_class;
 
-		capture_class = xe_engine_class_to_guc_capture_class(hwe->class);
+		capture_class = xe_hwe_to_guc_capture_class(hwe);
 		capture_size += sizeof(struct guc_state_capture_group_header_t) +
 					 (3 * sizeof(struct guc_state_capture_header_t));
 
@@ -1626,7 +1626,7 @@ xe_engine_manual_capture(struct xe_hw_engine *hwe, struct xe_hw_engine_snapshot 
 	if (!new)
 		return;
 
-	capture_class = xe_engine_class_to_guc_capture_class(hwe->class);
+	capture_class = xe_hwe_to_guc_capture_class(hwe);
 	for (type = GUC_STATE_CAPTURE_TYPE_GLOBAL; type < GUC_STATE_CAPTURE_TYPE_MAX; type++) {
 		struct gcap_reg_list_info *reginfo = &new->reginfo[type];
 		/*
@@ -1668,7 +1668,7 @@ xe_engine_manual_capture(struct xe_hw_engine *hwe, struct xe_hw_engine_snapshot 
 		}
 	}
 
-	new->eng_class = xe_engine_class_to_guc_class(hwe->class);
+	new->eng_class = xe_hwe_to_guc_class(hwe);
 	new->eng_inst = hwe->instance;
 	new->guc_id = guc_id;
 	new->lrca = lrca;
@@ -1832,7 +1832,7 @@ void xe_engine_snapshot_print(struct xe_hw_engine_snapshot *snapshot, struct drm
 
 	xe_gt_assert(gt, snapshot->hwe);
 
-	capture_class = xe_engine_class_to_guc_capture_class(snapshot->hwe->class);
+	capture_class = xe_hwe_to_guc_capture_class(snapshot->hwe);
 
 	drm_printf(p, "%s (physical), logical instance=%d\n",
 		   snapshot->name ? snapshot->name : "",
@@ -1904,7 +1904,7 @@ xe_guc_capture_get_matching_and_lock(struct xe_exec_queue *q)
 	for_each_hw_engine(hwe, q->gt, id) {
 		if (hwe != q->hwe)
 			continue;
-		guc_class = xe_engine_class_to_guc_class(hwe->class);
+		guc_class = xe_hwe_to_guc_class(hwe);
 		break;
 	}
 
