@@ -100,39 +100,39 @@ static void avs_dsp_recovery(struct avs_dev *adev)
 	unsigned int core_mask;
 	int ret;
 
-	mutex_lock(&adev->comp_list_mutex);
-	/* disconnect all running streams */
-	list_for_each_entry(acomp, &adev->comp_list, node) {
-		struct snd_soc_pcm_runtime *rtd;
-		struct snd_soc_card *card;
+	scoped_guard(mutex, &adev->comp_list_mutex) {
+		/* disconnect all running streams */
+		list_for_each_entry(acomp, &adev->comp_list, node) {
+			struct snd_soc_pcm_runtime *rtd;
+			struct snd_soc_card *card;
 
-		card = acomp->base.card;
-		if (!card)
-			continue;
-
-		for_each_card_rtds(card, rtd) {
-			struct snd_pcm *pcm;
-			int dir;
-
-			pcm = rtd->pcm;
-			if (!pcm || rtd->dai_link->no_pcm)
+			card = acomp->base.card;
+			if (!card)
 				continue;
 
-			for_each_pcm_streams(dir) {
-				struct snd_pcm_substream *substream;
+			for_each_card_rtds(card, rtd) {
+				struct snd_pcm *pcm;
+				int dir;
 
-				substream = pcm->streams[dir].substream;
-				if (!substream || !substream->runtime)
+				pcm = rtd->pcm;
+				if (!pcm || rtd->dai_link->no_pcm)
 					continue;
 
-				/* No need for _irq() as we are in nonatomic context. */
-				snd_pcm_stream_lock(substream);
-				snd_pcm_stop(substream, SNDRV_PCM_STATE_DISCONNECTED);
-				snd_pcm_stream_unlock(substream);
+				for_each_pcm_streams(dir) {
+					struct snd_pcm_substream *substream;
+
+					substream = pcm->streams[dir].substream;
+					if (!substream || !substream->runtime)
+						continue;
+
+					/* No need for _irq() as we are in nonatomic context. */
+					snd_pcm_stream_lock(substream);
+					snd_pcm_stop(substream, SNDRV_PCM_STATE_DISCONNECTED);
+					snd_pcm_stream_unlock(substream);
+				}
 			}
 		}
 	}
-	mutex_unlock(&adev->comp_list_mutex);
 
 	/* forcibly shutdown all cores */
 	core_mask = GENMASK(adev->hw_cfg.dsp_cores - 1, 0);
