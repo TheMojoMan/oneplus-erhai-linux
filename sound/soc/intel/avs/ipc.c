@@ -6,6 +6,7 @@
 //          Amadeusz Slawinski <amadeuszx.slawinski@linux.intel.com>
 //
 
+#include <linux/cleanup.h>
 #include <linux/io-64-nonatomic-lo-hi.h>
 #include <linux/slab.h>
 #include <sound/hdaudio_ext.h>
@@ -397,7 +398,7 @@ static int avs_dsp_do_send_msg(struct avs_dev *adev, struct avs_ipc_msg *request
 	if (!ipc->ready)
 		return -EPERM;
 
-	mutex_lock(&ipc->msg_mutex);
+	guard(mutex)(&ipc->msg_mutex);
 
 	spin_lock(&ipc->rx_lock);
 	avs_ipc_msg_init(ipc, reply);
@@ -412,7 +413,7 @@ static int avs_dsp_do_send_msg(struct avs_dev *adev, struct avs_ipc_msg *request
 			/* Same treatment as on exception, just stack_dump=0. */
 			avs_dsp_exception_caught(adev, &msg);
 		}
-		goto exit;
+		return ret;
 	}
 
 	ret = ipc->rx.rsp.status;
@@ -436,8 +437,6 @@ static int avs_dsp_do_send_msg(struct avs_dev *adev, struct avs_ipc_msg *request
 			memcpy(reply->data, ipc->rx.data, reply->size);
 	}
 
-exit:
-	mutex_unlock(&ipc->msg_mutex);
 	return ret;
 }
 
@@ -501,7 +500,7 @@ static int avs_dsp_do_send_rom_msg(struct avs_dev *adev, struct avs_ipc_msg *req
 	struct avs_ipc *ipc = adev->ipc;
 	int ret;
 
-	mutex_lock(&ipc->msg_mutex);
+	guard(mutex)(&ipc->msg_mutex);
 
 	spin_lock(&ipc->rx_lock);
 	avs_ipc_msg_init(ipc, NULL);
@@ -521,8 +520,6 @@ static int avs_dsp_do_send_rom_msg(struct avs_dev *adev, struct avs_ipc_msg *req
 	if (ret)
 		dev_err(adev->dev, "%s (0x%08x 0x%08x) failed: %d\n",
 			name, request->glb.primary, request->glb.ext.val, ret);
-
-	mutex_unlock(&ipc->msg_mutex);
 
 	return ret;
 }
