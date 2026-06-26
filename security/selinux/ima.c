@@ -9,6 +9,7 @@
  */
 #include <linux/vmalloc.h>
 #include <linux/ima.h>
+#include <linux/seq_buf.h>
 #include "security.h"
 #include "ima.h"
 
@@ -20,46 +21,31 @@
  */
 static char *selinux_ima_collect_state(void)
 {
-	const char *on = "=1;", *off = "=0;";
+	struct seq_buf s;
 	char *buf;
-	int buf_len, len, i, rc;
+	int buf_len, suffix_len, i;
 
 	buf_len = strlen("initialized=0;enforcing=0;checkreqprot=0;") + 1;
+	suffix_len = strlen("=0;");
 
-	len = strlen(on);
 	for (i = 0; i < __POLICYDB_CAP_MAX; i++)
-		buf_len += strlen(selinux_policycap_names[i]) + len;
+		buf_len += strlen(selinux_policycap_names[i]) + suffix_len;
 
 	buf = kzalloc(buf_len, GFP_KERNEL);
 	if (!buf)
 		return NULL;
 
-	rc = strscpy(buf, "initialized", buf_len);
-	WARN_ON(rc < 0);
+	seq_buf_init(&s, buf, buf_len);
 
-	rc = strlcat(buf, selinux_initialized() ? on : off, buf_len);
-	WARN_ON(rc >= buf_len);
+	seq_buf_printf(&s, "initialized=%d;enforcing=%d;checkreqprot=%d;",
+		       selinux_initialized(), enforcing_enabled(),
+		       checkreqprot_get());
 
-	rc = strlcat(buf, "enforcing", buf_len);
-	WARN_ON(rc >= buf_len);
+	for (i = 0; i < __POLICYDB_CAP_MAX; i++)
+		seq_buf_printf(&s, "%s=%d;", selinux_policycap_names[i],
+			       selinux_state.policycap[i]);
 
-	rc = strlcat(buf, enforcing_enabled() ? on : off, buf_len);
-	WARN_ON(rc >= buf_len);
-
-	rc = strlcat(buf, "checkreqprot", buf_len);
-	WARN_ON(rc >= buf_len);
-
-	rc = strlcat(buf, checkreqprot_get() ? on : off, buf_len);
-	WARN_ON(rc >= buf_len);
-
-	for (i = 0; i < __POLICYDB_CAP_MAX; i++) {
-		rc = strlcat(buf, selinux_policycap_names[i], buf_len);
-		WARN_ON(rc >= buf_len);
-
-		rc = strlcat(buf, selinux_state.policycap[i] ? on : off,
-			buf_len);
-		WARN_ON(rc >= buf_len);
-	}
+	WARN_ON(seq_buf_has_overflowed(&s));
 
 	return buf;
 }
