@@ -137,10 +137,8 @@ static inline bool xe_gt_is_media_type(struct xe_gt *gt)
 
 static inline bool xe_gt_is_usm_hwe(struct xe_gt *gt, struct xe_hw_engine *hwe)
 {
-	struct xe_device *xe = gt_to_xe(gt);
-
-	return xe->info.has_usm && hwe->class == XE_ENGINE_CLASS_COPY &&
-		hwe->instance == gt->usm.reserved_bcs_instance;
+	return hwe->class == XE_ENGINE_CLASS_COPY &&
+	       (gt->usm.paging_logical_mask & BIT(hwe->logical_instance));
 }
 
 /**

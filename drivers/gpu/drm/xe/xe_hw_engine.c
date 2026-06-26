@@ -647,10 +647,6 @@ static int hw_engine_init(struct xe_gt *gt, struct xe_hw_engine *hwe,
 			xe_hw_engine_enable_ring(hwe);
 	}
 
-	/* We reserve the highest BCS instance for USM */
-	if (xe->info.has_usm && hwe->class == XE_ENGINE_CLASS_COPY)
-		gt->usm.reserved_bcs_instance = hwe->instance;
-
 	/* Ensure IDLEDLY is lower than MAXCNT */
 	adjust_idledly(hwe);
 
@@ -662,19 +658,43 @@ err_name:
 	return err;
 }
 
-static void hw_engine_setup_logical_mapping(struct xe_gt *gt)
+static void hw_engine_setup_logical_and_paging_mapping(struct xe_gt *gt)
 {
+	struct xe_device *xe = gt_to_xe(gt);
+	unsigned int num_copy_engines = 0, num_paging_engines = 0;
+	unsigned int reserved_logical_bcs_start;
+	struct xe_hw_engine *hwe;
+	enum xe_hw_engine_id id;
 	int class;
+
+	for_each_hw_engine(hwe, gt, id)
+		if (hwe->class == XE_ENGINE_CLASS_COPY)
+			num_copy_engines++;
+
+	/* We just reserve the highest BCS instance for USM */
+	if (num_copy_engines && xe->info.has_usm)
+		num_paging_engines = 1;
+
+	reserved_logical_bcs_start = num_copy_engines - num_paging_engines;
 
 	/* FIXME: Doing a simple logical mapping that works for most hardware */
 	for (class = 0; class < XE_ENGINE_CLASS_MAX; ++class) {
-		struct xe_hw_engine *hwe;
-		enum xe_hw_engine_id id;
 		int logical_instance = 0;
 
-		for_each_hw_engine(hwe, gt, id)
-			if (hwe->class == class)
+		for_each_hw_engine(hwe, gt, id) {
+			if (hwe->class == class) {
 				hwe->logical_instance = logical_instance++;
+
+				if (class == XE_ENGINE_CLASS_COPY &&
+				    hwe->logical_instance >=
+					    reserved_logical_bcs_start) {
+					if (!gt->usm.paging_hwe0)
+						gt->usm.paging_hwe0 = hwe;
+					gt->usm.paging_logical_mask |=
+						BIT(hwe->logical_instance);
+				}
+			}
+		}
 	}
 }
 
@@ -894,7 +914,7 @@ int xe_hw_engines_init(struct xe_gt *gt)
 			return err;
 	}
 
-	hw_engine_setup_logical_mapping(gt);
+	hw_engine_setup_logical_and_paging_mapping(gt);
 	err = xe_hw_engine_setup_groups(gt);
 	if (err)
 		return err;
