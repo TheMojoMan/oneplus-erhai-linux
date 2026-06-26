@@ -261,6 +261,7 @@ static inline enum xe_engine_class guc_class_to_engine_class(u16 guc_class)
 	case GUC_VIDEOENHANCE_CLASS:
 		return XE_ENGINE_CLASS_VIDEO_ENHANCE;
 	case GUC_BLITTER_CLASS:
+	case GUC_PAGING_CLASS:
 		return XE_ENGINE_CLASS_COPY;
 	case GUC_COMPUTE_CLASS:
 		return XE_ENGINE_CLASS_COMPUTE;
@@ -281,6 +282,10 @@ static u32 engine_enable_mask(struct xe_gt *gt, u16 guc_class)
 	for_each_hw_engine(hwe, gt, id)
 		if (xe_hwe_to_guc_class(hwe) == guc_class)
 			mask |= BIT(hwe->instance);
+
+	/* We expect at most one paging engine per GuC instance, for now */
+	if (guc_class == GUC_PAGING_CLASS)
+		xe_gt_assert(gt, !mask || is_power_of_2(mask));
 
 	return mask;
 }
@@ -505,6 +510,10 @@ static void fill_engine_enable_masks(struct xe_gt *gt,
 
 u16 xe_hwe_to_guc_class(struct xe_hw_engine *hwe)
 {
+	if (xe_guc_has_paging_engine(&hwe->gt->uc.guc) &&
+	    xe_gt_is_usm_hwe(hwe->gt, hwe))
+		return GUC_PAGING_CLASS;
+
 	switch (hwe->class) {
 	case XE_ENGINE_CLASS_RENDER:
 		return GUC_RENDER_CLASS;
@@ -623,6 +632,9 @@ static u32 guc_get_capture_engine_mask(struct xe_gt *gt, struct iosys_map *info_
 		break;
 	case GUC_CAPTURE_LIST_CLASS_GSC_OTHER:
 		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_GSC_OTHER_CLASS]);
+		break;
+	case GUC_CAPTURE_LIST_CLASS_PAGING:
+		mask = info_map_read(xe, info_map, engine_enabled_masks[GUC_PAGING_CLASS]);
 		break;
 	default:
 		mask = 0;
