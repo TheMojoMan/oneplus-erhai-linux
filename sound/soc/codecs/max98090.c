@@ -2341,6 +2341,7 @@ static irqreturn_t max98090_interrupt(int irq, void *data)
  *
  * @component:  MAX98090 component
  * @jack:   jack to report detection events on
+ * @data: can be used if codec driver need extra data for configuring jack
  *
  * Enable microphone detection via IRQ on the MAX98090.  If GPIOs are
  * being used to bring out signals to the processor then only platform
