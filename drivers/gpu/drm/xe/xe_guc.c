@@ -1871,6 +1871,37 @@ bool xe_guc_has_paging_engine(struct xe_guc *guc)
 	return false;
 }
 
+/**
+ * xe_hwe_guc_logical_instance - Get the GuC-aligned logical instance of a
+ * hardware engine.
+ * @hwe: Hardware engine.
+ *
+ * For GuC backend usage, we should no longer use the raw logical instance
+ * directly. This helper must be used to retrieve the logical instance of the
+ * hardware engine, taking care of any necessary adjustments (such as the GuC
+ * PAGING engine mapping). This is assumed to be used in conjunction with the
+ * GuC engine class.
+ *
+ * Return: Logical instance, taking into account for stuff like GuC PAGING
+ * engine mapping.
+ */
+u16 xe_hwe_guc_logical_instance(struct xe_hw_engine *hwe)
+{
+	struct xe_gt *gt = hwe->gt;
+
+	if (xe_guc_has_paging_engine(&hwe->gt->uc.guc) &&
+	    xe_gt_is_usm_hwe(gt, hwe)) {
+		int shift = gt->usm.paging_hwe0->logical_instance;
+
+		xe_gt_assert(gt, shift <= hwe->logical_instance);
+
+		/* GUC_PAGING_CLASS:guc_logical_instance */
+		return hwe->logical_instance - shift;
+	}
+
+	return hwe->logical_instance;
+}
+
 #if IS_ENABLED(CONFIG_DRM_XE_KUNIT_TEST)
 #include "tests/xe_guc_g2g_test.c"
 #endif
