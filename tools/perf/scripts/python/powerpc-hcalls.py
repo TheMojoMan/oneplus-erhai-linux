@@ -25,6 +25,7 @@ from Util import *
 #	} ...
 # }
 output = {}
+sort_key = 'count'
 
 # d_enter: {
 #	cpu: {
@@ -247,10 +248,53 @@ def hcall_table_lookup(opcode):
 
 print_ptrn = '%-28s%10s%10s%10s%10s'
 
+def sort_output(opcode):
+	stats = output[opcode]
+
+	if sort_key == 'min':
+		return stats['min']
+	if sort_key == 'max':
+		return stats['max']
+	if sort_key == 'avg':
+		return stats['time'] // stats['cnt']
+
+	return stats['cnt']
+
+def trace_begin():
+	global sort_key
+
+	valid_sort_keys = ['count', 'min', 'max', 'avg']
+
+	i = 1
+	while i < len(sys.argv):
+		arg = sys.argv[i]
+
+		if arg == '-s' or arg == '--sort':
+			if i + 1 >= len(sys.argv):
+				print("Error: -s/--sort requires a sort key argument")
+				sys.exit(1)
+			sort_key = sys.argv[i + 1]
+			i += 2
+			continue
+
+		if arg.startswith('--sort='):
+			sort_key = arg.split('=', 1)[1]
+			i += 1
+			continue
+
+		i += 1
+
+	if sort_key not in valid_sort_keys:
+		print(f"Error: Invalid sort key '{sort_key}'. Valid options are: {', '.join(valid_sort_keys)}")
+		sys.exit(1)
+
+	print("SORT KEY =", sort_key)
+
 def trace_end():
 	print(print_ptrn % ('hcall', 'count', 'min(ns)', 'max(ns)', 'avg(ns)'))
 	print('-' * 68)
-	for opcode in output:
+	for opcode in sorted(output, key = sort_output,
+                            reverse=True):
 		h_name = hcall_table_lookup(opcode)
 		time = output[opcode]['time']
 		cnt = output[opcode]['cnt']
