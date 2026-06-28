@@ -73,17 +73,17 @@ use gem::{
 ///
 /// This is used with [`Object::new()`] to control various properties that can only be set when
 /// initially creating a shmem-backed GEM object.
-pub struct ObjectConfig<'a, T: DriverObject, C: DeviceContext = Normal> {
+pub struct ObjectConfig<'a, T: DriverObject> {
     /// Whether to set the write-combine map flag.
     pub map_wc: bool,
 
     /// Reuse the DMA reservation from another GEM object.
     ///
     /// The newly created [`Object`] will hold an owned refcount to `parent_resv_obj` if specified.
-    pub parent_resv_obj: Option<&'a Object<T, C>>,
+    pub parent_resv_obj: Option<&'a Object<T>>,
 }
 
-impl<'a, T: DriverObject, C: DeviceContext> Default for ObjectConfig<'a, T, C> {
+impl<'a, T: DriverObject> Default for ObjectConfig<'a, T> {
     #[inline(always)]
     fn default() -> Self {
         Self {
@@ -106,7 +106,7 @@ pub struct Object<T: DriverObject, C: DeviceContext = Normal> {
     #[pin]
     obj: Opaque<bindings::drm_gem_shmem_object>,
     /// Parent object that owns this object's DMA reservation object.
-    parent_resv_obj: Option<ARef<Object<T, C>>>,
+    parent_resv_obj: Option<ARef<Object<T>>>,
     /// Devres object for unmapping any SGTable on driver-unbind.
     sgt_res: ManuallyDrop<SetOnce<Devres<SGTableMap<T, C>>>>,
     #[pin]
@@ -118,10 +118,9 @@ pub struct Object<T: DriverObject, C: DeviceContext = Normal> {
 }
 
 super::impl_aref_for_gem_obj! {
-    impl<T, C> for Object<T, C>
+    impl<T> for Object<T>
     where
-        T: DriverObject,
-        C: DeviceContext
+        T: DriverObject
 }
 
 // SAFETY: All GEM objects are thread-safe.
@@ -155,54 +154,6 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
     /// Return a raw pointer to the embedded drm_gem_shmem_object.
     fn as_raw_shmem(&self) -> *mut bindings::drm_gem_shmem_object {
         self.obj.get()
-    }
-
-    /// Create a new shmem-backed DRM object of the given size.
-    ///
-    /// Additional config options can be specified using `config`.
-    pub fn new(
-        dev: &Device<T::Driver, C>,
-        size: usize,
-        config: ObjectConfig<'_, T, C>,
-        args: T::Args,
-    ) -> Result<ARef<Self>> {
-        let new: Pin<KBox<Self>> = KBox::try_pin_init(
-            try_pin_init!(Self {
-                obj <- Opaque::init_zeroed(),
-                parent_resv_obj: config.parent_resv_obj.map(|p| p.into()),
-                sgt_res: ManuallyDrop::new(SetOnce::new()),
-                sgt_lock <- new_mutex!(()),
-                inner <- T::new(dev, size, args),
-                _ctx: PhantomData::<C>,
-            }),
-            GFP_KERNEL,
-        )?;
-
-        // SAFETY: `obj.as_raw()` is guaranteed to be valid by the initialization above.
-        unsafe { (*new.as_raw()).funcs = &Self::VTABLE };
-
-        // SAFETY: The arguments are all valid via the type invariants.
-        to_result(unsafe { bindings::drm_gem_shmem_init(dev.as_raw(), new.as_raw_shmem(), size) })?;
-
-        // SAFETY: We never move out of `self`.
-        let new = KBox::into_raw(unsafe { Pin::into_inner_unchecked(new) });
-
-        // SAFETY: We're taking over the owned refcount from `drm_gem_shmem_init`.
-        let obj = unsafe { ARef::from_raw(NonNull::new_unchecked(new)) };
-
-        // Start filling out values from `config`
-        if let Some(parent_resv) = config.parent_resv_obj {
-            // SAFETY: We have yet to expose the new gem object outside of this function, so it is
-            // safe to modify this field.
-            unsafe { (*obj.obj.get()).base.resv = parent_resv.raw_dma_resv() };
-        }
-
-        // SAFETY: We have yet to expose this object outside of this function, so we're guaranteed
-        // to have exclusive access - thus making this safe to hold a mutable reference to.
-        let shmem = unsafe { &mut *obj.as_raw_shmem() };
-        shmem.set_map_wc(config.map_wc);
-
-        Ok(obj)
     }
 
     /// Returns the `Device` that owns this GEM object.
@@ -308,12 +259,6 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
         self.make_vmap()
     }
 
-    /// Creates and returns an owned reference to a virtual kernel memory mapping for this object.
-    #[inline]
-    pub fn owned_vmap<const SIZE: usize>(&self) -> Result<VMapOwned<T, C, SIZE>> {
-        self.make_vmap()
-    }
-
     /// Creates (if necessary) and returns an immutable reference to a scatter-gather table of DMA
     /// pages for this object.
     ///
@@ -352,6 +297,62 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
         };
 
         Ok(sgt_res.access(dev)?)
+    }
+}
+
+impl<T: DriverObject> Object<T> {
+    /// Create a new shmem-backed DRM object of the given size.
+    ///
+    /// Additional config options can be specified using `config`.
+    pub fn new(
+        dev: &Device<T::Driver>,
+        size: usize,
+        config: ObjectConfig<'_, T>,
+        args: T::Args,
+    ) -> Result<ARef<Self>> {
+        let new: Pin<KBox<Self>> = KBox::try_pin_init(
+            try_pin_init!(Self {
+                obj <- Opaque::init_zeroed(),
+                parent_resv_obj: config.parent_resv_obj.map(|p| p.into()),
+                sgt_res: ManuallyDrop::new(SetOnce::new()),
+                sgt_lock <- new_mutex!(()),
+                inner <- T::new(dev, size, args),
+                _ctx: PhantomData,
+            }),
+            GFP_KERNEL,
+        )?;
+
+        // SAFETY: `obj.as_raw()` is guaranteed to be valid by the initialization above.
+        unsafe { (*new.as_raw()).funcs = &Self::VTABLE };
+
+        // SAFETY: The arguments are all valid via the type invariants.
+        to_result(unsafe { bindings::drm_gem_shmem_init(dev.as_raw(), new.as_raw_shmem(), size) })?;
+
+        // SAFETY: We never move out of `self`.
+        let new = KBox::into_raw(unsafe { Pin::into_inner_unchecked(new) });
+
+        // SAFETY: We're taking over the owned refcount from `drm_gem_shmem_init`.
+        let obj = unsafe { ARef::from_raw(NonNull::new_unchecked(new)) };
+
+        // Start filling out values from `config`
+        if let Some(parent_resv) = config.parent_resv_obj {
+            // SAFETY: We have yet to expose the new gem object outside of this function, so it is
+            // safe to modify this field.
+            unsafe { (*obj.obj.get()).base.resv = parent_resv.raw_dma_resv() };
+        }
+
+        // SAFETY: We have yet to expose this object outside of this function, so we're guaranteed
+        // to have exclusive access - thus making this safe to hold a mutable reference to.
+        let shmem = unsafe { &mut *obj.as_raw_shmem() };
+        shmem.set_map_wc(config.map_wc);
+
+        Ok(obj)
+    }
+
+    /// Creates and returns an owned reference to a virtual kernel memory mapping for this object.
+    #[inline]
+    pub fn owned_vmap<const SIZE: usize>(&self) -> Result<VMapOwned<T, Normal, SIZE>> {
+        self.make_vmap()
     }
 }
 
@@ -670,8 +671,8 @@ mod tests {
         type Driver = KunitDriver;
         type Args = ();
 
-        fn new<C: DeviceContext>(
-            _dev: &drm::Device<KunitDriver, C>,
+        fn new(
+            _dev: &drm::Device<KunitDriver>,
             _size: usize,
             _args: Self::Args,
         ) -> impl PinInit<Self, Error> {
@@ -683,7 +684,7 @@ mod tests {
     impl drm::Driver for KunitDriver {
         type Data = KunitData;
         type File = KunitFile;
-        type Object<Ctx: DeviceContext> = Object<KunitObject, Ctx>;
+        type Object = Object<KunitObject>;
         type ParentDevice<Ctx: device::DeviceContext> = faux::Device<Ctx>;
 
         const INFO: drm::DriverInfo = INFO;
