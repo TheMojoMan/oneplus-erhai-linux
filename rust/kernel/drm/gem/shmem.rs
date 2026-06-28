@@ -22,7 +22,7 @@ use crate::{
         private::Sealed,
         Device,
         DeviceContext,
-        Registered, //
+        Normal, //
     },
     error::{
         from_err_ptr,
@@ -73,7 +73,7 @@ use gem::{
 ///
 /// This is used with [`Object::new()`] to control various properties that can only be set when
 /// initially creating a shmem-backed GEM object.
-pub struct ObjectConfig<'a, T: DriverObject, C: DeviceContext = Registered> {
+pub struct ObjectConfig<'a, T: DriverObject, C: DeviceContext = Normal> {
     /// Whether to set the write-combine map flag.
     pub map_wc: bool,
 
@@ -102,7 +102,7 @@ impl<'a, T: DriverObject, C: DeviceContext> Default for ObjectConfig<'a, T, C> {
 /// - Any type invariants of `C` apply to the parent DRM device for this GEM object.
 #[repr(C)]
 #[pin_data]
-pub struct Object<T: DriverObject, C: DeviceContext = Registered> {
+pub struct Object<T: DriverObject, C: DeviceContext = Normal> {
     #[pin]
     obj: Opaque<bindings::drm_gem_shmem_object>,
     /// Parent object that owns this object's DMA reservation object.
@@ -409,7 +409,7 @@ impl<T: DriverObject, C: DeviceContext> driver::AllocImpl for Object<T, C> {
 /// When this is dropped, the `dma_resv` lock is dropped as well.
 ///
 // TODO: This should be replace with a WwMutex equivalent once we have such bindings in the kernel.
-struct DmaResvGuard<'a, T: DriverObject, C: DeviceContext = Registered>(
+struct DmaResvGuard<'a, T: DriverObject, C: DeviceContext = Normal>(
     &'a Object<T, C>,
     NotThreadSafe,
 );
@@ -438,7 +438,7 @@ impl<'a, T: DriverObject, C: DeviceContext> Drop for DmaResvGuard<'a, T, C> {
 ///
 /// - The size of `owner` is >= SIZE.
 /// - The memory pointed to by `addr` remains valid at least until this object is dropped.
-pub struct VMap<D, R, C = Registered, const SIZE: usize = 0>
+pub struct VMap<D, R, C = Normal, const SIZE: usize = 0>
 where
     D: DriverObject,
     C: DeviceContext,
