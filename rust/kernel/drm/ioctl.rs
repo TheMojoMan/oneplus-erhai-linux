@@ -95,6 +95,7 @@ pub mod internal {
 ///
 /// ```ignore
 /// fn foo(device: &kernel::drm::Device<Self, kernel::drm::Registered>,
+///        reg_data: &Self::RegistrationData<'_>,
 ///        data: &mut uapi::argument_type,
 ///        file: &kernel::drm::File<Self::File>,
 /// ) -> Result<u32>
@@ -169,13 +170,14 @@ macro_rules! declare_drm_ioctls {
                                     unsafe { &*__ptr },
                                     unreachable!(),
                                     unreachable!(),
+                                    unreachable!(),
                                 )
                             };
 
                             // Enforce that the handler accepts higher-ranked
                             // lifetimes, preventing it from requiring 'static
                             // references that could escape this scope.
-                            let _: for<'a> fn(&'a _, &'a mut _, &'a _) -> _ = $func;
+                            let _: for<'a> fn(&'a _, &'a _, &'a mut _, &'a _) -> _ = $func;
 
                             let Some(guard) = dev.registration_guard() else {
                                 return $crate::error::code::ENODEV.to_errno();
@@ -193,7 +195,9 @@ macro_rules! declare_drm_ioctls {
                             // SAFETY: This is just the DRM file structure
                             let file = unsafe { $crate::drm::File::from_raw(raw_file) };
 
-                            match $func(&*guard, data, file) {
+                            match guard.registration_data_with(|reg_data| {
+                                $func(&*guard, reg_data, data, file)
+                            }) {
                                 Err(e) => e.to_errno(),
                                 Ok(i) => i.try_into()
                                             .unwrap_or($crate::error::code::ERANGE.to_errno()),
