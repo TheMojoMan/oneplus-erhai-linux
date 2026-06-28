@@ -20,9 +20,7 @@ use crate::{
         driver,
         gem,
         private::Sealed,
-        Device,
-        DeviceContext,
-        Normal, //
+        Device, //
     },
     error::{
         from_err_ptr,
@@ -48,7 +46,6 @@ use crate::{
 };
 use core::{
     ffi::c_void,
-    marker::PhantomData,
     mem::{
         ManuallyDrop,
         MaybeUninit, //
@@ -99,22 +96,20 @@ impl<'a, T: DriverObject> Default for ObjectConfig<'a, T> {
 ///
 /// - `obj` contains a valid initialized `struct drm_gem_shmem_object` for the lifetime of this
 ///   object.
-/// - Any type invariants of `C` apply to the parent DRM device for this GEM object.
 #[repr(C)]
 #[pin_data]
-pub struct Object<T: DriverObject, C: DeviceContext = Normal> {
+pub struct Object<T: DriverObject> {
     #[pin]
     obj: Opaque<bindings::drm_gem_shmem_object>,
     /// Parent object that owns this object's DMA reservation object.
     parent_resv_obj: Option<ARef<Object<T>>>,
     /// Devres object for unmapping any SGTable on driver-unbind.
-    sgt_res: ManuallyDrop<SetOnce<Devres<SGTableMap<T, C>>>>,
+    sgt_res: ManuallyDrop<SetOnce<Devres<SGTableMap<T>>>>,
     #[pin]
     /// Lock for protecting initialization of `sgt_res`.
     sgt_lock: Mutex<()>,
     #[pin]
     inner: T,
-    _ctx: PhantomData<C>,
 }
 
 super::impl_aref_for_gem_obj! {
@@ -124,12 +119,12 @@ super::impl_aref_for_gem_obj! {
 }
 
 // SAFETY: All GEM objects are thread-safe.
-unsafe impl<T: DriverObject, C: DeviceContext> Send for Object<T, C> {}
+unsafe impl<T: DriverObject> Send for Object<T> {}
 
 // SAFETY: All GEM objects are thread-safe.
-unsafe impl<T: DriverObject, C: DeviceContext> Sync for Object<T, C> {}
+unsafe impl<T: DriverObject> Sync for Object<T> {}
 
-impl<T: DriverObject, C: DeviceContext> Object<T, C> {
+impl<T: DriverObject> Object<T> {
     /// `drm_gem_object_funcs` vtable suitable for GEM shmem objects.
     const VTABLE: bindings::drm_gem_object_funcs = bindings::drm_gem_object_funcs {
         free: Some(Self::free_callback),
@@ -157,7 +152,7 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
     }
 
     /// Returns the `Device` that owns this GEM object.
-    pub fn dev(&self) -> &Device<T::Driver, C> {
+    pub fn dev(&self) -> &Device<T::Driver> {
         // SAFETY: `dev` will have been initialized in `Self::new()` by `drm_gem_shmem_init()`.
         unsafe { Device::from_raw((*self.as_raw()).dev) }
     }
@@ -171,8 +166,8 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
 
         // SAFETY:
         // - We verified above that `obj` is valid, which makes `this` valid
-        // - This function is set in AllocOps, so we know that `this` is contained within a
-        //   `Object<T, C>`
+        // - This function is set in AllocOps, so we know that `this` is contained within an
+        //   `Object<T>`
         let this = unsafe { container_of!(Opaque::cast_from(base), Self, obj) }.cast_mut();
 
         // We need to drop `sgt_res` first, since doing so requires that the GEM object is still
@@ -193,7 +188,7 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
     }
 
     /// Attempt to create a vmap from the gem object, and confirm the size of said vmap.
-    fn make_vmap<'a, R, const SIZE: usize>(&'a self) -> Result<VMap<T, R, C, SIZE>>
+    fn make_vmap<'a, R, const SIZE: usize>(&'a self) -> Result<VMap<T, R, SIZE>>
     where
         R: Deref<Target = Self> + From<&'a Self>,
     {
@@ -255,7 +250,7 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
 
     /// Creates and returns a virtual kernel memory mapping for this object.
     #[inline]
-    pub fn vmap<const SIZE: usize>(&self) -> Result<VMapRef<'_, T, C, SIZE>> {
+    pub fn vmap<const SIZE: usize>(&self) -> Result<VMapRef<'_, T, SIZE>> {
         self.make_vmap()
     }
 
@@ -298,9 +293,7 @@ impl<T: DriverObject, C: DeviceContext> Object<T, C> {
 
         Ok(sgt_res.access(dev)?)
     }
-}
 
-impl<T: DriverObject> Object<T> {
     /// Create a new shmem-backed DRM object of the given size.
     ///
     /// Additional config options can be specified using `config`.
@@ -317,7 +310,6 @@ impl<T: DriverObject> Object<T> {
                 sgt_res: ManuallyDrop::new(SetOnce::new()),
                 sgt_lock <- new_mutex!(()),
                 inner <- T::new(dev, size, args),
-                _ctx: PhantomData,
             }),
             GFP_KERNEL,
         )?;
@@ -351,12 +343,12 @@ impl<T: DriverObject> Object<T> {
 
     /// Creates and returns an owned reference to a virtual kernel memory mapping for this object.
     #[inline]
-    pub fn owned_vmap<const SIZE: usize>(&self) -> Result<VMapOwned<T, Normal, SIZE>> {
+    pub fn owned_vmap<const SIZE: usize>(&self) -> Result<VMapOwned<T, SIZE>> {
         self.make_vmap()
     }
 }
 
-impl<T: DriverObject, C: DeviceContext> Deref for Object<T, C> {
+impl<T: DriverObject> Deref for Object<T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
@@ -364,15 +356,15 @@ impl<T: DriverObject, C: DeviceContext> Deref for Object<T, C> {
     }
 }
 
-impl<T: DriverObject, C: DeviceContext> DerefMut for Object<T, C> {
+impl<T: DriverObject> DerefMut for Object<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<T: DriverObject, C: DeviceContext> Sealed for Object<T, C> {}
+impl<T: DriverObject> Sealed for Object<T> {}
 
-impl<T: DriverObject, C: DeviceContext> gem::IntoGEMObject for Object<T, C> {
+impl<T: DriverObject> gem::IntoGEMObject for Object<T> {
     fn as_raw(&self) -> *mut bindings::drm_gem_object {
         // SAFETY:
         // - Our immutable reference is proof that this is safe to dereference.
@@ -391,7 +383,7 @@ impl<T: DriverObject, C: DeviceContext> gem::IntoGEMObject for Object<T, C> {
     }
 }
 
-impl<T: DriverObject, C: DeviceContext> driver::AllocImpl for Object<T, C> {
+impl<T: DriverObject> driver::AllocImpl for Object<T> {
     type Driver = T::Driver;
 
     const ALLOC_OPS: driver::AllocOps = driver::AllocOps {
@@ -410,14 +402,11 @@ impl<T: DriverObject, C: DeviceContext> driver::AllocImpl for Object<T, C> {
 /// When this is dropped, the `dma_resv` lock is dropped as well.
 ///
 // TODO: This should be replace with a WwMutex equivalent once we have such bindings in the kernel.
-struct DmaResvGuard<'a, T: DriverObject, C: DeviceContext = Normal>(
-    &'a Object<T, C>,
-    NotThreadSafe,
-);
+struct DmaResvGuard<'a, T: DriverObject>(&'a Object<T>, NotThreadSafe);
 
-impl<'a, T: DriverObject, C: DeviceContext> DmaResvGuard<'a, T, C> {
+impl<'a, T: DriverObject> DmaResvGuard<'a, T> {
     #[inline]
-    fn new(obj: &'a Object<T, C>) -> Self {
+    fn new(obj: &'a Object<T>) -> Self {
         // SAFETY: This lock is initialized throughout the lifetime of `object`.
         unsafe { bindings::dma_resv_lock(obj.raw_dma_resv(), ptr::null_mut()) };
 
@@ -425,7 +414,7 @@ impl<'a, T: DriverObject, C: DeviceContext> DmaResvGuard<'a, T, C> {
     }
 }
 
-impl<'a, T: DriverObject, C: DeviceContext> Drop for DmaResvGuard<'a, T, C> {
+impl<'a, T: DriverObject> Drop for DmaResvGuard<'a, T> {
     #[inline]
     fn drop(&mut self) {
         // SAFETY: We are releasing the lock grabbed during the creation of this object.
@@ -439,40 +428,37 @@ impl<'a, T: DriverObject, C: DeviceContext> Drop for DmaResvGuard<'a, T, C> {
 ///
 /// - The size of `owner` is >= SIZE.
 /// - The memory pointed to by `addr` remains valid at least until this object is dropped.
-pub struct VMap<D, R, C = Normal, const SIZE: usize = 0>
+pub struct VMap<D, R, const SIZE: usize = 0>
 where
     D: DriverObject,
-    C: DeviceContext,
-    R: Deref<Target = Object<D, C>>,
+    R: Deref<Target = Object<D>>,
 {
     addr: *mut c_void,
     owner: R,
 }
 
 /// An alias type for a reference to a shmem-based GEM object's VMap.
-pub type VMapRef<'a, D, C, const SIZE: usize = 0> = VMap<D, &'a Object<D, C>, C, SIZE>;
+pub type VMapRef<'a, D, const SIZE: usize = 0> = VMap<D, &'a Object<D>, SIZE>;
 
 /// An alias type for an owned reference to a shmem-based GEM object's VMap.
-pub type VMapOwned<D, C, const SIZE: usize = 0> = VMap<D, ARef<Object<D, C>>, C, SIZE>;
+pub type VMapOwned<D, const SIZE: usize = 0> = VMap<D, ARef<Object<D>>, SIZE>;
 
-impl<D, R, C, const SIZE: usize> VMap<D, R, C, SIZE>
+impl<D, R, const SIZE: usize> VMap<D, R, SIZE>
 where
     D: DriverObject,
-    C: DeviceContext,
-    R: Deref<Target = Object<D, C>>,
+    R: Deref<Target = Object<D>>,
 {
     /// Borrows a reference to the object that owns this virtual mapping.
     #[inline]
-    pub fn owner(&self) -> &Object<D, C> {
+    pub fn owner(&self) -> &Object<D> {
         &self.owner
     }
 }
 
-impl<D, R, C, const SIZE: usize> Drop for VMap<D, R, C, SIZE>
+impl<D, R, const SIZE: usize> Drop for VMap<D, R, SIZE>
 where
     D: DriverObject,
-    C: DeviceContext,
-    R: Deref<Target = Object<D, C>>,
+    R: Deref<Target = Object<D>>,
 {
     #[inline]
     fn drop(&mut self) {
@@ -491,29 +477,26 @@ where
 
 // SAFETY: `addr` points to a valid memory address for as long as `owner` exists, meaning that so
 // long as `owner` is `Send` so is `VMap`.
-unsafe impl<D, R, C, const SIZE: usize> Send for VMap<D, R, C, SIZE>
+unsafe impl<D, R, const SIZE: usize> Send for VMap<D, R, SIZE>
 where
     D: DriverObject,
-    C: DeviceContext,
-    R: Deref<Target = Object<D, C>> + Send,
+    R: Deref<Target = Object<D>> + Send,
 {
 }
 
 // SAFETY: `addr` points to a valid memory address for as long as `owner` exists, meaning that so
 // long as `owner` is `Sync` so is `VMap`.
-unsafe impl<D, R, C, const SIZE: usize> Sync for VMap<D, R, C, SIZE>
+unsafe impl<D, R, const SIZE: usize> Sync for VMap<D, R, SIZE>
 where
     D: DriverObject,
-    C: DeviceContext,
-    R: Deref<Target = Object<D, C>> + Sync,
+    R: Deref<Target = Object<D>> + Sync,
 {
 }
 
-impl<D, R, C, const SIZE: usize> Io for VMap<D, R, C, SIZE>
+impl<D, R, const SIZE: usize> Io for VMap<D, R, SIZE>
 where
     D: DriverObject,
-    C: DeviceContext,
-    R: Deref<Target = Object<D, C>>,
+    R: Deref<Target = Object<D>>,
 {
     #[inline]
     fn addr(&self) -> usize {
@@ -526,22 +509,20 @@ where
     }
 }
 
-impl<D, R, C, const SIZE: usize> IoKnownSize for VMap<D, R, C, SIZE>
+impl<D, R, const SIZE: usize> IoKnownSize for VMap<D, R, SIZE>
 where
     D: DriverObject,
-    C: DeviceContext,
-    R: Deref<Target = Object<D, C>>,
+    R: Deref<Target = Object<D>>,
 {
     const MIN_SIZE: usize = SIZE;
 }
 
 macro_rules! impl_vmap_io_capable {
     ($ty:ty) => {
-        impl<D, R, C, const SIZE: usize> IoCapable<$ty> for VMap<D, R, C, SIZE>
+        impl<D, R, const SIZE: usize> IoCapable<$ty> for VMap<D, R, SIZE>
         where
             D: DriverObject,
-            C: DeviceContext,
-            R: Deref<Target = Object<D, C>>,
+            R: Deref<Target = Object<D>>,
         {
             #[inline]
             unsafe fn io_read(&self, address: usize) -> $ty {
@@ -584,11 +565,11 @@ impl_vmap_io_capable!(u64);
 ///   [`SGTable`].
 ///
 /// [`SGTable`]: scatterlist::SGTable
-pub struct SGTableMap<T: DriverObject, C: DeviceContext> {
-    obj: NonNull<Object<T, C>>,
+pub struct SGTableMap<T: DriverObject> {
+    obj: NonNull<Object<T>>,
 }
 
-impl<T: DriverObject, C: DeviceContext> Deref for SGTableMap<T, C> {
+impl<T: DriverObject> Deref for SGTableMap<T> {
     type Target = scatterlist::SGTable;
 
     fn deref(&self) -> &Self::Target {
@@ -599,7 +580,7 @@ impl<T: DriverObject, C: DeviceContext> Deref for SGTableMap<T, C> {
     }
 }
 
-impl<T: DriverObject, C: DeviceContext> Drop for SGTableMap<T, C> {
+impl<T: DriverObject> Drop for SGTableMap<T> {
     fn drop(&mut self) {
         // SAFETY: `obj` is always valid via our type invariants
         let obj = unsafe { self.obj.as_ref() };
@@ -610,8 +591,8 @@ impl<T: DriverObject, C: DeviceContext> Drop for SGTableMap<T, C> {
     }
 }
 
-impl<T: DriverObject, C: DeviceContext> SGTableMap<T, C> {
-    fn new(obj: &Object<T, C>) -> impl Init<Self, Error> {
+impl<T: DriverObject> SGTableMap<T> {
+    fn new(obj: &Object<T>) -> impl Init<Self, Error> {
         // INVARIANT:
         // - We call drm_gem_shmem_get_pages_sgt below and check whether or not it succeeds,
         //   fulfilling the invariant of SGTableMap that the object's `sgt` field is initialized.
@@ -625,10 +606,10 @@ impl<T: DriverObject, C: DeviceContext> SGTableMap<T, C> {
 
 // SAFETY: The NonNull in SGTableMap is guaranteed valid by our type invariants, and the GEM object
 // it points to is guaranteed to be thread-safe.
-unsafe impl<T: DriverObject, C: DeviceContext> Send for SGTableMap<T, C> {}
+unsafe impl<T: DriverObject> Send for SGTableMap<T> {}
 // SAFETY: The NonNull in SGTableMap is guaranteed valid by our type invariants, and the GEM object
 // it points to is guaranteed to be thread-safe.
-unsafe impl<T: DriverObject, C: DeviceContext> Sync for SGTableMap<T, C> {}
+unsafe impl<T: DriverObject> Sync for SGTableMap<T> {}
 
 #[kunit_tests(rust_drm_gem_shmem)]
 mod tests {
@@ -705,7 +686,7 @@ mod tests {
     fn compile_time_vmap_sizes() -> Result {
         let (_dev, drm) = create_drm_dev()?;
 
-        let obj = Object::<KunitObject, _>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
 
         // Try creating a normal vmap
         obj.vmap::<PAGE_SIZE>()?;
@@ -729,7 +710,7 @@ mod tests {
     fn vmap_io() -> Result {
         let (_dev, drm) = create_drm_dev()?;
 
-        let obj = Object::<KunitObject, _>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
 
         let vmap = obj.vmap::<PAGE_SIZE>()?;
 
@@ -761,7 +742,7 @@ mod tests {
         let reg = faux::Registration::new(c"EvilKunit", None)?;
         let wrong_dev = reg.as_ref();
 
-        let obj = Object::<KunitObject, _>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
+        let obj = Object::<KunitObject>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
 
         assert_eq!(obj.sg_table(wrong_dev.as_ref()).err().unwrap(), EINVAL);
 
