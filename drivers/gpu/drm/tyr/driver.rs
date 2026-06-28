@@ -52,8 +52,9 @@ pub(crate) type TyrDrmDevice<Ctx = drm::Normal> = drm::Device<TyrDrmDriver, Ctx>
 pub(crate) struct TyrPlatformDriver;
 
 #[pin_data(PinnedDrop)]
-pub(crate) struct TyrPlatformDriverData {
+pub(crate) struct TyrPlatformDriverData<'bound> {
     _device: ARef<TyrDrmDevice>,
+    _reg: drm::Registration<'bound, TyrDrmDriver>,
 }
 
 #[pin_data]
@@ -98,7 +99,7 @@ kernel::of_device_table!(
 
 impl platform::Driver for TyrPlatformDriver {
     type IdInfo = ();
-    type Data<'bound> = TyrPlatformDriverData;
+    type Data<'bound> = TyrPlatformDriverData<'bound>;
     const OF_ID_TABLE: Option<of::IdTable<Self::IdInfo>> = Some(&OF_TABLE);
 
     fn probe<'bound>(
@@ -150,10 +151,13 @@ impl platform::Driver for TyrPlatformDriver {
         });
 
         let tdev = drm::UnregisteredDevice::<TyrDrmDriver>::new(pdev, data)?;
-        let tdev = drm::driver::Registration::new_foreign_owned(tdev, pdev.as_ref(), 0)?;
+        // SAFETY: `reg` is stored in `TyrPlatformDriverData` and dropped when the driver is
+        // unbound; it is never forgotten.
+        let reg = unsafe { drm::Registration::new(pdev.as_ref(), tdev, (), 0)? };
 
         let driver = TyrPlatformDriverData {
-            _device: tdev.into(),
+            _device: reg.device().into(),
+            _reg: reg,
         };
 
         // We need this to be dev_info!() because dev_dbg!() does not work at
@@ -164,7 +168,7 @@ impl platform::Driver for TyrPlatformDriver {
 }
 
 #[pinned_drop]
-impl PinnedDrop for TyrPlatformDriverData {
+impl PinnedDrop for TyrPlatformDriverData<'_> {
     fn drop(self: Pin<&mut Self>) {}
 }
 
@@ -181,6 +185,7 @@ const INFO: drm::DriverInfo = drm::DriverInfo {
 #[vtable]
 impl drm::Driver for TyrDrmDriver {
     type Data = TyrDrmDeviceData;
+    type RegistrationData<'a> = ();
     type File = TyrDrmFileData;
     type Object = drm::gem::shmem::Object<BoData>;
     type ParentDevice<Ctx: DeviceContext> = platform::Device<Ctx>;

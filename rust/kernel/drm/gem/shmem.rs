@@ -665,6 +665,7 @@ mod tests {
     #[vtable]
     impl drm::Driver for KunitDriver {
         type Data = KunitData;
+        type RegistrationData<'a> = ();
         type File = KunitFile;
         type Object = Object<KunitObject>;
         type ParentDevice<Ctx: device::DeviceContext> = faux::Device<Ctx>;

@@ -32,6 +32,7 @@ use crate::{
 };
 use core::{
     alloc::Layout,
+    cell::UnsafeCell,
     marker::PhantomData,
     mem,
     ops::Deref,
@@ -247,6 +248,9 @@ impl<T: drm::Driver> UnregisteredDevice<T> {
         // SAFETY: `drm_dev` is still private to this function.
         unsafe { (*drm_dev).driver = const { &Self::VTABLE } };
 
+        // SAFETY: `raw_drm` is valid; no concurrent access before registration.
+        unsafe { (*raw_drm.as_ptr()).registration_data = UnsafeCell::new(NonNull::dangling()) };
+
         // SAFETY: The reference count is one, and now we take ownership of that reference as a
         // `drm::Device`.
         // INVARIANT: We just created the device above, but have yet to call `drm_dev_register`.
@@ -270,6 +274,7 @@ impl<T: drm::Driver> UnregisteredDevice<T> {
 pub struct Device<T: drm::Driver, C: DeviceContext = Normal> {
     dev: Opaque<bindings::drm_device>,
     data: T::Data,
+    pub(super) registration_data: UnsafeCell<NonNull<T::RegistrationData<'static>>>,
     _ctx: PhantomData<C>,
 }
 
@@ -383,6 +388,45 @@ pub struct RegistrationGuard<'a, T: drm::Driver> {
     dev: &'a Device<T, Registered>,
     idx: i32,
     _not_send: NotThreadSafe,
+}
+
+impl<T: drm::Driver> Device<T, Registered> {
+    /// Returns a reference to the registration data with lifetime shortened from `'static`.
+    ///
+    /// # Safety
+    ///
+    /// The returned reference must not be exposed to code that can choose a concrete lifetime for
+    /// it, as that would be unsound for types that are invariant over their lifetime parameter
+    /// (e.g. it must be passed through an HRTB-bounded closure).
+    #[inline]
+    unsafe fn registration_data_unchecked(&self) -> &T::RegistrationData<'_> {
+        // SAFETY:
+        // - `Registered` guarantees the parent bus device is bound, hence the pointer is valid.
+        // - The pointer cast from `Of<'static>` to `Of<'_>` is layout-compatible since lifetimes
+        //   are erased at runtime.
+        // - Caller guarantees the reference is only used behind an HRTB, making the lifetime
+        //   shortening sound regardless of variance.
+        unsafe { (*self.registration_data.get()).cast::<_>().as_ref() }
+    }
+
+    /// Access the registration data through a closure, with the lifetime tied to the closure
+    /// scope.
+    ///
+    /// The data is owned by [`Registration`](drm::Registration) and is guaranteed to remain valid
+    /// as long as the device is registered, since [`Registration`](drm::Registration)'s `drop`
+    /// calls `drm_dev_unplug()` which waits for all `drm_dev_enter()` critical sections to
+    /// complete.
+    #[inline]
+    pub fn registration_data_with<R, F>(&self, f: F) -> R
+    where
+        F: for<'a> FnOnce(&'a T::RegistrationData<'a>) -> R,
+    {
+        // SAFETY: `Registered` guarantees the device is registered and the parent bus device is
+        // bound. The closure's HRTB `for<'a>` prevents the caller from smuggling in references
+        // with a concrete short lifetime, satisfying the lifetime requirement of
+        // `registration_data_unchecked`.
+        f(unsafe { self.registration_data_unchecked() })
+    }
 }
 
 impl<T: drm::Driver> Deref for RegistrationGuard<'_, T> {
