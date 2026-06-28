@@ -692,10 +692,12 @@ mod tests {
     fn create_drm_dev() -> Result<(faux::Registration, UnregisteredDevice<KunitDriver>)> {
         // Create a faux DRM device so we can test gem object creation.
         let data = try_pin_init!(KunitData {});
-        let dev = faux::Registration::new(c"Kunit", None)?;
-        let drm = UnregisteredDevice::new(dev.as_ref(), data)?;
+        let reg = faux::Registration::new(c"Kunit", None)?;
+        let fdev = reg.as_ref();
+        let dev = fdev.as_ref();
+        let drm = UnregisteredDevice::new(dev, data)?;
 
-        Ok((dev, drm))
+        Ok((reg, drm))
     }
 
     #[test]
@@ -755,7 +757,8 @@ mod tests {
     #[test]
     fn fail_sg_table_on_wrong_dev() -> Result {
         let (_dev, drm) = create_drm_dev()?;
-        let wrong_dev = faux::Registration::new(c"EvilKunit", None)?;
+        let reg = faux::Registration::new(c"EvilKunit", None)?;
+        let wrong_dev = reg.as_ref();
 
         let obj = Object::<KunitObject, _>::new(&drm, PAGE_SIZE, ObjectConfig::default(), ())?;
 
