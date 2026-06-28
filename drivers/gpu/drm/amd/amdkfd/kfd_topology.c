@@ -198,8 +198,7 @@ struct kfd_topology_device *kfd_create_topology_device(
 
 
 #define sysfs_show_gen_prop(buffer, offs, fmt, ...)		\
-		(offs += snprintf(buffer+offs, PAGE_SIZE-offs,	\
-				  fmt, __VA_ARGS__))
+		(offs += sysfs_emit_at(buffer, offs, fmt, __VA_ARGS__))
 #define sysfs_show_32bit_prop(buffer, offs, name, value) \
 		sysfs_show_gen_prop(buffer, offs, "%s %u\n", name, value)
 #define sysfs_show_64bit_prop(buffer, offs, name, value) \
@@ -2350,7 +2349,7 @@ static int kfd_cpumask_to_apic_id(const struct cpumask *cpumask)
 	first_cpu_of_numa_node = cpumask_first(cpumask);
 	if (first_cpu_of_numa_node >= nr_cpu_ids)
 		return -1;
-#ifdef CONFIG_X86_64
+#if defined(CONFIG_X86_64) && !defined(CONFIG_UML)
 	return cpu_data(first_cpu_of_numa_node).topo.apicid;
 #else
 	return first_cpu_of_numa_node;

@@ -16,6 +16,8 @@ use kernel::{
     transmute::FromBytes,
 };
 
+use zerocopy::FromBytes as _;
+
 use crate::{
     driver::Bar0,
     firmware::{
@@ -927,8 +929,8 @@ impl FwSecBiosImage {
         let ver = data.get(1).copied().ok_or(EINVAL)?;
         match ver {
             2 => {
-                let v2 = FalconUCodeDescV2::from_bytes_copy_prefix(data)
-                    .ok_or(EINVAL)?
+                let v2 = FalconUCodeDescV2::read_from_prefix(data)
+                    .map_err(|_| EINVAL)?
                     .0;
                 Ok(FalconUCodeDesc::V2(v2))
             }
