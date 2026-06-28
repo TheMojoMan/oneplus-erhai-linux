@@ -684,6 +684,7 @@ mod tests {
         type Data = KunitData;
         type File = KunitFile;
         type Object<Ctx: DeviceContext> = Object<KunitObject, Ctx>;
+        type ParentDevice<Ctx: device::DeviceContext> = faux::Device<Ctx>;
 
         const INFO: drm::DriverInfo = INFO;
         const IOCTLS: &'static [drm::ioctl::DrmIoctlDescriptor] = &[];
@@ -694,8 +695,7 @@ mod tests {
         let data = try_pin_init!(KunitData {});
         let reg = faux::Registration::new(c"Kunit", None)?;
         let fdev = reg.as_ref();
-        let dev = fdev.as_ref();
-        let drm = UnregisteredDevice::new(dev, data)?;
+        let drm = UnregisteredDevice::new(fdev, data)?;
 
         Ok((reg, drm))
     }
