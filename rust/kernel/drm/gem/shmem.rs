@@ -264,7 +264,8 @@ impl<T: DriverObject> Object<T> {
         &'a self,
         dev: &'a device::Device<Bound>,
     ) -> Result<&'a scatterlist::SGTable> {
-        if dev.as_raw() != self.dev().as_ref().as_raw() {
+        let parent = self.dev().as_ref();
+        if dev.as_raw() != parent.as_ref().as_raw() {
             return Err(EINVAL);
         }
 

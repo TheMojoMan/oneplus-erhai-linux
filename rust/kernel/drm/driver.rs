@@ -170,7 +170,8 @@ impl<T: Driver> Registration<T> {
     where
         T: 'static,
     {
-        if drm.as_ref().as_raw() != dev.as_raw() {
+        let parent = drm.as_ref();
+        if parent.as_ref().as_raw() != dev.as_raw() {
             return Err(EINVAL);
         }
 
