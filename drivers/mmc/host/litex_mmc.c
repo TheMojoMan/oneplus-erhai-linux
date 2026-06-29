@@ -103,10 +103,6 @@ struct litex_mmc_host {
 	u8 width;
 
 	u32 resp[4];
-	u16 rca;
-
-	bool is_bus_width_set;
-	bool app_cmd;
 };
 
 static int litex_mmc_sdcard_wait_done(void __iomem *reg, struct device *dev)
@@ -171,11 +167,6 @@ static int litex_mmc_send_cmd(struct litex_mmc_host *host,
 			      host->sdcore + LITEX_CORE_CMDRSP, 0x10);
 	}
 
-	if (!host->app_cmd && cmd == SD_SEND_RELATIVE_ADDR)
-		host->rca = (host->resp[3] >> 16);
-
-	host->app_cmd = (cmd == MMC_APP_CMD);
-
 	if (transfer == SD_CTL_DATA_XFER_NONE)
 		return ret; /* OK from prior litex_mmc_sdcard_wait_done() */
 
@@ -197,51 +188,6 @@ static int litex_mmc_send_cmd(struct litex_mmc_host *host,
 	return ret;
 }
 
-static int litex_mmc_send_app_cmd(struct litex_mmc_host *host)
-{
-	return litex_mmc_send_cmd(host, MMC_APP_CMD, host->rca << 16,
-				  SD_CTL_RESP_SHORT, SD_CTL_DATA_XFER_NONE);
-}
-
-static int litex_mmc_send_set_bus_w_cmd(struct litex_mmc_host *host, u32 width)
-{
-	return litex_mmc_send_cmd(host, SD_APP_SET_BUS_WIDTH, width,
-				  SD_CTL_RESP_SHORT, SD_CTL_DATA_XFER_NONE);
-}
-
-static int litex_mmc_set_bus_width(struct litex_mmc_host *host)
-{
-	bool app_cmd_sent;
-	int ret;
-
-	if (host->is_bus_width_set)
-		return 0;
-
-	/* Ensure 'app_cmd' precedes 'app_set_bus_width_cmd' */
-	app_cmd_sent = host->app_cmd; /* was preceding command app_cmd? */
-	if (!app_cmd_sent) {
-		ret = litex_mmc_send_app_cmd(host);
-		if (ret)
-			return ret;
-	}
-
-	/* LiteSDCard only supports 4-bit bus width */
-	ret = litex_mmc_send_set_bus_w_cmd(host, MMC_BUS_WIDTH_4);
-	if (ret)
-		return ret;
-
-	/* Re-send 'app_cmd' if necessary */
-	if (app_cmd_sent) {
-		ret = litex_mmc_send_app_cmd(host);
-		if (ret)
-			return ret;
-	}
-
-	host->is_bus_width_set = true;
-
-	return 0;
-}
-
 static int litex_mmc_get_cd(struct mmc_host *mmc)
 {
 	struct litex_mmc_host *host = mmc_priv(mmc);
@@ -253,9 +199,6 @@ static int litex_mmc_get_cd(struct mmc_host *mmc)
 	ret = !litex_read8(host->sdphy + LITEX_PHY_CARDDETECT);
 	if (ret)
 		return ret;
-
-	/* Ensure bus width will be set (again) upon card (re)insertion */
-	host->is_bus_width_set = false;
 
 	return 0;
 }
@@ -372,38 +315,18 @@ static void litex_mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 						litex_mmc_response_len(sbc),
 						SD_CTL_DATA_XFER_NONE);
 		if (sbc->error) {
-			host->is_bus_width_set = false;
 			mmc_request_done(mmc, mrq);
 			return;
 		}
 	}
 
-	if (data) {
-		/*
-		 * LiteSDCard only supports 4-bit bus width; therefore, we MUST
-		 * inject a SET_BUS_WIDTH (acmd6) before the very first data
-		 * transfer, earlier than when the mmc subsystem would normally
-		 * get around to it!
-		 */
-		cmd->error = litex_mmc_set_bus_width(host);
-		if (cmd->error) {
-			dev_err(dev, "Can't set bus width!\n");
-			mmc_request_done(mmc, mrq);
-			return;
-		}
-
+	if (data)
 		litex_mmc_do_dma(host, data, &len, &direct, &transfer);
-	}
 
 	do {
 		cmd->error = litex_mmc_send_cmd(host, cmd->opcode, cmd->arg,
 						response_len, transfer);
 	} while (cmd->error && retries-- > 0);
-
-	if (cmd->error) {
-		/* Card may be gone; don't assume bus width is still set */
-		host->is_bus_width_set = false;
-	}
 
 	if (response_len == SD_CTL_RESP_SHORT) {
 		/* Pull short response fields from appropriate host registers */
@@ -417,13 +340,10 @@ static void litex_mmc_request(struct mmc_host *mmc, struct mmc_request *mrq)
 	}
 
 	/* Send stop-transmission command if required */
-	if (stop && (cmd->error || !sbc)) {
+	if (stop && (cmd->error || !sbc))
 		stop->error = litex_mmc_send_cmd(host, stop->opcode, stop->arg,
 						 litex_mmc_response_len(stop),
 						 SD_CTL_DATA_XFER_NONE);
-		if (stop->error)
-			host->is_bus_width_set = false;
-	}
 
 	if (data) {
 		dma_unmap_sg(dev, data->sg, data->sg_len,
@@ -564,14 +484,6 @@ static int litex_mmc_probe(struct platform_device *pdev)
 		return dev_err_probe(dev, PTR_ERR(clk), "can't get clock\n");
 	host->ref_clk = clk_get_rate(clk);
 	host->sd_clk = 0;
-
-	/*
-	 * LiteSDCard only supports 4-bit bus width; therefore, we MUST inject
-	 * a SET_BUS_WIDTH (acmd6) before the very first data transfer, earlier
-	 * than when the mmc subsystem would normally get around to it!
-	 */
-	host->is_bus_width_set = false;
-	host->app_cmd = false;
 	host->width = MMC_BUS_WIDTH_1;
 
 	/* LiteSDCard can support 64-bit DMA addressing */
@@ -632,9 +544,8 @@ static int litex_mmc_probe(struct platform_device *pdev)
 	if (ret)
 		return ret;
 
-	/* Force 4-bit bus_width (only width supported by hardware) */
+	/* Only drop 8-bit bus_width support */
 	mmc->caps &= ~MMC_CAP_8_BIT_DATA;
-	mmc->caps |= MMC_CAP_4_BIT_DATA;
 
 	/* Set default capabilities */
 	mmc->caps |= MMC_CAP_WAIT_WHILE_BUSY |
