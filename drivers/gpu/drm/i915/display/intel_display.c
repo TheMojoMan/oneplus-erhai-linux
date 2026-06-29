@@ -1790,7 +1790,7 @@ static void hsw_crtc_disable(struct intel_atomic_state *state,
 		intel_atomic_get_old_crtc_state(state, crtc);
 	struct intel_crtc *pipe_crtc;
 
-	if (crtc->cmtg.enabled) {
+	if (crtc->cmtg.enabled && intel_cmtg_is_allowed(old_crtc_state)) {
 		intel_cmtg_set_clk_select(old_crtc_state);
 		intel_cmtg_disable(old_crtc_state);
 	}
@@ -6886,7 +6886,8 @@ static void intel_update_crtc(struct intel_atomic_state *state,
 	    old_crtc_state->inherited)
 		intel_crtc_arm_fifo_underrun(crtc, new_crtc_state);
 
-	if (crtc->cmtg.enabled && (intel_crtc_vrr_enabling(state, crtc))) {
+	if (crtc->cmtg.enabled && intel_crtc_vrr_enabling(state, crtc) &&
+	    intel_cmtg_is_allowed(new_crtc_state)) {
 		intel_cmtg_set_clk_select(new_crtc_state);
 		intel_cmtg_disable(new_crtc_state);
 	}
