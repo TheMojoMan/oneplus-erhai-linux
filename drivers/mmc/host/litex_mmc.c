@@ -28,6 +28,7 @@
 #define LITEX_PHY_CLOCKERDIV  0x04
 #define LITEX_PHY_INITIALIZE  0x08
 #define LITEX_PHY_WRITESTATUS 0x0C
+#define LITEX_PHY_SETTINGS    0x18
 #define LITEX_CORE_CMDARG     0x00
 #define LITEX_CORE_CMDCMD     0x04
 #define LITEX_CORE_CMDSND     0x08
@@ -71,6 +72,10 @@
 #define SD_INIT_DELAY_US  1000
 #define SD_INIT_CLK_HZ    400000
 
+#define SD_PHY_SPEED_1X 0
+#define SD_PHY_SPEED_4X 1
+#define SD_PHY_SPEED_8X 2
+
 #define SDIRQ_CARD_DETECT    1
 #define SDIRQ_SD_TO_MEM_DONE 2
 #define SDIRQ_MEM_TO_SD_DONE 4
@@ -94,6 +99,8 @@ struct litex_mmc_host {
 
 	unsigned int ref_clk;
 	unsigned int sd_clk;
+
+	u8 width;
 
 	u32 resp[4];
 	u16 rca;
@@ -450,6 +457,24 @@ static void litex_mmc_setclk(struct litex_mmc_host *host, unsigned int freq)
 static void litex_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct litex_mmc_host *host = mmc_priv(mmc);
+	unsigned int bus_width = SD_PHY_SPEED_1X;
+
+	switch (ios->bus_width) {
+	case MMC_BUS_WIDTH_1:
+		bus_width = SD_PHY_SPEED_1X;
+		break;
+	case MMC_BUS_WIDTH_4:
+		bus_width = SD_PHY_SPEED_4X;
+		break;
+	case MMC_BUS_WIDTH_8:
+		bus_width = SD_PHY_SPEED_8X;
+		break;
+	}
+
+	if (host->width != ios->bus_width) {
+		litex_write8(host->sdphy + LITEX_PHY_SETTINGS, bus_width);
+		host->width = ios->bus_width;
+	}
 
 	/*
 	 * The SD specification requires at least 74 idle clocks before CMD0.
@@ -461,13 +486,6 @@ static void litex_mmc_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		fsleep(SD_INIT_DELAY_US);
 		return;
 	}
-
-	/*
-	 * NOTE: Ignore any ios->bus_width updates; they occur right after
-	 * the mmc core sends its own acmd6 bus-width change notification,
-	 * which is redundant since we snoop on the command flow and inject
-	 * an early acmd6 before the first data transfer command is sent!
-	 */
 
 	/* Update sd_clk */
 	if (ios->clock != host->sd_clk)
@@ -554,6 +572,7 @@ static int litex_mmc_probe(struct platform_device *pdev)
 	 */
 	host->is_bus_width_set = false;
 	host->app_cmd = false;
+	host->width = MMC_BUS_WIDTH_1;
 
 	/* LiteSDCard can support 64-bit DMA addressing */
 	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
@@ -585,6 +604,9 @@ static int litex_mmc_probe(struct platform_device *pdev)
 	/* Ensure DMA bus masters are disabled */
 	litex_write8(host->sdreader + LITEX_BLK2MEM_ENA, 0);
 	litex_write8(host->sdwriter + LITEX_MEM2BLK_ENA, 0);
+
+	/* Ensure the litex is at bus width x1 */
+	litex_write8(host->sdphy + LITEX_PHY_SETTINGS, SD_PHY_SPEED_1X);
 
 	init_completion(&host->cmd_done);
 	ret = litex_mmc_irq_init(pdev, host);
