@@ -949,7 +949,6 @@ static void digi_write_bulk_callback(struct urb *urb)
 
 	/* handle oob callback */
 	if (priv->dp_port_num == serial_priv->ds_oob_port_num) {
-		dev_dbg(&port->dev, "digi_write_bulk_callback: oob callback\n");
 		spin_lock_irqsave(&priv->dp_port_lock, flags);
 		priv->dp_write_urb_in_use = 0;
 		wake_up_interruptible(&priv->write_wait);
@@ -1279,7 +1278,8 @@ static void digi_port_remove(struct usb_serial_port *port)
 static void digi_read_bulk_callback(struct urb *urb)
 {
 	struct usb_serial_port *port = urb->context;
-	struct digi_serial *serial_priv = usb_get_serial_data(port->serial);
+	struct usb_serial *serial = port->serial;
+	struct digi_serial *serial_priv = usb_get_serial_data(serial);
 	struct digi_port *priv = usb_get_serial_port_data(port);
 	int status = urb->status;
 	int ret;
@@ -1291,12 +1291,12 @@ static void digi_read_bulk_callback(struct urb *urb)
 	case -ENOENT:
 	case -ECONNRESET:
 	case -ESHUTDOWN:
-		dev_dbg(&port->dev,
+		dev_err(&serial->interface->dev,
 			"%s: nonzero read bulk status: status=%d, port=%d\n",
 			__func__, status, priv->dp_port_num);
 		return;
 	default:
-		dev_err(&port->dev,
+		dev_err(&serial->interface->dev,
 			"%s: nonzero read bulk status: status=%d, port=%d\n",
 			__func__, status, priv->dp_port_num);
 		return;
@@ -1314,7 +1314,7 @@ static void digi_read_bulk_callback(struct urb *urb)
 	/* continue read */
 	ret = usb_submit_urb(urb, GFP_ATOMIC);
 	if (ret != 0 && ret != -EPERM) {
-		dev_err(&port->dev,
+		dev_err(&serial->interface->dev,
 			"%s: failed resubmitting urb, ret=%d, port=%d\n",
 			__func__, ret, priv->dp_port_num);
 	}
@@ -1438,7 +1438,8 @@ static int digi_read_oob_callback(struct urb *urb)
 		status = buf[i + 2];
 		val = buf[i + 3];
 
-		dev_dbg(&port->dev, "digi_read_oob_callback: opcode=%d, line=%d, status=%d, val=%d\n",
+		dev_dbg(&serial->interface->dev,
+			"digi_read_oob_callback: opcode=%d, line=%d, status=%d, val=%d\n",
 			opcode, line, status, val);
 
 		if (status != 0 || line >= serial->type->num_ports)
