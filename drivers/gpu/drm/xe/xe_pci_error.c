@@ -26,6 +26,8 @@ static void prepare_device_for_reset(struct pci_dev *pdev)
 	if (!atomic_xchg(&xe->wedged.flag, 1))
 		xe_pm_runtime_get_noresume(xe);
 
+	xe_device_set_in_reset(xe);
+
 	for_each_gt(gt, xe, id)
 		xe_gt_declare_wedged(gt);
 
@@ -88,6 +90,7 @@ static pci_ers_result_t xe_pci_error_slot_reset(struct pci_dev *pdev)
 	 * TODO: optimize by re-initializing only the hardware state and re-creating
 	 * kernel BOs.
 	 */
+	xe_device_clear_in_reset(xe);
 	pdev->driver->remove(pdev);
 	devres_release_group(&pdev->dev, xe->devres_group);
 
