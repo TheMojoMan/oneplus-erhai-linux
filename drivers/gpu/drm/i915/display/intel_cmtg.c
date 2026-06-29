@@ -183,6 +183,9 @@ void intel_cmtg_disable(const struct intel_crtc_state *crtc_state)
 	if (!crtc->cmtg.enabled)
 		return;
 
+	if (drm_WARN_ON(display->drm, cmtg_transcoder == INVALID_TRANSCODER))
+		return;
+
 	crtc->cmtg.enabled = false;
 	intel_de_rmw(display, TRANS_VRR_CTL(display, cmtg_transcoder),
 		     VRR_CTL_VRR_ENABLE | VRR_CTL_FLIP_LINE_EN, 0);
