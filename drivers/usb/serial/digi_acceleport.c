@@ -1355,7 +1355,17 @@ static void digi_read_bulk_callback(struct urb *urb)
 	}
 
 	/* do not resubmit urb if it has any status error */
-	if (status) {
+	switch (status) {
+	case 0:
+		break;
+	case -ENOENT:
+	case -ECONNRESET:
+	case -ESHUTDOWN:
+		dev_dbg(&port->dev,
+			"%s: nonzero read bulk status: status=%d, port=%d\n",
+			__func__, status, priv->dp_port_num);
+		return;
+	default:
 		dev_err(&port->dev,
 			"%s: nonzero read bulk status: status=%d, port=%d\n",
 			__func__, status, priv->dp_port_num);
