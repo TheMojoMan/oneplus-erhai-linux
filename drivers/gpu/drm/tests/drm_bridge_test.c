@@ -1071,7 +1071,7 @@ static void drm_test_bridge_chain_verify_fmt(struct kunit *test,
 	struct drm_bridge_state *bstate;
 	unsigned int i = 0;
 
-	drm_for_each_bridge_in_chain_scoped(&priv->encoder, bridge) {
+	drm_for_each_bridge_in_chain(&priv->encoder, bridge) {
 		KUNIT_ASSERT_LT(test, i, num_expected);
 
 		bstate = drm_bridge_get_current_state(bridge);
