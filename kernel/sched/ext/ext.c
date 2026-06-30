@@ -4979,7 +4979,7 @@ static ssize_t scx_attr_events_show(struct kobject *kobj,
 	int at = 0;
 
 	scx_read_events(sch, &events);
-#define SCX_EVENT(name)	at += scx_attr_event_show(buf, at, &events, name)
+#define SCX_EVENT(name)	(at += scx_attr_event_show(buf, at, &events, name))
 	SCX_EVENTS_LIST(SCX_EVENT);
 #undef SCX_EVENT
 	return at;
@@ -10309,7 +10309,7 @@ static void scx_read_events(struct scx_sched *sch, struct scx_event_stats *event
 	memset(events, 0, sizeof(*events));
 	for_each_possible_cpu(cpu) {
 		struct scx_event_stats *e_cpu = &per_cpu_ptr(sch->pcpu, cpu)->event_stats;
-#define SCX_EVENT(name)	events->name += READ_ONCE(e_cpu->name)
+#define SCX_EVENT(name)	(events->name += READ_ONCE(e_cpu->name))
 		SCX_EVENTS_LIST(SCX_EVENT);
 #undef SCX_EVENT
 	}
