@@ -490,6 +490,11 @@ static int aie2_init(struct amdxdna_dev *xdna)
 		return -EINVAL;
 	}
 
+	if (!xdna->group) {
+		XDNA_ERR(xdna, "Running without IOMMU not supported");
+		return -EINVAL;
+	}
+
 	ndev = drmm_kzalloc(&xdna->ddev, sizeof(*ndev), GFP_KERNEL);
 	if (!ndev)
 		return -ENOMEM;
@@ -1241,4 +1246,5 @@ const struct amdxdna_dev_ops aie2_ops = {
 	.hmm_invalidate = aie2_hmm_invalidate,
 	.get_array = aie2_get_array,
 	.get_dev_revision = aie2_get_dev_rev,
+	.hwctx_heap_expand = aie2_hwctx_heap_expand,
 };

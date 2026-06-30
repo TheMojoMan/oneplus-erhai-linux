@@ -181,6 +181,7 @@ void dcn10_set_wait_for_update_needed_for_pipe(struct dc *dc, struct pipe_ctx *p
 	uint32_t vupdate_start, vupdate_end;
 	struct crtc_position position;
 	unsigned int vpos, cur_frame;
+	uint32_t max_frame_count;
 
 	if (!pipe_ctx->stream ||
 		!pipe_ctx->stream_res.tg ||
@@ -197,7 +198,8 @@ void dcn10_set_wait_for_update_needed_for_pipe(struct dc *dc, struct pipe_ctx *p
 
 	struct optc *optc1 = DCN10TG_FROM_TG(tg);
 
-	ASSERT(optc1->max_frame_count != 0);
+	max_frame_count = optc1->tg_mask->OTG_FRAME_COUNT >> optc1->tg_shift->OTG_FRAME_COUNT;
+	ASSERT(max_frame_count != 0);
 
 	if (tg->funcs->is_tg_enabled && !tg->funcs->is_tg_enabled(tg))
 		return;
@@ -209,8 +211,8 @@ void dcn10_set_wait_for_update_needed_for_pipe(struct dc *dc, struct pipe_ctx *p
 	if (vpos < vupdate_start) {
 		pipe_ctx->wait_frame_count = cur_frame;
 	} else {
-		if (cur_frame + 1 > optc1->max_frame_count)
-			pipe_ctx->wait_frame_count = cur_frame + 1 - optc1->max_frame_count;
+		if (cur_frame + 1 > max_frame_count)
+			pipe_ctx->wait_frame_count = cur_frame + 1 - max_frame_count;
 		else
 			pipe_ctx->wait_frame_count = cur_frame + 1;
 	}
@@ -752,6 +754,43 @@ void dcn10_log_hw_state(struct dc *dc,
 			dc->current_state->bw_ctx.bw.dcn.clk.socclk_khz);
 
 	log_mpc_crc(dc, log_ctx);
+
+	for (i = 0; i < pool->hpo_frl_stream_enc_count; i++) {
+		struct hpo_frl_stream_encoder_state hpo_se_state = {0};
+		struct hpo_frl_link_enc_state hpo_le_state = {0};
+		struct hpo_frl_stream_encoder *hpo_frl_stream_enc = pool->hpo_frl_stream_enc[i];
+		struct hpo_frl_link_encoder *hpo_frl_link_enc = dc->links[i]->hpo_frl_link_enc;
+		bool printed_header = false;
+
+		hpo_frl_stream_enc->funcs->read_state(hpo_frl_stream_enc, &hpo_se_state);
+		if (hpo_se_state.stream_enc_enabled)
+			hpo_frl_link_enc->funcs->read_state(hpo_frl_link_enc, &hpo_le_state);
+
+		/* Only print if HPO link is enabled */
+		if ((hpo_se_state.stream_enc_enabled == 0)
+				|| (hpo_le_state.link_enc_enabled == 0))
+			continue;
+		if (!printed_header) {
+			DTN_INFO("\n");
+			DTN_INFO("HPO:   OTG Inst     Link   Pixel Format   Depth   ODM Segments   Lanes   Borrow   h_active   h_blank\n");
+			printed_header = true;
+		}
+
+		DTN_INFO("[%d]: %10d   %6s   %10s   %5d          %5d   %5d   %6s      %5d     %5d\n",
+				hpo_frl_stream_enc->id - ENGINE_ID_HPO_0,
+				hpo_se_state.otg_inst,
+				hpo_le_state.link_active ? "Active" : "Training",
+				(hpo_se_state.pixel_format == PIXEL_ENCODING_YCBCR420) ? "4:2:0" :
+						((hpo_se_state.pixel_format == PIXEL_ENCODING_YCBCR422) ? "4:2:2" : "4:4:4"),
+				hpo_se_state.color_depth,
+				hpo_se_state.num_odm_segments,
+				hpo_le_state.lane_count,
+				(hpo_se_state.borrow_mode == 0) ? "NONE" :
+						((hpo_se_state.borrow_mode == 1) ? "ACTIVE" : "BLANK"),
+				hpo_se_state.h_active,
+				hpo_se_state.h_blank);
+	}
+	DTN_INFO("\n");
 
 	{
 		if (pool->hpo_dp_stream_enc_count > 0) {
@@ -2421,7 +2460,7 @@ static int dcn10_align_pixel_clocks(struct dc *dc, int group_size,
 			grouped_pipes[i]->stream_res.tg->funcs->get_hw_timing(
 					grouped_pipes[i]->stream_res.tg,
 					&hw_crtc_timing[i]);
-			dc->res_pool->dp_clock_source->funcs->get_pixel_clk_frequency_100hz(
+			dc->res_pool->dp_clock_source->funcs->get_dp_dto_frequency_100hz(
 				dc->res_pool->dp_clock_source,
 				grouped_pipes[i]->stream_res.tg->inst,
 				&pclk);
@@ -2460,7 +2499,7 @@ static int dcn10_align_pixel_clocks(struct dc *dc, int group_size,
 					dc->res_pool->dp_clock_source,
 					grouped_pipes[i]->stream_res.tg->inst,
 					(unsigned int)phase[i], (unsigned int)modulo[i]);
-				dc->res_pool->dp_clock_source->funcs->get_pixel_clk_frequency_100hz(
+				dc->res_pool->dp_clock_source->funcs->get_dp_dto_frequency_100hz(
 					dc->res_pool->dp_clock_source,
 					grouped_pipes[i]->stream_res.tg->inst, &pclk);
 				grouped_pipes[i]->stream->timing.pix_clk_100hz =

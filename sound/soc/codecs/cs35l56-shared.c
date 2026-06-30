@@ -534,6 +534,7 @@ static void cs35l56_spi_system_reset(struct cs35l56_base *cs35l56_base)
 	 * The regmap must remain in cache-only until the chip has
 	 * booted, so use a bypassed read.
 	 */
+	val = 0;
 	ret = read_poll_timeout(regmap_read_bypassed, read_ret,
 				(val > 0) && (val < 0xffffffff),
 				CS35L56_HALO_STATE_POLL_US,
@@ -851,9 +852,11 @@ out_sync:
 err:
 	regcache_cache_only(cs35l56_base->regmap, true);
 
-	regmap_multi_reg_write_bypassed(cs35l56_base->regmap,
-					cs35l56_hibernate_seq,
-					ARRAY_SIZE(cs35l56_hibernate_seq));
+	if (cs35l56_base->can_hibernate) {
+		regmap_multi_reg_write_bypassed(cs35l56_base->regmap,
+						cs35l56_hibernate_seq,
+						ARRAY_SIZE(cs35l56_hibernate_seq));
+	}
 
 	return ret;
 }
@@ -1257,7 +1260,7 @@ ssize_t cs35l56_cal_data_debugfs_write(struct cs35l56_base *cs35l56_base,
 		return -EMSGSIZE;
 
 	ret = simple_write_to_buffer(&cal_data, sizeof(cal_data), ppos, from, count);
-	if (ret)
+	if (ret < 0)
 		return ret;
 
 	ret = cs35l56_stash_calibration(cs35l56_base, &cal_data);
@@ -1291,6 +1294,7 @@ EXPORT_SYMBOL_NS_GPL(cs35l56_create_cal_debugfs, "SND_SOC_CS35L56_SHARED");
 void cs35l56_remove_cal_debugfs(struct cs35l56_base *cs35l56_base)
 {
 	debugfs_remove_recursive(cs35l56_base->debugfs);
+	cs35l56_base->debugfs = ERR_PTR(-ENOENT);
 }
 EXPORT_SYMBOL_NS_GPL(cs35l56_remove_cal_debugfs, "SND_SOC_CS35L56_SHARED");
 
@@ -1728,8 +1732,7 @@ int cs35l56_read_onchip_spkid(struct cs35l56_base *cs35l56_base)
 
 	ret = regmap_read(regmap, CS35L56_GPIO_STATUS1, &val);
 	if (ret) {
-		dev_err(cs35l56_base->dev, "GPIO%d status read failed: %d\n",
-			cs35l56_base->onchip_spkid_gpios[i] + 1, ret);
+		dev_err(cs35l56_base->dev, "GPIO status read failed: %d\n", ret);
 		return ret;
 	}
 
@@ -1879,6 +1882,7 @@ EXPORT_SYMBOL_NS_GPL(cs35l56_regmap_spi, "SND_SOC_CS35L56_SHARED");
 
 const struct regmap_config cs35l56_regmap_sdw = {
 	.reg_bits = 32,
+	.reg_base = 0x8000,
 	.val_bits = 32,
 	.reg_stride = 4,
 	.reg_format_endian = REGMAP_ENDIAN_LITTLE,
@@ -1914,6 +1918,7 @@ const struct regmap_config cs35l63_regmap_sdw = {
 	.reg_bits = 32,
 	.val_bits = 32,
 	.reg_stride = 4,
+	.reg_base = 0x8000,
 	.reg_format_endian = REGMAP_ENDIAN_LITTLE,
 	.val_format_endian = REGMAP_ENDIAN_BIG,
 	.max_register = CS35L56_DSP1_PMEM_5114,

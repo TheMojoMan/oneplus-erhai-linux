@@ -1,4 +1,13 @@
 /*
+ * Note: This header is the authoritative source for the DMUB firmware
+ * command interface. In the Linux kernel, it is maintained as an
+ * auto-generated copy from an AMD internal repository.
+ *
+ * This file follows Doxygen formatting for firmware standards and
+ * is NOT intended to be kernel-doc compliant.
+ */
+
+/*
  * Copyright 2019 Advanced Micro Devices, Inc.
  *
  * Permission is hereby granted, free of charge, to any person obtaining a
@@ -94,6 +103,35 @@
  */
 #define ABM_MAX_NUM_OF_HG_BINS              64
 
+/**
+ * Flag from driver to indicate that CACP should be disabled gradually
+ * by slowly reversing all programming and pixel compensation.
+ */
+#define SET_CACP_PIPE_GRADUALLY_DISABLE           0
+
+/**
+ * Flag from driver to indicate that CACP should be disabled immediately
+ * and undo all programming and pixel compensation.
+ */
+#define SET_CACP_PIPE_IMMEDIATELY_DISABLE         255
+
+/**
+ * Flag from driver to indicate that CACP should be disabled immediately
+ * and keep the current programming and pixel compensation.
+ */
+#define SET_CACP_PIPE_IMMEDIATE_KEEP_GAIN_DISABLE 254
+
+/**
+ * Flag from driver to indicate that CACP should be disabled immediately
+ * on the next abm vertical interrupt
+ */
+#define SET_CACP_PIPE_IMMEDIATE_ON_NEXT_DISABLE 253
+
+/**
+ * Flag from driver to set the current CACP pipe index or CACP operating level.
+ */
+#define SET_CACP_PIPE_NORMAL                      1
+
 /* Maximum number of SubVP streams */
 #define DMUB_MAX_SUBVP_STREAMS 2
 
@@ -176,6 +214,26 @@
  * ABM control version with multi edp support
  */
 #define DMUB_CMD_ABM_CONTROL_VERSION_1 0x1
+
+/**
+ * CACP control version legacy
+ */
+#define DMUB_CMD_CACP_CONTROL_VERSION_UNKNOWN 0x0
+
+/**
+ * CACP control version with multi edp support
+ */
+#define DMUB_CMD_CACP_CONTROL_VERSION_1 0x1
+
+/**
+ * CACP control mode with dynamic switch between v1 and v2
+ */
+#define DMUB_CMD_CACP_CONTROL_MODE_0 0x0
+
+/**
+ * CACP control version with forced configure to v1 on new ABM HW
+ */
+#define DMUB_CMD_CACP_CONTROL_MODE_1 0x1
 
 /**
  * Physical framebuffer address location, 64-bit.
@@ -329,7 +387,7 @@ union dmub_addr {
 
 /* Flattened structure containing SOC BB parameters stored in the VBIOS
  * It is not practical to store the entire bounding box in VBIOS since the bounding box struct can gain new parameters.
- * This also prevents alignment issues when new parameters are added to the SoC BB.
+ * This also prevents alighment issues when new parameters are added to the SoC BB.
  * The following parameters should be added since these values can't be obtained elsewhere:
  * -dml2_soc_power_management_parameters
  * -dml2_soc_vmin_clock_limits
@@ -958,7 +1016,7 @@ union dmub_fw_meta {
 //==============================================================================
 #if !defined(TENSILICA) && !defined(DMUB_TRACE_ENTRY_DEFINED)
 /**
- * typedef dmub_trace_code_t - firmware trace code, 32-bits
+ * dmub_trace_code_t - firmware trace code, 32-bits
  */
 typedef uint32_t dmub_trace_code_t;
 
@@ -1008,30 +1066,15 @@ union dmub_fw_boot_status {
  * enum dmub_fw_boot_status_bit - Enum bit definitions for SCRATCH0.
  */
 enum dmub_fw_boot_status_bit {
-	/** @DMUB_FW_BOOT_STATUS_BIT_DAL_FIRMWARE: 1 if DAL FW */
-	DMUB_FW_BOOT_STATUS_BIT_DAL_FIRMWARE = (1 << 0),
-	/** @DMUB_FW_BOOT_STATUS_BIT_MAILBOX_READY: 1 if mailbox ready */
-	DMUB_FW_BOOT_STATUS_BIT_MAILBOX_READY = (1 << 1),
-	/** @DMUB_FW_BOOT_STATUS_BIT_OPTIMIZED_INIT_DONE: 1 if init done */
-	DMUB_FW_BOOT_STATUS_BIT_OPTIMIZED_INIT_DONE = (1 << 2),
-	/** @DMUB_FW_BOOT_STATUS_BIT_RESTORE_REQUIRED: 1 if driver should call restore */
-	DMUB_FW_BOOT_STATUS_BIT_RESTORE_REQUIRED = (1 << 3),
-	/**
-	 * @DMUB_FW_BOOT_STATUS_BIT_DEFERRED_LOADED: 1 if VBIOS data is
-	 * deferred programmed
-	 */
-	DMUB_FW_BOOT_STATUS_BIT_DEFERRED_LOADED = (1 << 4),
-	/** @DMUB_FW_BOOT_STATUS_BIT_FAMS_ENABLED: 1 if FAMS is enabled */
-	DMUB_FW_BOOT_STATUS_BIT_FAMS_ENABLED = (1 << 5),
-	/**
-	 * @DMUB_FW_BOOT_STATUS_BIT_DETECTION_REQUIRED: 1 if detection needs
-	 * to be triggered by driver
-	 */
-	DMUB_FW_BOOT_STATUS_BIT_DETECTION_REQUIRED = (1 << 6),
-	/** @DMUB_FW_BOOT_STATUS_BIT_HW_POWER_INIT_DONE: 1 if hw power init is completed */
-	DMUB_FW_BOOT_STATUS_BIT_HW_POWER_INIT_DONE = (1 << 7),
-	/** @DMUB_FW_BOOT_STATUS_BIT_ONO_REGIONS_ENABLED: if ONO regions are enabled */
-	DMUB_FW_BOOT_STATUS_BIT_ONO_REGIONS_ENABLED = (1 << 8),
+	DMUB_FW_BOOT_STATUS_BIT_DAL_FIRMWARE = (1 << 0), /**< 1 if DAL FW */
+	DMUB_FW_BOOT_STATUS_BIT_MAILBOX_READY = (1 << 1), /**< 1 if mailbox ready */
+	DMUB_FW_BOOT_STATUS_BIT_OPTIMIZED_INIT_DONE = (1 << 2), /**< 1 if init done */
+	DMUB_FW_BOOT_STATUS_BIT_RESTORE_REQUIRED = (1 << 3), /**< 1 if driver should call restore */
+	DMUB_FW_BOOT_STATUS_BIT_DEFERRED_LOADED = (1 << 4), /**< 1 if VBIOS data is deferred programmed */
+	DMUB_FW_BOOT_STATUS_BIT_FAMS_ENABLED = (1 << 5), /**< 1 if FAMS is enabled*/
+	DMUB_FW_BOOT_STATUS_BIT_DETECTION_REQUIRED = (1 << 6), /**< 1 if detection need to be triggered by driver*/
+	DMUB_FW_BOOT_STATUS_BIT_HW_POWER_INIT_DONE = (1 << 7), /**< 1 if hw power init is completed */
+	DMUB_FW_BOOT_STATUS_BIT_ONO_REGIONS_ENABLED = (1 << 8), /**< 1 if ONO regions are enabled */
 };
 
 /* Register bit definition for SCRATCH5 */
@@ -1095,22 +1138,18 @@ enum dmub_ips_comand_type {
  */
 enum dmub_cursor_offload_comand_type {
 	/**
-	 * @DMUB_CMD__CURSOR_OFFLOAD_INIT:
 	 * Initializes the cursor offload feature.
 	 */
 	DMUB_CMD__CURSOR_OFFLOAD_INIT = 0,
 	/**
-	 * @DMUB_CMD__CURSOR_OFFLOAD_STREAM_ENABLE: Enables cursor offloading
-	 * for a stream and updates the timing parameters.
+	 * Enables cursor offloading for a stream and updates the timing parameters.
 	 */
 	DMUB_CMD__CURSOR_OFFLOAD_STREAM_ENABLE = 1,
 	/**
-	 * @DMUB_CMD__CURSOR_OFFLOAD_STREAM_DISABLE:
 	 * Disables cursor offloading for a given stream.
 	 */
 	DMUB_CMD__CURSOR_OFFLOAD_STREAM_DISABLE = 2,
 	/**
-	 * @DMUB_CMD__CURSOR_OFFLOAD_STREAM_PROGRAM:
 	 * Programs the latest data for a given stream.
 	 */
 	DMUB_CMD__CURSOR_OFFLOAD_STREAM_PROGRAM = 3,
@@ -1176,7 +1215,7 @@ enum dmub_fw_boot_options_bit {
  * [Header (256 Bytes)][Feature 1 (256 Bytes)][Feature 2 (256 Bytes)]...
  */
 
-/*
+/**
  * enum dmub_shared_state_feature_id - List of shared state features.
  */
 enum dmub_shared_state_feature_id {
@@ -1189,7 +1228,7 @@ enum dmub_shared_state_feature_id {
 };
 
 /**
- * struct dmub_shared_state_ips_fw_signals - Firmware signals for IPS.
+ * struct dmub_shared_state_ips_fw - Firmware signals for IPS.
  */
 union dmub_shared_state_ips_fw_signals {
 	struct {
@@ -1204,7 +1243,7 @@ union dmub_shared_state_ips_fw_signals {
 };
 
 /**
- * struct dmub_shared_state_ips_driver_signals - Firmware signals for IPS.
+ * struct dmub_shared_state_ips_signals - Firmware signals for IPS.
  */
 union dmub_shared_state_ips_driver_signals {
 	struct {
@@ -1266,7 +1305,7 @@ struct dmub_shared_state_ips_driver {
 }; /* 248-bytes, fixed */
 
 /**
- * struct dmub_shared_state_cursor_offload_stream_v1 - Header metadata for cursor offload.
+ * struct dmub_shared_state_cursor_offload_v1 - Header metadata for cursor offload.
  */
 struct dmub_shared_state_cursor_offload_stream_v1 {
 	uint32_t last_write_idx; /**< Last write index */
@@ -1282,14 +1321,14 @@ struct dmub_shared_state_cursor_offload_v1 {
 }; /* 248-bytes, fixed */
 
 /**
- * struct dmub_shared_state_feature_common - Generic payload.
+ * enum dmub_shared_state_feature_common - Generic payload.
  */
 struct dmub_shared_state_feature_common {
 	uint32_t padding[62];
 }; /* 248-bytes, fixed */
 
 /**
- * struct dmub_shared_state_feature_header - Feature description.
+ * enum dmub_shared_state_feature_header - Feature description.
  */
 struct dmub_shared_state_feature_header {
 	uint16_t id; /**< Feature ID */
@@ -1462,6 +1501,11 @@ enum dmub_gpint_command {
 	 * RETURN: REPLAY residency in milli-percent.
 	 */
 	DMUB_GPINT__REPLAY_RESIDENCY = 14,
+
+	/**
+	 * DESC: Set CACP internal core configuration
+	 */
+	DMUB_GPINT__TRIGGER_CACP = 18,
 
 	/**
 	 * DESC: Copy bounding box to the host.
@@ -1878,6 +1922,11 @@ enum dmub_cmd_type {
 	DMUB_CMD__DPIA_HPD_INT_ENABLE = 86,
 
 	/**
+	 * Command type used for all CACP commands.
+	 */
+	DMUB_CMD__CACP = 87,
+
+	/**
 	 * Command type used for all PSP commands.
 	 */
 	DMUB_CMD__PSP = 88,
@@ -1933,36 +1982,30 @@ enum dmub_cmd_type {
  */
 enum dmub_out_cmd_type {
 	/**
-	 * @DMUB_OUT_CMD__NULL: Invalid outbox command, ignored.
+	 * Invalid outbox command, ignored.
 	 */
 	DMUB_OUT_CMD__NULL = 0,
 	/**
-	 * @DMUB_OUT_CMD__DP_AUX_REPLY:
 	 * Command type used for DP AUX Reply data notification
 	 */
 	DMUB_OUT_CMD__DP_AUX_REPLY = 1,
 	/**
-	 * @DMUB_OUT_CMD__DP_HPD_NOTIFY:
 	 * Command type used for DP HPD event notification
 	 */
 	DMUB_OUT_CMD__DP_HPD_NOTIFY = 2,
 	/**
-	 * @DMUB_OUT_CMD__SET_CONFIG_REPLY:
 	 * Command type used for SET_CONFIG Reply notification
 	 */
 	DMUB_OUT_CMD__SET_CONFIG_REPLY = 3,
 	/**
-	 * @DMUB_OUT_CMD__DPIA_NOTIFICATION:
 	 * Command type used for USB4 DPIA notification
 	 */
 	DMUB_OUT_CMD__DPIA_NOTIFICATION = 5,
 	/**
-	 * @DMUB_OUT_CMD__HPD_SENSE_NOTIFY:
 	 * Command type used for HPD redetect notification
 	 */
 	DMUB_OUT_CMD__HPD_SENSE_NOTIFY = 6,
 	/**
-	 * @DMUB_OUT_CMD__FUSED_IO:
 	 * Command type used for Fused IO notification
 	 */
 	DMUB_OUT_CMD__FUSED_IO = 7,
@@ -2021,7 +2064,7 @@ struct dmub_cmd_read_modify_write_sequence {
 #define DMUB_READ_MODIFY_WRITE_SEQ__MAX 5
 
 /**
- * struct dmub_rb_cmd_read_modify_write - Read modify write command.
+ * struct dmub_cmd_read_modify_write_sequence - Read modify write command.
  */
 struct dmub_rb_cmd_read_modify_write {
 	struct dmub_cmd_header header;  /**< command header */
@@ -2032,7 +2075,7 @@ struct dmub_rb_cmd_read_modify_write {
 };
 
 /*
- * Update a register with specified masks and values sequence
+ * Update a register with specified masks and values sequeunce
  *
  * 60 payload bytes can hold address + up to 7 sets of mask/value combo, each take 2 dword
  *
@@ -2154,19 +2197,19 @@ struct dmub_rb_cmd_PLAT_54186_wa {
  */
 enum dmub_cmd_mall_type {
 	/**
-	 * @DMUB_CMD__MALL_ACTION_ALLOW: Allows display refresh from MALL.
+	 * Allows display refresh from MALL.
 	 */
 	DMUB_CMD__MALL_ACTION_ALLOW = 0,
 	/**
-	 * @DMUB_CMD__MALL_ACTION_DISALLOW: Disallows display refresh from MALL.
+	 * Disallows display refresh from MALL.
 	 */
 	DMUB_CMD__MALL_ACTION_DISALLOW = 1,
 	/**
-	 * @DMUB_CMD__MALL_ACTION_COPY_CURSOR: Cursor copy for MALL.
+	 * Cursor copy for MALL.
 	 */
 	DMUB_CMD__MALL_ACTION_COPY_CURSOR = 2,
 	/**
-	 * @DMUB_CMD__MALL_ACTION_NO_DF_REQ: Controls DF requests.
+	 * Controls DF requests.
 	 */
 	DMUB_CMD__MALL_ACTION_NO_DF_REQ = 3,
 };
@@ -2195,21 +2238,18 @@ struct dmub_rb_cmd_mall {
  */
 enum dmub_cmd_cab_type {
 	/**
-	 * @DMUB_CMD__CAB_NO_IDLE_OPTIMIZATION:
 	 * No idle optimizations (i.e. no CAB)
 	 */
 	DMUB_CMD__CAB_NO_IDLE_OPTIMIZATION = 0,
 	/**
-	 * @DMUB_CMD__CAB_NO_DCN_REQ: No DCN requests for memory
+	 * No DCN requests for memory
 	 */
 	DMUB_CMD__CAB_NO_DCN_REQ = 1,
 	/**
-	 * @DMUB_CMD__CAB_DCN_SS_FIT_IN_CAB:
 	 * Fit surfaces in CAB (i.e. CAB enable)
 	 */
 	DMUB_CMD__CAB_DCN_SS_FIT_IN_CAB = 2,
 	/**
-	 * @DMUB_CMD__CAB_DCN_SS_NOT_FIT_IN_CAB:
 	 * Do not fit surfaces in CAB (i.e. no CAB)
 	 */
 	DMUB_CMD__CAB_DCN_SS_NOT_FIT_IN_CAB = 3,
@@ -2224,7 +2264,7 @@ struct dmub_rb_cmd_cab_for_ss {
 	uint8_t debug_bits;     /* debug bits */
 };
 
-/*
+/**
  * Enum for indicating which MCLK switch mode per pipe
  */
 enum mclk_switch_mode {
@@ -2410,8 +2450,13 @@ struct dmub_cmd_lsdma_data {
 			uint32_t tmz              : 4;
 			uint32_t cache_policy_src : 3;
 			uint32_t cache_policy_dst : 3;
-			uint32_t pad1             : 22;
-			// DCC fields not included because linear mode on display does not support DCC
+			uint32_t data_format      : 6;
+			uint32_t num_type         : 3;
+			uint32_t read_compress    : 2;
+			uint32_t write_compress   : 2;
+			uint32_t max_com          : 2;
+			uint32_t max_uncom        : 1;
+			uint32_t pad1             : 6;
 		} linear_copy_data;
 		struct lsdma_linear_sub_window_copy_data {
 			uint32_t src_lo;
@@ -2439,9 +2484,13 @@ struct dmub_cmd_lsdma_data {
 			uint32_t element_size     : 3;
 			uint32_t src_cache_policy : 3;
 			uint32_t dst_cache_policy : 3;
-			uint32_t reserved0        : 19;
-			// Linear mode on display does not support compression so DCC related fields are not included.
-			// The DCC fields in the command packet will be zero'd at the time of constructing the packet.
+			uint32_t data_format      : 6;
+			uint32_t num_type         : 3;
+			uint32_t read_compress    : 2;
+			uint32_t write_compress   : 2;
+			uint32_t max_com          : 2;
+			uint32_t max_uncom        : 1;
+			uint32_t reserved0        : 3;
 		} linear_sub_window_copy_data;
 		struct lsdma_reg_write_data {
 			uint32_t reg_addr;
@@ -2702,18 +2751,11 @@ struct dmub_fams2_stream_static_state_v1 {
  * p-state request to allow latency
  */
 enum dmub_fams2_allow_delay_check_mode {
-	/**
-	 * @FAMS2_ALLOW_DELAY_CHECK_NONE: No check for request to allow delay
-	 */
+	/* No check for request to allow delay */
 	FAMS2_ALLOW_DELAY_CHECK_NONE = 0,
-	/**
-	 * @FAMS2_ALLOW_DELAY_CHECK_FROM_START: Check for request to allow delay
-	 */
+	/* Check for request to allow delay */
 	FAMS2_ALLOW_DELAY_CHECK_FROM_START = 1,
-	/**
-	 * @FAMS2_ALLOW_DELAY_CHECK_FROM_PREPARE:
-	 * Check for prepare to allow delay
-	 */
+	/* Check for prepare to allow delay */
 	FAMS2_ALLOW_DELAY_CHECK_FROM_PREPARE = 2,
 };
 
@@ -2785,28 +2827,27 @@ struct dmub_rb_cmd_ib {
  */
 enum dmub_cmd_idle_opt_type {
 	/**
-	 * @DMUB_CMD__IDLE_OPT_DCN_RESTORE: DCN hardware restore.
+	 * DCN hardware restore.
 	 */
 	DMUB_CMD__IDLE_OPT_DCN_RESTORE = 0,
 
 	/**
-	 * @DMUB_CMD__IDLE_OPT_DCN_SAVE_INIT: DCN hardware save.
+	 * DCN hardware save.
 	 */
 	DMUB_CMD__IDLE_OPT_DCN_SAVE_INIT = 1,
 
 	/**
-	 * @DMUB_CMD__IDLE_OPT_DCN_NOTIFY_IDLE: DCN hardware notify idle.
+	 * DCN hardware notify idle.
 	 */
 	DMUB_CMD__IDLE_OPT_DCN_NOTIFY_IDLE = 2,
 
 	/**
-	 * @DMUB_CMD__IDLE_OPT_SET_DC_POWER_STATE:
 	 * DCN hardware notify power state.
 	 */
 	DMUB_CMD__IDLE_OPT_SET_DC_POWER_STATE = 3,
 
 	/**
-	 * @DMUB_CMD__IDLE_OPT_RELEASE_HW: DCN notify to release HW.
+	 * DCN notify to release HW.
 	 */
 	 DMUB_CMD__IDLE_OPT_RELEASE_HW = 4,
 };
@@ -2835,7 +2876,7 @@ struct dmub_rb_cmd_idle_opt_dcn_notify_idle {
 	struct dmub_dcn_notify_idle_cntl_data cntl_data;
 };
 
-/*
+/**
  * enum dmub_idle_opt_dc_power_state - DC power states.
  */
 enum dmub_idle_opt_dc_power_state {
@@ -2877,7 +2918,7 @@ struct dmub_clocks {
  */
 enum dmub_cmd_clk_mgr_type {
 	/**
-	 * @DMUB_CMD__CLK_MGR_NOTIFY_CLOCKS: Notify DMCUB of clock update.
+	 * Notify DMCUB of clock update.
 	 */
 	DMUB_CMD__CLK_MGR_NOTIFY_CLOCKS = 0,
 };
@@ -2913,7 +2954,7 @@ struct dmub_cmd_set_pixel_clock_data {
 };
 
 /**
- * struct dmub_rb_cmd_set_pixel_clock - Set pixel clock command.
+ * struct dmub_cmd_set_pixel_clock_data - Set pixel clock command.
  */
 struct dmub_rb_cmd_set_pixel_clock {
 	struct dmub_cmd_header header; /**< header */
@@ -2944,16 +2985,19 @@ struct dmub_dig_transmitter_control_data_v1_7 {
 	union {
 		uint8_t digmode; /**< enum atom_encode_mode_def */
 		uint8_t dplaneset; /**< DP voltage swing and pre-emphasis value, "DP_LANE_SET__xDB_y_zV" */
+		uint8_t txffe; /**< TxFFE settings for HDMI 2.1 */
 	} mode_laneset;
 	uint8_t lanenum; /**< Number of lanes */
 	union {
 		uint32_t symclk_10khz; /**< Symbol Clock in 10Khz */
+		uint32_t symclk_Hz; /**< Symbol clock in Hz for FRL */
 	} symclk_units;
 	uint8_t hpdsel; /**< =1: HPD1, =2: HPD2, ..., =6: HPD6, =0: HPD is not assigned */
 	uint8_t digfe_sel; /**< DIG front-end selection, bit0 means DIG0 FE is enabled */
 	uint8_t connobj_id; /**< Connector Object Id defined in ObjectId.h */
 	uint8_t HPO_instance; /**< HPO instance (0: inst0, 1: inst1) */
-	uint8_t reserved1; /**< For future use */
+	uint8_t TxFFELaneSel; /**< TxFFE lane select [3:0]
+				(bit0: lane0, bit1: lane1, bit2: lane3, bit3: lane3) */
 	uint8_t skip_phy_ssc_reduction;
 	uint8_t reserved2[2]; /**< For future use */
 	uint32_t reserved3[11]; /**< For future use */
@@ -3122,40 +3166,21 @@ struct dmub_rb_cmd_dpphy_init {
  * 4 AUX request command bits are shifted to high nibble.
  */
 enum dp_aux_request_action {
-	/**
-	 * @DP_AUX_REQ_ACTION_I2C_WRITE: I2C-over-AUX write request
-	 */
+	/** I2C-over-AUX write request */
 	DP_AUX_REQ_ACTION_I2C_WRITE		= 0x00,
-	/**
-	 * @DP_AUX_REQ_ACTION_I2C_READ: I2C-over-AUX read request
-	 */
+	/** I2C-over-AUX read request */
 	DP_AUX_REQ_ACTION_I2C_READ		= 0x10,
-	/**
-	 * @DP_AUX_REQ_ACTION_I2C_STATUS_REQ: I2C-over-AUX write status request
-	 */
+	/** I2C-over-AUX write status request */
 	DP_AUX_REQ_ACTION_I2C_STATUS_REQ	= 0x20,
-	/**
-	 * @DP_AUX_REQ_ACTION_I2C_WRITE_MOT:
-	 * I2C-over-AUX write request with MOT=1
-	 */
+	/** I2C-over-AUX write request with MOT=1 */
 	DP_AUX_REQ_ACTION_I2C_WRITE_MOT		= 0x40,
-	/**
-	 * @DP_AUX_REQ_ACTION_I2C_READ_MOT:
-	 * I2C-over-AUX read request with MOT=1
-	 */
+	/** I2C-over-AUX read request with MOT=1 */
 	DP_AUX_REQ_ACTION_I2C_READ_MOT		= 0x50,
-	/**
-	 * @DP_AUX_REQ_ACTION_I2C_STATUS_REQ_MOT:
-	 * I2C-over-AUX write status request with MOT=1
-	 */
+	/** I2C-over-AUX write status request with MOT=1 */
 	DP_AUX_REQ_ACTION_I2C_STATUS_REQ_MOT	= 0x60,
-	/**
-	 * @DP_AUX_REQ_ACTION_DPCD_WRITE: Native AUX write request
-	 */
+	/** Native AUX write request */
 	DP_AUX_REQ_ACTION_DPCD_WRITE		= 0x80,
-	/**
-	 * @DP_AUX_REQ_ACTION_DPCD_READ: Native AUX read request
-	 */
+	/** Native AUX read request */
 	DP_AUX_REQ_ACTION_DPCD_READ		= 0x90
 };
 
@@ -3163,21 +3188,21 @@ enum dp_aux_request_action {
  * enum aux_return_code_type - DP AUX process return code listing.
  */
 enum aux_return_code_type {
-	/** @AUX_RET_SUCCESS: AUX process succeeded */
+	/** AUX process succeeded */
 	AUX_RET_SUCCESS = 0,
-	/** @AUX_RET_ERROR_UNKNOWN: AUX process failed with unknown reason */
+	/** AUX process failed with unknown reason */
 	AUX_RET_ERROR_UNKNOWN,
-	/** @AUX_RET_ERROR_INVALID_REPLY: AUX process completed with invalid reply */
+	/** AUX process completed with invalid reply */
 	AUX_RET_ERROR_INVALID_REPLY,
-	/** @AUX_RET_ERROR_TIMEOUT: AUX process timed out */
+	/** AUX process timed out */
 	AUX_RET_ERROR_TIMEOUT,
-	/** @AUX_RET_ERROR_HPD_DISCON: HPD was low during AUX process */
+	/** HPD was low during AUX process */
 	AUX_RET_ERROR_HPD_DISCON,
-	/** @AUX_RET_ERROR_ENGINE_ACQUIRE: Failed to acquire AUX engine */
+	/** Failed to acquire AUX engine */
 	AUX_RET_ERROR_ENGINE_ACQUIRE,
-	/** @AUX_RET_ERROR_INVALID_OPERATION: AUX request not supported */
+	/** AUX request not supported */
 	AUX_RET_ERROR_INVALID_OPERATION,
-	/** @AUX_RET_ERROR_PROTOCOL_ERROR: AUX process not available */
+	/** AUX process not available */
 	AUX_RET_ERROR_PROTOCOL_ERROR,
 };
 
@@ -3185,9 +3210,9 @@ enum aux_return_code_type {
  * enum aux_channel_type - DP AUX channel type listing.
  */
 enum aux_channel_type {
-	/** @AUX_CHANNEL_LEGACY_DDC: AUX thru Legacy DP AUX */
+	/** AUX thru Legacy DP AUX */
 	AUX_CHANNEL_LEGACY_DDC,
-	/** @AUX_CHANNEL_DPIA: AUX thru DPIA DP tunneling */
+	/** AUX thru DPIA DP tunneling */
 	AUX_CHANNEL_DPIA
 };
 
@@ -3448,7 +3473,7 @@ struct dpia_bw_allocation_notify_data {
 };
 
 /**
- * union dpia_notification_data - DPIA Notification in Outbox command
+ * union dpia_notify_data_type - DPIA Notification in Outbox command
  */
 union dpia_notification_data {
 	/**
@@ -3504,7 +3529,7 @@ struct dmub_rb_cmd_query_hpd_state {
 };
 
 /**
- * struct dmub_rb_cmd_hpd_sense_notify_data - HPD sense notification data.
+ * struct dmub_rb_cmd_hpd_sense_notify - HPD sense notification data.
  */
 struct dmub_rb_cmd_hpd_sense_notify_data {
 	uint32_t old_hpd_sense_mask; /**< Old HPD sense mask */
@@ -3548,7 +3573,7 @@ enum dmub_cmd_psr_type {
 
 	/**
 	 * Set PSR level.
-	 * PSR level is a 16-bit value dictated by driver that
+	 * PSR level is a 16-bit value dicated by driver that
 	 * will enable/disable different functionality.
 	 */
 	DMUB_CMD__PSR_SET_LEVEL			= 4,
@@ -3593,6 +3618,7 @@ enum dmub_cmd_fams_type {
 	DMUB_CMD__FAMS2_DRR_UPDATE = 5,
 	DMUB_CMD__FAMS2_FLIP = 6,
 	DMUB_CMD__FAMS2_IB_CONFIG = 7,
+	DMUB_CMD__FAMS2_IB_DEBUG_META = 8,
 };
 
 /**
@@ -3672,7 +3698,7 @@ enum phy_link_rate {
 	 */
 };
 
-/*
+/**
  * enum dmub_phy_fsm_state - PHY FSM states.
  * PHY FSM state to transit to during PSR enable/disable.
  */
@@ -3705,7 +3731,7 @@ struct dmub_cmd_psr_copy_settings_data {
 	 */
 	union dmub_psr_debug_flags debug;
 	/**
-	 * 16-bit value dictated by driver that will enable/disable different functionality.
+	 * 16-bit value dicated by driver that will enable/disable different functionality.
 	 */
 	uint16_t psr_level;
 	/**
@@ -3745,7 +3771,7 @@ struct dmub_cmd_psr_copy_settings_data {
 	 */
 	uint8_t aux_inst;
 	/**
-	 * Determines if SMU optimizations are enabled/disabled.
+	 * Determines if SMU optimzations are enabled/disabled.
 	 */
 	uint8_t smu_optimizations_en;
 	/**
@@ -3862,7 +3888,7 @@ struct dmub_rb_cmd_psr_copy_settings {
  */
 struct dmub_cmd_psr_set_level_data {
 	/**
-	 * 16-bit value dictated by driver that will enable/disable different functionality.
+	 * 16-bit value dicated by driver that will enable/disable different functionality.
 	 */
 	uint16_t psr_level;
 	/**
@@ -4240,7 +4266,7 @@ struct dmub_rb_cmd_update_cursor_info {
  */
 struct dmub_cmd_psr_set_vtotal_data {
 	/**
-	 * 16-bit value dictated by driver that indicates the vtotal in PSR active requirement when screen idle..
+	 * 16-bit value dicated by driver that indicates the vtotal in PSR active requirement when screen idle..
 	 */
 	uint16_t psr_vtotal_idle;
 	/**
@@ -4254,7 +4280,7 @@ struct dmub_cmd_psr_set_vtotal_data {
 	 */
 	uint8_t panel_inst;
 	/*
-	 * 16-bit value dictated by driver that indicates the vtotal in PSR active requirement when doing SU/FFU.
+	 * 16-bit value dicated by driver that indicates the vtotal in PSR active requirement when doing SU/FFU.
 	 */
 	uint16_t psr_vtotal_su;
 	/**
@@ -4478,6 +4504,7 @@ enum dmub_cmd_panel_replay_state_update_subtype {
 	PR_STATE_UPDATE_COASTING_VTOTAL = 0x1,
 	PR_STATE_UPDATE_SYNC_MODE = 0x2,
 	PR_STATE_UPDATE_RUNTIME_FLAGS = 0x3,
+	PR_STATE_UPDATE_PSEUDO_VTOTAL = 0x4,
 };
 
 enum dmub_cmd_panel_replay_general_subtype {
@@ -4554,7 +4581,7 @@ struct dmub_cmd_replay_copy_settings_data {
 	uint8_t aux_inst;
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which psr_state to use
+	 * Panel isntance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4577,7 +4604,7 @@ struct dmub_cmd_replay_copy_settings_data {
 	 */
 	uint8_t dpphy_inst;
 	/**
-	 * Determines if SMU optimizations are enabled/disabled.
+	 * Determines if SMU optimzations are enabled/disabled.
 	 */
 	uint8_t smu_optimizations_en;
 	/**
@@ -4667,7 +4694,7 @@ struct dmub_rb_cmd_smart_power_oled_enable_data {
 	uint8_t enable;
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4706,7 +4733,7 @@ struct dmub_rb_cmd_replay_enable_data {
 	uint8_t enable;
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4754,7 +4781,7 @@ struct dmub_rb_cmd_replay_enable {
 struct dmub_cmd_replay_set_power_opt_data {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4774,7 +4801,7 @@ struct dmub_cmd_replay_set_power_opt_data {
 struct dmub_cmd_replay_set_timing_sync_data {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4794,7 +4821,7 @@ struct dmub_cmd_replay_set_timing_sync_data {
 struct dmub_cmd_replay_set_pseudo_vtotal {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4810,7 +4837,7 @@ struct dmub_cmd_replay_set_pseudo_vtotal {
 struct dmub_cmd_replay_disabled_adaptive_sync_sdp_data {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4824,7 +4851,7 @@ struct dmub_cmd_replay_disabled_adaptive_sync_sdp_data {
 struct dmub_cmd_replay_set_general_cmd_data {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -4861,7 +4888,7 @@ struct dmub_rb_cmd_replay_set_power_opt {
  */
 struct dmub_cmd_replay_set_coasting_vtotal_data {
 	/**
-	 * 16-bit value dictated by driver that indicates the coasting vtotal.
+	 * 16-bit value dicated by driver that indicates the coasting vtotal.
 	 */
 	uint16_t coasting_vtotal;
 	/**
@@ -4870,12 +4897,12 @@ struct dmub_cmd_replay_set_coasting_vtotal_data {
 	uint8_t cmd_version;
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
 	/**
-	 * 16-bit value dictated by driver that indicates the coasting vtotal high byte part.
+	 * 16-bit value dicated by driver that indicates the coasting vtotal high byte part.
 	 */
 	uint16_t coasting_vtotal_high;
 	/**
@@ -4978,7 +5005,7 @@ struct dmub_rb_cmd_replay_set_general_cmd {
 struct dmub_cmd_replay_frameupdate_timer_data {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -5011,7 +5038,7 @@ struct dmub_rb_cmd_replay_set_frameupdate_timer {
 union dmub_replay_cmd_set {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -5187,7 +5214,7 @@ struct dmub_hw_lock_inst_flags {
 	uint8_t opp_inst;
 	/**
 	 * OTG HW instance for global update lock.
-	 * TODO: Remove, and reuse otg_inst.
+	 * TODO: Remove, and re-use otg_inst.
 	 */
 	uint8_t dig_inst;
 	/**
@@ -5949,11 +5976,10 @@ struct dmub_rb_cmd_abm_query_caps {
  */
 enum dmub_abm_ace_curve_type {
 	/**
-	 * @ABM_ACE_CURVE_TYPE__SW: ACE curve as defined by the SW layer.
+	 * ACE curve as defined by the SW layer.
 	 */
 	ABM_ACE_CURVE_TYPE__SW = 0,
 	/**
-	 * @ABM_ACE_CURVE_TYPE__SW_IF:
 	 * ACE curve as defined by the SW to HW translation interface layer.
 	 */
 	ABM_ACE_CURVE_TYPE__SW_IF = 1,
@@ -5964,11 +5990,10 @@ enum dmub_abm_ace_curve_type {
  */
 enum dmub_abm_histogram_type {
 	/**
-	 * @ABM_HISTOGRAM_TYPE__SW: ACE curve as defined by the SW layer.
+	 * ACE curve as defined by the SW layer.
 	 */
 	ABM_HISTOGRAM_TYPE__SW = 0,
 	/**
-	 * @ABM_HISTOGRAM_TYPE__SW_IF:
 	 * ACE curve as defined by the SW to HW translation interface layer.
 	 */
 	ABM_HISTOGRAM_TYPE__SW_IF = 1,
@@ -6121,6 +6146,399 @@ struct dmub_rb_cmd_abm_set_event {
 };
 
 /**
+ * CACP command sub-types.
+ */
+enum dmub_cmd_cacp_type {
+	/**
+	 * Initialize parameters for CACP algorithm.
+	 * Data is passed through an indirect buffer.
+	 */
+	DMUB_CMD__CACP_INIT_CONFIG	= 0,
+	/**
+	 * Set OTG and panel HW instance.
+	 */
+	DMUB_CMD__CACP_SET_PIPE		= 1,
+	/**
+	 * Set CACP operating/aggression level.
+	 */
+	DMUB_CMD__CACP_SET_LEVEL	= 2,
+	/**
+	 * Set event: full-screen/video mode/Hdr mode
+	 */
+	DMUB_CMD__CACP_SET_EVENT	= 3,
+
+	/**
+	 * unregister vertical interrupt after steady state is reached
+	 */
+	DMUB_CMD__CACP_PAUSE	= 4,
+	/**
+	 * Set backlight: only for miniLED
+	 */
+	DMUB_CMD__CACP_SET_BACKLIGHT	= 5,
+	/**
+	 * Enable/disable fractional duty cycle for backlight PWM.
+	 */
+	DMUB_CMD__CACP_SET_PWM_FRAC	= 6,
+	/**
+	 * Get CACP Histogram
+	 */
+	DMUB_CMD__CACP_GET_HISTOGRAM = 7,
+};
+
+/**
+ * Data passed from driver to FW in a DMUB_CMD__CACP_SET_PIPE command.
+ */
+struct dmub_cmd_cacp_set_pipe_data {
+	/**
+	 * OTG HW instance.
+	 */
+	uint8_t otg_inst;
+
+	/**
+	 * Panel Control HW instance.
+	 */
+	uint8_t panel_inst;
+
+	/**
+	 * Controls how CACP will interpret a set pipe or set level command.
+	 */
+	uint8_t set_pipe_option;
+
+	/**
+	 * PwrSeq HW Instance.
+	 */
+	uint8_t pwrseq_inst;
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_SET_PIPE command.
+ */
+struct dmub_rb_cmd_cacp_set_pipe {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Data passed from driver to FW in a DMUB_CMD__CACP_PIPE command.
+	 */
+	struct dmub_cmd_cacp_set_pipe_data cacp_set_pipe_data;
+};
+
+/**
+ * Data passed from driver to FW in a DMUB_CMD__CACP_SET_LEVEL command.
+ */
+struct dmub_cmd_cacp_set_level_data {
+	/**
+	 * Set current cacp operating/aggression level.
+	 */
+	uint32_t level;
+
+	/**
+	 * CACP control version.
+	 */
+	uint8_t version;
+
+	/**
+	 * Panel Control HW instance mask.
+	 * Bit 0 is Panel Control HW instance 0.
+	 * Bit 1 is Panel Control HW instance 1.
+	 */
+	uint8_t panel_mask;
+
+	/**
+	 * Explicit padding to 4 byte boundary.
+	 */
+	uint8_t pad[2];
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_SET_LEVEL command.
+ */
+struct dmub_rb_cmd_cacp_set_level {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Data passed from driver to FW in a DMUB_CMD__CACP_SET_LEVEL command.
+	 */
+	struct dmub_cmd_cacp_set_level_data cacp_set_level_data;
+};
+
+/**
+ * Data passed from driver to FW in a DMUB_CMD__CACP_SET_EVENT command.
+ */
+struct dmub_cmd_cacp_set_event_data {
+	/**
+	 * Full screen mode
+	 */
+	uint8_t full_screen_mode;
+
+	/**
+	 * VariBright Scaling Enable
+	 */
+	uint8_t vb_scaling_enable;
+
+	/**
+	 * HDR mode
+	 */
+	uint8_t hdr_mode;
+
+	/**
+	 * Panel Control HW instance mask.
+	 * Bit 0 is Panel Control HW instance 0.
+	 * Bit 1 is Panel Control HW instance 1.
+	 */
+	uint8_t panel_mask;
+
+	/**
+	 * Transition time info
+	 */
+	uint32_t trans_info;
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_SET_EVENT command.
+ */
+struct dmub_rb_cmd_cacp_set_event {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Data passed from driver to FW in a DMUB_CMD__CACP_SET_EVENT command.
+	 */
+	struct dmub_cmd_cacp_set_event_data cacp_set_event_data;
+};
+
+/**
+ * Data passed from driver to FW in a DMUB_CMD__CACP_INIT_CONFIG command.
+ */
+struct dmub_cmd_cacp_init_config_data {
+	/**
+	 * Location of indirect buffer used to pass init data to CACP.
+	 */
+	union dmub_addr src;
+
+	/**
+	 * Indirect buffer length.
+	 */
+	uint16_t bytes;
+
+	/**
+	 * CACP control version.
+	 */
+	uint8_t mode;
+
+	/**
+	 * Panel Control HW instance mask.
+	 * Bit 0 is Panel Control HW instance 0.
+	 * Bit 1 is Panel Control HW instance 1.
+	 */
+	uint8_t panel_mask;
+
+	/**
+	 * CACP visual_confirm debug
+	 */
+	uint32_t visual_confirm;
+
+	/**
+	 * CACP customized str_scl params
+	 */
+	uint8_t strscl_valid;
+	uint8_t pad[3];
+	uint8_t strscl_sdr[4];
+	uint8_t strscl_hdr[4];
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_INIT_CONFIG command.
+ */
+struct dmub_rb_cmd_cacp_init_config {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Data passed from driver to FW in a DMUB_CMD__CACP_INIT_CONFIG command.
+	 */
+	struct dmub_cmd_cacp_init_config_data cacp_init_config_data;
+};
+
+/**
+ * Data passed from driver to FW in a DMUB_CMD__CACP_PAUSE command.
+ */
+
+struct dmub_cmd_cacp_pause_data {
+
+	/**
+	 * Panel Control HW instance mask.
+	 * Bit 0 is Panel Control HW instance 0.
+	 * Bit 1 is Panel Control HW instance 1.
+	 */
+	uint8_t panel_mask;
+
+	/**
+	 * OTG hw instance
+	 */
+	uint8_t otg_inst;
+
+	/**
+	 * Enable or disable CACP pause
+	 */
+	uint8_t enable;
+
+	/**
+	 * Explicit padding to 4 byte boundary.
+	 */
+	uint8_t pad;
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_PAUSE command.
+ */
+struct dmub_rb_cmd_cacp_pause {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Data passed from driver to FW in a DMUB_CMD__CACP_PAUSE command.
+	 */
+	struct dmub_cmd_cacp_pause_data cacp_pause_data;
+};
+
+/**
+ * Data passed from driver to FW in a DMUB_CMD__CACP_SET_BACKLIGHT command.
+ */
+struct dmub_cmd_cacp_set_backlight_data {
+	/**
+	 * Number of frames to ramp to backlight user level.
+	 */
+	uint32_t frame_ramp;
+
+	/**
+	 * Requested backlight level from user.
+	 */
+	uint32_t backlight_user_level;
+
+	/**
+	 * ABM control version.
+	 */
+	uint8_t version;
+
+	/**
+	 * Panel Control HW instance mask.
+	 * Bit 0 is Panel Control HW instance 0.
+	 * Bit 1 is Panel Control HW instance 1.
+	 */
+	uint8_t panel_mask;
+
+	/**
+	 * Explicit padding to 4 byte boundary.
+	 */
+	uint8_t pad[2];
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_SET_BACKLIGHT command.
+ */
+struct dmub_rb_cmd_cacp_set_backlight {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Data passed from driver to FW in a DMUB_CMD__CACP_SET_BACKLIGHT command.
+	 */
+	struct dmub_cmd_cacp_set_backlight_data cacp_set_backlight_data;
+};
+
+/**
+ * Data passed from driver to FW in a DMUB_CMD__CACP_SET_PWM_FRAC command.
+ */
+struct dmub_cmd_cacp_set_pwm_frac_data {
+	/**
+	 * Enable/disable fractional duty cycle for backlight PWM.
+	 * TODO: Convert to uint8_t.
+	 */
+	uint32_t fractional_pwm;
+
+	/**
+	 * CACP control version.
+	 */
+	uint8_t version;
+
+	/**
+	 * Panel Control HW instance mask.
+	 * Bit 0 is Panel Control HW instance 0.
+	 * Bit 1 is Panel Control HW instance 1.
+	 */
+	uint8_t panel_mask;
+
+	/**
+	 * Explicit padding to 4 byte boundary.
+	 */
+	uint8_t pad[2];
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_SET_PWM_FRAC command.
+ */
+struct dmub_rb_cmd_cacp_set_pwm_frac {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Data passed from driver to FW in a DMUB_CMD__CACP_SET_PWM_FRAC command.
+	 */
+	struct dmub_cmd_cacp_set_pwm_frac_data cacp_set_pwm_frac_data;
+};
+
+/**
+ * Definition of a DMUB_CMD__CACP_GET_HISTOGRAM command.
+ */
+struct dmub_rb_cmd_cacp_get_histogram {
+	/**
+	 * Command header.
+	 */
+	struct dmub_cmd_header header;
+
+	/**
+	 * Address where Histogram should be copied.
+	 */
+	union dmub_addr dest;
+
+	/**
+	 * Type of Histogram being queried.
+	 */
+	enum dmub_abm_histogram_type histogram_type;
+
+	/**
+	 * Indirect buffer length.
+	 */
+	uint16_t bytes;
+
+	/**
+	 * eDP panel instance.
+	 */
+	uint8_t panel_inst;
+
+	/**
+	 * Explicit padding to 4 byte boundary.
+	 */
+	uint8_t pad;
+};
+
+/**
  * Data passed from driver to FW in a DMUB_CMD__QUERY_FEATURE_CAPS command.
  */
 struct dmub_cmd_query_feature_caps_data {
@@ -6174,17 +6592,14 @@ struct dmub_rb_cmd_get_visual_confirm_color {
  */
 enum dmub_cmd_panel_cntl_type {
 	/**
-	 * @DMUB_CMD__PANEL_CNTL_HW_INIT:
 	 * Initializes embedded panel hardware blocks.
 	 */
 	DMUB_CMD__PANEL_CNTL_HW_INIT = 0,
 	/**
-	 * @DMUB_CMD__PANEL_CNTL_QUERY_BACKLIGHT_INFO:
 	 * Queries backlight info for the embedded panel.
 	 */
 	DMUB_CMD__PANEL_CNTL_QUERY_BACKLIGHT_INFO = 1,
 	/**
-	 * @DMUB_CMD__PANEL_DEBUG_PWM_FREQ:
 	 * Sets the PWM Freq as per user's requirement.
 	 */
 	DMUB_CMD__PANEL_DEBUG_PWM_FREQ = 2,
@@ -6388,7 +6803,7 @@ struct dmub_cmd_cable_id_input {
 };
 
 /**
- * struct dmub_cmd_cable_id_output - Defines the output of DMUB_CMD_GET_USBC_CABLE_ID command.
+ * struct dmub_cmd_cable_id_input - Defines the output of DMUB_CMD_GET_USBC_CABLE_ID command.
  */
 struct dmub_cmd_cable_id_output {
 	uint8_t UHBR10_20_CAPABILITY	:2; /**< b'01 for UHBR10 support, b'10 for both UHBR10 and UHBR20 support */
@@ -6679,7 +7094,7 @@ struct dmub_cmd_pr_enable_data {
 	uint8_t enable;
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which replay_state to use
+	 * Panel isntance to identify which replay_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -6757,7 +7172,7 @@ struct dmub_cmd_pr_copy_settings_data {
 	uint8_t aux_inst;
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which psr_state to use
+	 * Panel isntance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -6766,7 +7181,7 @@ struct dmub_cmd_pr_copy_settings_data {
 	 */
 	uint8_t dpphy_inst;
 	/**
-	 * Determines if SMU optimizations are enabled/disabled.
+	 * Determines if SMU optimzations are enabled/disabled.
 	 */
 	uint8_t smu_optimizations_en;
 	/**
@@ -6774,7 +7189,7 @@ struct dmub_cmd_pr_copy_settings_data {
 	 */
 	uint32_t line_time_in_ns;
 	/*
-	 * Use FSFT after pixel clk
+	 * Use FSFT afftet pixel clk
 	 */
 	uint32_t pix_clk_100hz;
 	/*
@@ -6847,7 +7262,7 @@ union dmub_pr_runtime_flags {
 struct dmub_cmd_pr_update_state_data {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which psr_state to use
+	 * Panel isntance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -6862,6 +7277,7 @@ struct dmub_cmd_pr_update_state_data {
 	 */
 	uint32_t coasting_vtotal;
 	uint32_t sync_mode;
+	uint32_t pseudo_vtotal;
 
 	union dmub_pr_runtime_flags pr_runtime_flags;
 };
@@ -6869,7 +7285,7 @@ struct dmub_cmd_pr_update_state_data {
 struct dmub_cmd_pr_general_cmd_data {
 	/**
 	 * Panel Instance.
-	 * Panel instance to identify which psr_state to use
+	 * Panel isntance to identify which psr_state to use
 	 * Currently the support is only for 0 or 1
 	 */
 	uint8_t panel_inst;
@@ -7194,6 +7610,47 @@ union dmub_rb_cmd {
 	 * Definition of a DMUB_CMD__DPIA_HPD_INT_ENABLE command.
 	 */
 	struct dmub_rb_cmd_dpia_hpd_int_enable dpia_hpd_int_enable;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_SET_PIPE command.
+	 */
+	struct dmub_rb_cmd_cacp_set_pipe cacp_set_pipe;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_SET_LEVEL command.
+	 */
+	struct dmub_rb_cmd_cacp_set_level cacp_set_level;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_SET_EVENT command.
+	 */
+	struct dmub_rb_cmd_cacp_set_event cacp_set_event;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_INIT_CONFIG command.
+	 */
+	struct dmub_rb_cmd_cacp_init_config cacp_init_config;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_PAUSE command.
+	 */
+	struct dmub_rb_cmd_cacp_pause cacp_pause;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_SET_BACKLIGHT command.
+	 */
+	struct dmub_rb_cmd_cacp_set_backlight cacp_set_backlight;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_SET_PWM_FRAC command.
+	 */
+	struct dmub_rb_cmd_cacp_set_pwm_frac cacp_set_pwm_frac;
+
+	/**
+	 * Definition of a DMUB_CMD__CACP_GET_HISTOGRAM command.
+	 */
+	struct dmub_rb_cmd_cacp_get_histogram cacp_get_histogram;
+
 	/**
 	 * Definition of a DMUB_CMD__IDLE_OPT_DCN_NOTIFY_IDLE command.
 	 */
@@ -7248,6 +7705,8 @@ union dmub_rb_cmd {
 	struct dmub_rb_cmd_fams2 fams2_config;
 
 	struct dmub_rb_cmd_ib ib_fams2_config;
+
+	struct dmub_rb_cmd_ib ib_fams2_debug_meta;
 
 	struct dmub_rb_cmd_fams2_drr_update fams2_drr_update;
 

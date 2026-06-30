@@ -27,9 +27,11 @@
 #ifndef AMDGPU_DM_AMDGPU_DM_PSR_H_
 #define AMDGPU_DM_AMDGPU_DM_PSR_H_
 
-#include "amdgpu.h"
 #include "dc.h"
 #include "modules/inc/mod_power.h"
+
+struct amdgpu_display_manager;
+struct amdgpu_dm_connector;
 
 /* the number of pageflips before enabling psr */
 #define AMDGPU_DM_PSR_ENTRY_DELAY 5
@@ -39,4 +41,9 @@ bool amdgpu_dm_psr_is_active_allowed(struct amdgpu_display_manager *dm);
 bool amdgpu_dm_psr_set_event(struct amdgpu_display_manager *dm,
 		struct dc_stream_state *stream, bool set_event,	enum psr_event event,
 		bool wait_for_disable);
+
+#if IS_ENABLED(CONFIG_DRM_AMD_DC_KUNIT_TEST)
+void amdgpu_dm_psr_fill_caps(struct dc_link *link, struct psr_caps *caps);
+#endif
+
 #endif /* AMDGPU_DM_AMDGPU_DM_PSR_H_ */

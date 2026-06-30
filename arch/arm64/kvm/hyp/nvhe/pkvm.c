@@ -752,16 +752,30 @@ static struct pkvm_hyp_vcpu selftest_vcpu = {
 struct pkvm_hyp_vcpu *init_selftest_vm(void *virt)
 {
 	struct hyp_page *p = hyp_virt_to_page(virt);
+	unsigned long min_pages, seeded = 0;
 	int i;
 
 	selftest_vm.kvm.arch.mmu.vtcr = host_mmu.arch.mmu.vtcr;
 	WARN_ON(kvm_guest_prepare_stage2(&selftest_vm, virt));
 
+	/*
+	 * Mirror pkvm_refill_memcache() for the share/donate pre-checks;
+	 * the selftest invokes those functions directly and would
+	 * otherwise see an empty memcache.
+	 */
+	min_pages = kvm_mmu_cache_min_pages(&selftest_vm.kvm.arch.mmu);
+
 	for (i = 0; i < pkvm_selftest_pages(); i++) {
 		if (p[i].refcount)
 			continue;
 		p[i].refcount = 1;
-		hyp_put_page(&selftest_vm.pool, hyp_page_to_virt(&p[i]));
+		if (seeded < min_pages) {
+			push_hyp_memcache(&selftest_vcpu.vcpu.arch.pkvm_memcache,
+					  hyp_page_to_virt(&p[i]), hyp_virt_to_phys);
+			seeded++;
+		} else {
+			hyp_put_page(&selftest_vm.pool, hyp_page_to_virt(&p[i]));
+		}
 	}
 
 	selftest_vm.kvm.arch.pkvm.handle = __pkvm_reserve_vm();
@@ -839,10 +853,12 @@ int __pkvm_init_vm(struct kvm *host_kvm, unsigned long vm_hva,
 	/* Must be called last since this publishes the VM. */
 	ret = insert_vm_table_entry(handle, hyp_vm);
 	if (ret)
-		goto err_remove_mappings;
+		goto err_destroy_stage2;
 
 	return 0;
 
+err_destroy_stage2:
+	kvm_guest_destroy_stage2(hyp_vm);
 err_remove_mappings:
 	unmap_donated_memory(hyp_vm, vm_size);
 	unmap_donated_memory(pgd, pgd_size);

@@ -312,6 +312,9 @@ int amdgpu_mes_suspend(struct amdgpu_device *adev, u32 xcc_id)
 	memset(&input, 0x0, sizeof(struct mes_suspend_gang_input));
 	input.suspend_all_gangs = 1;
 	input.xcc_id = xcc_id;
+	if ((amdgpu_ip_version(adev, GC_HWIP, 0) == IP_VERSION(12, 1, 0)) &&
+		((adev->mes.sched_version & AMDGPU_MES_VERSION_MASK) >= 0x71))
+		input.suspend_all_sdma_gangs = 1;
 
 	/*
 	 * Avoid taking any other locks under MES lock to avoid circular
@@ -777,6 +780,18 @@ out:
 	amdgpu_ucode_release(&adev->mes.fw[pipe]);
 	return r;
 }
+
+void amdgpu_mes_validate_fw_version(struct amdgpu_device *adev)
+{
+	u32 fw_from_ucode = adev->mes.fw_version[AMDGPU_MES_SCHED_PIPE];
+	u32 fw_from_reg = adev->mes.sched_version & AMDGPU_MES_VERSION_MASK;
+
+	if (fw_from_ucode != fw_from_reg)
+		dev_info(adev->dev,
+			 "MES firmware reports incorrect version in ucode binary (0x%x vs 0x%x)\n",
+			 fw_from_ucode, fw_from_reg);
+}
+
 
 bool amdgpu_mes_suspend_resume_all_supported(struct amdgpu_device *adev)
 {
