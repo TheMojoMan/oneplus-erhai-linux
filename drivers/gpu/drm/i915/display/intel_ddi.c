@@ -2652,9 +2652,6 @@ static void mtl_ddi_pre_enable_dp(struct intel_atomic_state *state,
 	/* 3. Select Thunderbolt */
 	mtl_port_buf_ctl_io_selection(encoder);
 
-	/* 4. Enable Panel Power if PPS is required */
-	intel_pps_on(intel_dp);
-
 	/* 5. Enable the port PLL */
 	intel_ddi_enable_clock(encoder, crtc_state);
 
@@ -3230,9 +3227,8 @@ static void intel_ddi_post_disable_hdmi_or_sst(struct intel_atomic_state *state,
 	struct intel_dp *intel_dp = enc_to_intel_dp(encoder);
 	struct intel_crtc *pipe_crtc;
 	bool is_hdmi = intel_crtc_has_type(old_crtc_state, INTEL_OUTPUT_HDMI);
-	int i;
 
-	for_each_pipe_crtc_modeset_disable(display, pipe_crtc, old_crtc_state, i) {
+	for_each_pipe_crtc_modeset_disable(display, pipe_crtc, old_crtc_state) {
 		const struct intel_crtc_state *old_pipe_crtc_state =
 			intel_atomic_get_old_crtc_state(state, pipe_crtc);
 
@@ -3259,7 +3255,7 @@ static void intel_ddi_post_disable_hdmi_or_sst(struct intel_atomic_state *state,
 
 	intel_ddi_disable_transcoder_func(old_crtc_state);
 
-	for_each_pipe_crtc_modeset_disable(display, pipe_crtc, old_crtc_state, i) {
+	for_each_pipe_crtc_modeset_disable(display, pipe_crtc, old_crtc_state) {
 		const struct intel_crtc_state *old_pipe_crtc_state =
 			intel_atomic_get_old_crtc_state(state, pipe_crtc);
 
@@ -3516,7 +3512,6 @@ static void intel_ddi_enable(struct intel_atomic_state *state,
 	struct intel_crtc *pipe_crtc;
 	enum transcoder cpu_transcoder = crtc_state->cpu_transcoder;
 	bool is_hdmi = intel_crtc_has_type(crtc_state, INTEL_OUTPUT_HDMI);
-	int i;
 
 	/* 128b/132b SST */
 	if (!is_hdmi && intel_dp_is_uhbr(crtc_state)) {
@@ -3550,7 +3545,7 @@ static void intel_ddi_enable(struct intel_atomic_state *state,
 
 	intel_ddi_wait_for_fec_status(encoder, crtc_state, true);
 
-	for_each_pipe_crtc_modeset_enable(display, pipe_crtc, crtc_state, i) {
+	for_each_pipe_crtc_modeset_enable(display, pipe_crtc, crtc_state) {
 		const struct intel_crtc_state *pipe_crtc_state =
 			intel_atomic_get_new_crtc_state(state, pipe_crtc);
 
@@ -3672,7 +3667,7 @@ void intel_ddi_update_active_dpll(struct intel_atomic_state *state,
 	if (!intel_encoder_is_tc(encoder) || !display->dpll.mgr)
 		return;
 
-	for_each_intel_crtc_in_pipe_mask(display->drm, pipe_crtc,
+	for_each_intel_crtc_in_pipe_mask(display, pipe_crtc,
 					 intel_crtc_joined_pipe_mask(crtc_state))
 		intel_dpll_update_active(state, pipe_crtc, encoder);
 }
@@ -3710,6 +3705,14 @@ intel_ddi_pre_pll_enable(struct intel_atomic_state *state,
 	else if (display->platform.geminilake || display->platform.broxton)
 		bxt_dpio_phy_set_lane_optim_mask(encoder,
 						 crtc_state->lane_lat_optim_mask);
+
+	/*
+	 * There is no direct connection between the PLL and PPS, however
+	 * enabling PPS before PLL is required to avoid PLL/DDI BUF timeouts
+	 * during system resume. Do that matching the Bspec order as well.
+	 */
+	if (DISPLAY_VER(display) >= 14)
+		intel_pps_on(&dig_port->dp);
 }
 
 static void adlp_tbt_to_dp_alt_switch_wa(struct intel_encoder *encoder)

@@ -45,8 +45,6 @@
  * in amdgpu_dm_kms.h file
  */
 
-#define AMDGPU_DM_MAX_DISPLAY_INDEX 31
-
 #define AMDGPU_DM_MAX_CRTC 6
 
 #define AMDGPU_DM_MAX_NUM_EDP 2
@@ -706,6 +704,14 @@ struct amdgpu_display_manager {
 		struct completion replied;
 		char reply_data[0x40];  // Cannot include dmub_cmd here
 	} fused_io[8];
+	/**
+	 * @hdmi_frl_status_polling_work:
+	 *
+	 * workqueue for 200ms frl status polling
+	 */
+	struct workqueue_struct *hdmi_frl_status_polling_wq;
+	struct delayed_work hdmi_frl_status_polling_work;
+	unsigned int hdmi_frl_status_polling_delay_ms;
 
 	/**
 	 * @dm_boot_time_crc_info:
@@ -842,6 +848,7 @@ struct amdgpu_dm_connector {
 	bool fake_enable;
 	bool force_yuv420_output;
 	bool force_yuv422_output;
+	uint8_t force_yuv_pixel_format;
 	struct dsc_preferred_settings dsc_settings;
 	struct psr_caps psr_caps;
 	union dp_downstream_port_present mst_downstream_port_present;
@@ -851,6 +858,8 @@ struct amdgpu_dm_connector {
 	int sr_skip_count;
 	bool disallow_edp_enter_psr;
 	bool disallow_edp_enter_replay;
+
+	union dwnstream_portxcaps mst_downstream_port_caps;
 
 	/* Record progress status of mst*/
 	uint8_t mst_status;
@@ -1107,7 +1116,7 @@ int amdgpu_dm_update_plane_color_mgmt(struct dm_crtc_state *crtc,
 void amdgpu_dm_update_connector_after_detect(
 		struct amdgpu_dm_connector *aconnector);
 
-void populate_hdmi_info_from_connector(struct drm_hdmi_info *info,
+void populate_hdmi_info_from_connector(bool enable_frl, struct drm_hdmi_info *info,
 				      struct dc_edid_caps *edid_caps);
 
 extern const struct drm_encoder_helper_funcs amdgpu_dm_encoder_helper_funcs;

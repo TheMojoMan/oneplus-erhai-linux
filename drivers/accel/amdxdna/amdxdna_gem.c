@@ -349,8 +349,11 @@ static int amdxdna_hmm_register(struct amdxdna_gem_obj *abo,
 	u32 nr_pages;
 	int ret;
 
-	if (!amdxdna_pasid_on(abo->client))
+	if (!amdxdna_pasid_on(abo->client)) {
+		/* Need to set uva for heap uva validation */
+		abo->mem.uva = addr;
 		return 0;
+	}
 
 	mapp = kzalloc_obj(*mapp);
 	if (!mapp)
@@ -1303,7 +1306,7 @@ int amdxdna_drm_sync_bo_ioctl(struct drm_device *dev,
 		 args->handle, args->offset, args->size);
 
 	if (args->direction == SYNC_DIRECT_FROM_DEVICE)
-		ret = amdxdna_hwctx_sync_debug_bo(abo->client, args->handle);
+		ret = amdxdna_hwctx_sync_debug_bo(client, args->handle);
 
 put_obj:
 	drm_gem_object_put(gobj);
