@@ -147,7 +147,8 @@ bool intel_dp_link_caps_set_max_limits(struct intel_dp_link_caps *link_caps,
 void intel_dp_link_caps_reset_max_limits(struct intel_dp_link_caps *link_caps);
 
 bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
-			       const int *rates, int num_rates, int max_lane_count);
+			       const int *rates, int num_rates, int max_lane_count,
+			       bool reset);
 void intel_dp_link_caps_reset(struct intel_dp_link_caps *link_caps);
 
 void intel_dp_link_caps_debugfs_add(struct intel_connector *connector);

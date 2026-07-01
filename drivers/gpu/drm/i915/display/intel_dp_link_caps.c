@@ -709,14 +709,42 @@ static int link_config_cmp_by_lane_rate(const void *a, const void *b, const void
 	return lce_a->link_rate_idx - lce_b->link_rate_idx;
 }
 
-/* Return %true if the supported link parameters have changed. */
+/**
+ * intel_dp_link_caps_update - rebuild the supported link configuration state
+ * @link_caps: link capabilities state
+ * @rates: supported common link rates
+ * @num_rates: number of entries in @rates
+ * @max_lane_count: supported maximum lane count
+ * @reset: reset limits and disabled configs
+ *
+ * Rebuild the supported link configuration state from @rates and
+ * @max_lane_count.
+ *
+ * If @reset is %true, reset the maximum link limits to the maximum
+ * supported rate and lane count, and re-enable all configurations.
+ *
+ * This function is called regularly, at least after a sink is connected,
+ * but it may also be called later whenever the sink capabilities may have
+ * changed, for example in response to HPD IRQ / RX_CAP_CHANGED signaling.
+ *
+ * In the Intel driver this function is currently called whenever the
+ * connector detect handler runs, after reading the sink capabilities. This
+ * may change if those capabilities are cached until the sink is
+ * disconnected, or until RX_CAP_CHANGED is signaled. In any case, this
+ * function should be called whenever the sink capabilities were read out
+ * and may have changed.
+ *
+ * Returns:
+ * - %true if the link capabilities have changed, %false otherwise.
+ */
 bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
-			       const int *rates, int num_rates, int max_lane_count)
+			       const int *rates, int num_rates, int max_lane_count,
+			       bool reset)
 {
 	struct intel_dp *intel_dp = link_caps->dp;
 	struct intel_display *display = to_intel_display(intel_dp);
 	struct intel_dp_link_config_entry *lce;
-	bool link_params_changed = false;
+	bool link_params_changed = reset;
 	int num_common_lane_configs;
 	int i;
 	int j;
@@ -777,6 +805,9 @@ bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
 	       sizeof(link_caps->lane_rate_map[0]),
 	       link_config_cmp_by_lane_rate, NULL,
 	       link_caps);
+
+	if (link_params_changed)
+		reset_max_link_limits_reenable_all(link_caps);
 
 	return link_params_changed;
 }

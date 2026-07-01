@@ -701,7 +701,8 @@ static bool intel_dp_set_common_link_params(struct intel_dp *intel_dp)
 	intel_dp_get_common_rates(intel_dp, common_rates, &num_common_rates);
 	if (intel_dp_link_caps_update(intel_dp->link.caps,
 				      common_rates, num_common_rates,
-				      intel_dp_get_max_common_lane_count(intel_dp)))
+				      intel_dp_get_max_common_lane_count(intel_dp),
+				      intel_dp->reset_link_params))
 		params_changed = true;
 
 	return params_changed;
@@ -3613,6 +3614,11 @@ void intel_dp_set_link_params(struct intel_dp *intel_dp,
 
 void intel_dp_reset_link_params(struct intel_dp *intel_dp)
 {
+	/*
+	 * TODO: Remove the following reset of link capabilities, as
+	 * this isn't needed after intel_dp_link_caps_update(reset=true)
+	 * was called.
+	 */
 	intel_dp_link_caps_reset(intel_dp->link.caps);
 	intel_dp->link.mst_probed_lane_count = 0;
 	intel_dp->link.mst_probed_rate = 0;
