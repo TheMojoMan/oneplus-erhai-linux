@@ -28,11 +28,92 @@ void intel_dp_test_reset(struct intel_dp *intel_dp)
 	memset(&intel_dp->compliance, 0, sizeof(intel_dp->compliance));
 }
 
+static bool set_filter_for_lane_count(struct intel_connector *connector,
+				      struct intel_dp_link_caps *link_caps,
+				      int lane_count,
+				      struct link_config_limits *limits)
+{
+	struct intel_dp_link_config link_config;
+	struct intel_dp_link_caps_order order =
+		intel_dp_link_caps_connector_compute_order(connector);
+	struct intel_dp_link_caps_filter new_filter = INTEL_DP_LINK_CAPS_FILTER_NONE;
+	struct intel_dp_link_caps_iter iter;
+	bool found = false;
+
+	intel_dp_link_caps_iter_start(&iter, link_caps, order, limits->link_config_filter);
+	for_each_dp_link_config(&iter, &link_config) {
+		if (link_config.lane_count != lane_count)
+			continue;
+
+		intel_dp_link_caps_filter_add(link_caps, &new_filter, &link_config);
+		found = true;
+	}
+	intel_dp_link_caps_iter_end(&iter);
+
+	if (!found)
+		return false;
+
+	limits->link_config_filter = new_filter;
+
+	return true;
+}
+
+static bool set_filter_for_link_config(struct intel_connector *connector,
+				       struct intel_dp_link_caps *link_caps,
+				       const struct intel_dp_link_config *link_params,
+				       struct link_config_limits *limits)
+{
+	struct intel_dp_link_caps_filter new_filter = INTEL_DP_LINK_CAPS_FILTER_NONE;
+
+	if (!intel_dp_link_caps_filter_add(link_caps, &new_filter, link_params))
+		return false;
+
+	limits->link_config_filter = new_filter;
+
+	return true;
+}
+
+static bool set_filter_for_link_params(struct intel_connector *connector,
+				       int link_rate, int lane_count,
+				       struct link_config_limits *limits)
+{
+	struct intel_dp *intel_dp = intel_attached_dp(connector);
+	struct intel_encoder *encoder = &dp_to_dig_port(intel_dp)->base;
+	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
+	struct intel_display *display = to_intel_display(intel_dp);
+	struct intel_dp_link_config requested_config;
+
+	requested_config.rate = link_rate;
+	requested_config.lane_count = lane_count;
+
+	if (set_filter_for_link_config(connector, link_caps, &requested_config, limits))
+		return true;
+
+	/*
+	 * Preserve the legacy behavior: if the requested (rate, lane_count)
+	 * combination is not an allowed config, fall back to all configs
+	 * matching the requested lane count.
+	 *
+	 * TODO: Recheck whether this behavior is actually correct.
+	 */
+	if (set_filter_for_lane_count(connector, link_caps, lane_count, limits))
+		return true;
+
+	drm_dbg_kms(display->drm,
+		    "[ENCODER:%d:%s] Invalid autotest link config parameters: %dx%d\n",
+		    encoder->base.base.id, encoder->base.name,
+		    requested_config.lane_count,
+		    requested_config.rate);
+
+	return false;
+}
+
 /* Adjust link config limits based on compliance test requests. */
-void intel_dp_test_compute_config(struct intel_dp *intel_dp,
+bool intel_dp_test_compute_config(struct intel_connector *connector,
 				  struct intel_crtc_state *pipe_config,
 				  struct link_config_limits *limits)
 {
+	struct intel_dp *intel_dp = intel_attached_dp(connector);
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	struct intel_display *display = to_intel_display(intel_dp);
 
@@ -51,6 +132,11 @@ void intel_dp_test_compute_config(struct intel_dp *intel_dp,
 	if (intel_dp->compliance.test_type == DP_TEST_LINK_TRAINING) {
 		int index;
 
+		/*
+		 * TODO: Remove the following min/max link limit setup
+		 * after converting to use the link configuration filter
+		 * instead in limits.
+		 */
 		/* Validate the compliance test data since max values
 		 * might have changed due to link train fallback.
 		 */
@@ -65,7 +151,15 @@ void intel_dp_test_compute_config(struct intel_dp *intel_dp,
 			limits->min_lane_count = intel_dp->compliance.test_lane_count;
 			limits->max_lane_count = intel_dp->compliance.test_lane_count;
 		}
+
+		if (!set_filter_for_link_params(connector,
+						intel_dp->compliance.test_link_rate,
+						intel_dp->compliance.test_lane_count,
+						limits))
+			return false;
 	}
+
+	return true;
 }
 
 /* Compliance test status bits  */
