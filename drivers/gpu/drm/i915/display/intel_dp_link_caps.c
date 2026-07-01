@@ -235,6 +235,16 @@ static int intel_dp_link_config_lane_count(const struct intel_dp_link_config_ent
 	return 1 << lce->lane_count_exp;
 }
 
+static void
+to_intel_dp_link_config(struct intel_dp_link_caps *link_caps,
+			int config_idx, struct intel_dp_link_config *config)
+{
+	const struct intel_dp_link_config_entry *lce = &link_caps->configs[config_idx];
+
+	config->rate = intel_dp_link_config_rate(link_caps, lce);
+	config->lane_count = intel_dp_link_config_lane_count(lce);
+}
+
 static void set_max_link_limits_no_update(struct intel_dp_link_caps *link_caps,
 					  const struct intel_dp_link_config *max_link_limits)
 {
@@ -401,15 +411,15 @@ void intel_dp_link_config_get(struct intel_dp_link_caps *link_caps,
 			      int idx, int *link_rate, int *lane_count)
 {
 	struct intel_display *display = to_intel_display(link_caps->dp);
-	const struct intel_dp_link_config_entry *lce;
+	struct intel_dp_link_config config;
 
 	if (drm_WARN_ON(display->drm, idx < 0 || idx >= link_caps->num_configs))
 		idx = 0;
 
-	lce = &link_caps->configs[idx];
+	to_intel_dp_link_config(link_caps, idx, &config);
 
-	*link_rate = intel_dp_link_config_rate(link_caps, lce);
-	*lane_count = intel_dp_link_config_lane_count(lce);
+	*link_rate = config.rate;
+	*lane_count = config.lane_count;
 }
 
 int intel_dp_link_config_index(struct intel_dp_link_caps *link_caps,
