@@ -1717,7 +1717,7 @@ struct drm_bridge *of_drm_get_bridge_by_endpoint(const struct device_node *np,
 	/*
 	 * of_graph_get_remote_node() produces a noisy error message if port
 	 * node isn't found and the absence of the port is a legit case here,
-	 * so at first we silently check whether graph is present in the
+	 * so at first we silently check whether a graph is present in the
 	 * device-tree node.
 	 */
 	if (!of_graph_is_present(np))
