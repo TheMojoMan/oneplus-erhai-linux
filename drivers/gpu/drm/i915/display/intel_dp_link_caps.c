@@ -273,11 +273,6 @@ int intel_dp_max_common_rate(struct intel_dp_link_caps *link_caps)
 	return intel_dp_common_rate(link_caps, link_caps->num_rates - 1);
 }
 
-int intel_dp_link_caps_num_common_rates(struct intel_dp_link_caps *link_caps)
-{
-	return link_caps->num_rates;
-}
-
 void intel_dp_link_caps_print_common_rates(struct intel_dp_link_caps *link_caps)
 {
 	struct intel_display *display = to_intel_display(link_caps->dp);

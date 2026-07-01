@@ -1988,60 +1988,56 @@ static int dsc_compute_link_config(struct intel_dp *intel_dp,
 				   const struct link_config_limits *limits,
 				   int dsc_bpp_x16)
 {
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	const struct drm_display_mode *adjusted_mode = &pipe_config->hw.adjusted_mode;
-	int link_rate, lane_count;
-	int i;
+	struct intel_connector *connector = to_intel_connector(conn_state->connector);
+	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
+	struct intel_dp_link_caps_order order =
+		intel_dp_link_caps_connector_compute_order(connector);
+	struct intel_dp_link_config link_config;
+	struct intel_dp_link_caps_iter iter;
 
-	for (i = 0; i < intel_dp_link_caps_num_common_rates(intel_dp->link.caps); i++) {
-		link_rate = intel_dp_common_rate(link_caps, i);
-		if (link_rate < limits->min_rate || link_rate > limits->max_rate)
-			continue;
+	intel_dp_link_caps_iter_start(&iter, link_caps, order, limits->link_config_filter);
+	for_each_dp_link_config(&iter, &link_config) {
+		/*
+		 * FIXME: intel_dp_mtp_tu_compute_config() requires
+		 * ->lane_count and ->port_clock set before we know
+		 * they'll work. If we end up failing altogether,
+		 * they'll remain in crtc state. This shouldn't matter,
+		 * as we'd then bail out from compute config, but it's
+		 * just ugly.
+		 */
+		pipe_config->lane_count = link_config.lane_count;
+		pipe_config->port_clock = link_config.rate;
 
-		for (lane_count = limits->min_lane_count;
-		     lane_count <= limits->max_lane_count;
-		     lane_count <<= 1) {
+		if (drm_dp_is_uhbr_rate(link_config.rate)) {
+			int ret;
 
-			/*
-			 * FIXME: intel_dp_mtp_tu_compute_config() requires
-			 * ->lane_count and ->port_clock set before we know
-			 * they'll work. If we end up failing altogether,
-			 * they'll remain in crtc state. This shouldn't matter,
-			 * as we'd then bail out from compute config, but it's
-			 * just ugly.
-			 */
-			pipe_config->lane_count = lane_count;
-			pipe_config->port_clock = link_rate;
+			ret = intel_dp_mtp_tu_compute_config(intel_dp,
+							     pipe_config,
+							     conn_state,
+							     dsc_bpp_x16,
+							     dsc_bpp_x16,
+							     0, true);
+			if (ret)
+				continue;
+		} else {
+			unsigned long bw_overhead_flags =
+				pipe_config->fec_enable ? DRM_DP_BW_OVERHEAD_FEC : 0;
+			int line_slice_count =
+				intel_dsc_line_slice_count(&pipe_config->dsc.slice_config);
 
-			if (drm_dp_is_uhbr_rate(link_rate)) {
-				int ret;
-
-				ret = intel_dp_mtp_tu_compute_config(intel_dp,
-								     pipe_config,
-								     conn_state,
-								     dsc_bpp_x16,
-								     dsc_bpp_x16,
-								     0, true);
-				if (ret)
-					continue;
-			} else {
-				unsigned long bw_overhead_flags =
-					pipe_config->fec_enable ? DRM_DP_BW_OVERHEAD_FEC : 0;
-				int line_slice_count =
-					intel_dsc_line_slice_count(&pipe_config->dsc.slice_config);
-
-				if (!is_bw_sufficient_for_dsc_config(intel_dp,
-								     link_rate, lane_count,
-								     adjusted_mode->crtc_clock,
-								     adjusted_mode->hdisplay,
-								     line_slice_count,
-								     dsc_bpp_x16,
-								     bw_overhead_flags))
-					continue;
-			}
-
-			return 0;
+			if (!is_bw_sufficient_for_dsc_config(intel_dp,
+							     link_config.rate,
+							     link_config.lane_count,
+							     adjusted_mode->crtc_clock,
+							     adjusted_mode->hdisplay,
+							     line_slice_count,
+							     dsc_bpp_x16,
+							     bw_overhead_flags))
+				continue;
 		}
+
+		return 0;
 	}
 
 	return -EINVAL;
