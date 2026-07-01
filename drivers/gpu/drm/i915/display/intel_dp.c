@@ -354,7 +354,7 @@ static int intel_dp_get_max_common_lane_count(struct intel_dp *intel_dp)
 	return min3(source_max, sink_max, lane_max);
 }
 
-int intel_dp_max_lane_count(struct intel_dp *intel_dp)
+static int intel_dp_max_lane_count(struct intel_dp *intel_dp)
 {
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	struct intel_dp_link_config max_link_limits;
@@ -1331,6 +1331,7 @@ intel_dp_mode_valid_format(struct intel_connector *connector,
 	struct intel_dp *intel_dp = intel_attached_dp(connector);
 	enum intel_output_format output_format;
 	int max_rate, mode_rate, max_lanes, max_link_clock;
+	struct intel_dp_link_config max_bw_config;
 	u16 dsc_max_compressed_bpp = 0;
 	enum drm_mode_status status;
 	bool dsc = false;
@@ -1343,8 +1344,9 @@ intel_dp_mode_valid_format(struct intel_connector *connector,
 
 	output_format = intel_dp_output_format(connector, sink_format);
 
-	max_link_clock = intel_dp_max_link_rate(intel_dp);
-	max_lanes = intel_dp_max_lane_count(intel_dp);
+	intel_dp_link_caps_get_max_bw_config(intel_dp->link.caps, &max_bw_config);
+	max_link_clock = max_bw_config.rate;
+	max_lanes = max_bw_config.lane_count;
 
 	max_rate = intel_dp_max_link_data_rate(intel_dp, max_link_clock, max_lanes);
 
@@ -1538,7 +1540,7 @@ static void intel_dp_print_rates(struct intel_dp *intel_dp)
 	intel_dp_link_caps_print_common_rates(intel_dp->link.caps);
 }
 
-int
+static int
 intel_dp_max_link_rate(struct intel_dp *intel_dp)
 {
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;

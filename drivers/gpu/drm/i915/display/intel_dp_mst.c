@@ -47,6 +47,7 @@
 #include "intel_display_wa.h"
 #include "intel_dp.h"
 #include "intel_dp_hdcp.h"
+#include "intel_dp_link_caps.h"
 #include "intel_dp_link_training.h"
 #include "intel_dp_mst.h"
 #include "intel_dp_test.h"
@@ -1476,6 +1477,7 @@ mst_connector_mode_valid_ctx(struct drm_connector *_connector,
 	unsigned long bw_overhead_flags =
 		DRM_DP_BW_OVERHEAD_MST | DRM_DP_BW_OVERHEAD_SSC_REF_CLK;
 	int min_link_bpp_x16 = fxp_q4_from_int(18);
+	struct intel_dp_link_config max_bw_config;
 	static bool supports_dsc;
 	int ret;
 	bool dsc = false;
@@ -1508,8 +1510,9 @@ mst_connector_mode_valid_ctx(struct drm_connector *_connector,
 		min_link_bpp_x16 = intel_dp_compute_min_compressed_bpp_x16(connector,
 									   INTEL_OUTPUT_FORMAT_RGB);
 
-	max_link_clock = intel_dp_max_link_rate(intel_dp);
-	max_lanes = intel_dp_max_lane_count(intel_dp);
+	intel_dp_link_caps_get_max_bw_config(intel_dp->link.caps, &max_bw_config);
+	max_link_clock = max_bw_config.rate;
+	max_lanes = max_bw_config.lane_count;
 
 	max_rate = intel_dp_max_link_data_rate(intel_dp,
 					       max_link_clock, max_lanes);
@@ -2135,13 +2138,18 @@ bool intel_dp_mst_crtc_needs_modeset(struct intel_atomic_state *state,
  */
 void intel_dp_mst_prepare_probe(struct intel_dp *intel_dp)
 {
-	int link_rate = intel_dp_max_link_rate(intel_dp);
-	int lane_count = intel_dp_max_lane_count(intel_dp);
+	struct intel_dp_link_config max_bw_config;
+	int link_rate;
+	int lane_count;
 	u8 rate_select;
 	u8 link_bw;
 
 	if (intel_dp->link.active)
 		return;
+
+	intel_dp_link_caps_get_max_bw_config(intel_dp->link.caps, &max_bw_config);
+	link_rate = max_bw_config.rate;
+	lane_count = max_bw_config.lane_count;
 
 	if (intel_mst_probed_link_params_valid(intel_dp, link_rate, lane_count))
 		return;
