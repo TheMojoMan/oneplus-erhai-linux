@@ -155,4 +155,41 @@ void intel_dp_link_caps_debugfs_add(struct intel_connector *connector);
 struct intel_dp_link_caps *intel_dp_link_caps_init(struct intel_dp *intel_dp);
 void intel_dp_link_caps_cleanup(struct intel_dp_link_caps *link_caps);
 
+#if IS_ENABLED(CONFIG_KUNIT)
+
+#define INTEL_DP_LINK_CAPS_TEST_OPS_MEMBERS(__X) \
+	__X(connector_compute_order,	intel_dp_link_caps_connector_compute_order) \
+	__X(connector_fallback_order,	intel_dp_link_caps_connector_fallback_order) \
+	__X(iter_start,			intel_dp_link_caps_iter_start) \
+	__X(iter_end,			intel_dp_link_caps_iter_end) \
+	__X(set_max_limits,		intel_dp_link_caps_set_max_limits) \
+	__X(get_max_limits,		intel_dp_link_caps_get_max_limits) \
+	__X(get_max_bw_config,		intel_dp_link_caps_get_max_bw_config) \
+	__X(reset_max_limits,		intel_dp_link_caps_reset_max_limits) \
+	__X(disable_config,		intel_dp_link_caps_disable_config) \
+	__X(update,			intel_dp_link_caps_update) \
+	__X(init,			intel_dp_link_caps_init) \
+	__X(cleanup,			intel_dp_link_caps_cleanup)
+
+#define __DECLARE_MEMBER(__name, __fn) \
+	typeof(__fn) *__name;
+
+#define INTEL_DP_LINK_CAPS_TEST_OPS_DECLARE \
+	INTEL_DP_LINK_CAPS_TEST_OPS_MEMBERS(__DECLARE_MEMBER)
+
+struct intel_dp_link_caps_test_ops {
+	INTEL_DP_LINK_CAPS_TEST_OPS_DECLARE
+};
+
+#undef INTEL_DP_LINK_CAPS_TEST_OPS_DECLARE
+#undef __DECLARE_MEMBER
+
+#ifdef I915
+extern const struct intel_dp_link_caps_test_ops i915_display_dp_link_caps_test_ops;
+#else
+extern const struct intel_dp_link_caps_test_ops intel_display_dp_link_caps_test_ops;
+#endif	/* I915 */
+
+#endif	/* CONFIG_KUNIT */
+
 #endif /* __INTEL_DP_LINK_CAPS_H__ */

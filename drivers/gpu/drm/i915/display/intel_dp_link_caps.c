@@ -1281,3 +1281,32 @@ void intel_dp_link_caps_cleanup(struct intel_dp_link_caps *link_caps)
 {
 	kfree(link_caps);
 }
+
+#if IS_ENABLED(CONFIG_KUNIT)
+
+#define __INIT_MEMBER(__name, __fn) \
+	.__name = __fn,
+
+#define INTEL_DP_LINK_CAPS_TEST_OPS_INIT \
+	INTEL_DP_LINK_CAPS_TEST_OPS_MEMBERS(__INIT_MEMBER)
+
+#ifdef I915
+
+const struct intel_dp_link_caps_test_ops i915_display_dp_link_caps_test_ops = {
+	INTEL_DP_LINK_CAPS_TEST_OPS_INIT
+};
+EXPORT_SYMBOL(i915_display_dp_link_caps_test_ops);
+
+#else
+
+const struct intel_dp_link_caps_test_ops intel_display_dp_link_caps_test_ops = {
+	INTEL_DP_LINK_CAPS_TEST_OPS_INIT
+};
+EXPORT_SYMBOL(intel_display_dp_link_caps_test_ops);
+
+#endif	/* I915 */
+
+#undef INTEL_DP_LINK_CAPS_TEST_OPS_INIT
+#undef __INIT_MEMBER
+
+#endif	/* CONFIG_KUNIT */
