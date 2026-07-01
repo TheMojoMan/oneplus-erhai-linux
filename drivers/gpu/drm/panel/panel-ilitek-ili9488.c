@@ -13,6 +13,7 @@
 
 #include <drm/drm_mipi_dsi.h>
 #include <drm/drm_modes.h>
+#include <drm/drm_of.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
 
@@ -237,7 +238,7 @@ static int ili9488_dsi_probe(struct mipi_dsi_device *dsi)
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "failed to get regulators\n");
 
-	ret = of_drm_get_panel_orientation(dev->of_node, &ili->orientation);
+	ret = drm_of_get_panel_orientation(dev->of_node, &ili->orientation);
 	if (ret)
 		return dev_err_probe(dev, ret, "failed to get orientation\n");
 
