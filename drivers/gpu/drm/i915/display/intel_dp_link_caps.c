@@ -242,8 +242,8 @@ intel_dp_link_caps_connector_fallback_order(bool is_mst)
 }
 
 /* Get length of common rates array potentially limited by max_rate. */
-int intel_dp_common_len_rate_limit(struct intel_dp_link_caps *link_caps,
-				   int max_rate)
+static int intel_dp_common_len_rate_limit(struct intel_dp_link_caps *link_caps,
+					  int max_rate)
 {
 	return intel_dp_rate_limit_len(link_caps->rates,
 				       link_caps->num_rates, max_rate);

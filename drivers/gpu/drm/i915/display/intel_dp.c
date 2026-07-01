@@ -354,44 +354,6 @@ static int intel_dp_get_max_common_lane_count(struct intel_dp *intel_dp)
 	return min3(source_max, sink_max, lane_max);
 }
 
-static int intel_dp_max_lane_count(struct intel_dp *intel_dp)
-{
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
-	struct intel_dp_link_config max_link_limits;
-	struct intel_dp_link_config forced_params;
-	int lane_count;
-
-	intel_dp_link_caps_get_max_limits(link_caps, &max_link_limits);
-	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
-
-	if (forced_params.lane_count)
-		lane_count = forced_params.lane_count;
-	else
-		lane_count = max_link_limits.lane_count;
-
-	switch (lane_count) {
-	case 1:
-	case 2:
-	case 4:
-		return lane_count;
-	default:
-		MISSING_CASE(lane_count);
-		return 1;
-	}
-}
-
-static int intel_dp_min_lane_count(struct intel_dp *intel_dp)
-{
-	struct intel_dp_link_config forced_params;
-
-	intel_dp_link_caps_get_forced_params(intel_dp->link.caps, &forced_params);
-
-	if (forced_params.lane_count)
-		return forced_params.lane_count;
-
-	return 1;
-}
-
 int intel_dp_link_bw_overhead(int link_clock, int lane_count, int hdisplay,
 			      int dsc_slice_count, int bpp_x16, unsigned long flags)
 {
@@ -1540,39 +1502,6 @@ static void intel_dp_print_rates(struct intel_dp *intel_dp)
 	intel_dp_link_caps_print_common_rates(intel_dp->link.caps);
 }
 
-static int
-intel_dp_max_link_rate(struct intel_dp *intel_dp)
-{
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
-	struct intel_dp_link_config max_link_limits;
-	struct intel_dp_link_config forced_params;
-	int len;
-
-	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
-
-	if (forced_params.rate)
-		return forced_params.rate;
-
-	intel_dp_link_caps_get_max_limits(link_caps, &max_link_limits);
-	len = intel_dp_common_len_rate_limit(link_caps, max_link_limits.rate);
-
-	return intel_dp_common_rate(link_caps, len - 1);
-}
-
-static int
-intel_dp_min_link_rate(struct intel_dp *intel_dp)
-{
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
-	struct intel_dp_link_config forced_params;
-
-	intel_dp_link_caps_get_forced_params(intel_dp->link.caps, &forced_params);
-
-	if (forced_params.rate)
-		return forced_params.rate;
-
-	return intel_dp_common_rate(link_caps, 0);
-}
-
 int intel_dp_rate_select(struct intel_dp *intel_dp, int rate)
 {
 	struct intel_display *display = to_intel_display(intel_dp);
@@ -2672,18 +2601,6 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 	struct intel_connector *connector =
 		to_intel_connector(conn_state->connector);
 
-	/*
-	 * TODO: Remove the following min/max rate and lane count setup, once
-	 * all users are converted to use link_config_mask instead.
-	 */
-	limits->min_rate = intel_dp_min_link_rate(intel_dp);
-	limits->max_rate = intel_dp_max_link_rate(intel_dp);
-
-	limits->min_rate = min(limits->min_rate, limits->max_rate);
-
-	limits->min_lane_count = intel_dp_min_lane_count(intel_dp);
-	limits->max_lane_count = intel_dp_max_lane_count(intel_dp);
-
 	limits->link_config_filter = INTEL_DP_LINK_CAPS_FILTER_ALL;
 
 	limits->pipe.min_bpp = intel_dp_min_bpp(crtc_state->output_format);
@@ -2763,9 +2680,6 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 		 * configuration, and typically on older panels these
 		 * values correspond to the native resolution of the panel.
 		 */
-		limits->min_lane_count = limits->max_lane_count;
-		limits->min_rate = limits->max_rate;
-
 		if (!intel_dp_get_connector_max_link_config(connector, limits, &max_config))
 			return false;
 

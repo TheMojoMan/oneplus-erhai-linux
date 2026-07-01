@@ -114,7 +114,6 @@ bool intel_dp_test_compute_config(struct intel_connector *connector,
 				  struct link_config_limits *limits)
 {
 	struct intel_dp *intel_dp = intel_attached_dp(connector);
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	struct intel_display *display = to_intel_display(intel_dp);
 
 	/* For DP Compliance we override the computed bpp for the pipe */
@@ -130,28 +129,6 @@ bool intel_dp_test_compute_config(struct intel_connector *connector,
 
 	/* Use values requested by Compliance Test Request */
 	if (intel_dp->compliance.test_type == DP_TEST_LINK_TRAINING) {
-		int index;
-
-		/*
-		 * TODO: Remove the following min/max link limit setup
-		 * after converting to use the link configuration filter
-		 * instead in limits.
-		 */
-		/* Validate the compliance test data since max values
-		 * might have changed due to link train fallback.
-		 */
-		if (intel_dp_link_params_valid(intel_dp, intel_dp->compliance.test_link_rate,
-					       intel_dp->compliance.test_lane_count)) {
-			index = intel_dp_link_caps_common_rate_idx(link_caps,
-								   intel_dp->compliance.test_link_rate);
-			if (index >= 0) {
-				limits->min_rate = intel_dp->compliance.test_link_rate;
-				limits->max_rate = intel_dp->compliance.test_link_rate;
-			}
-			limits->min_lane_count = intel_dp->compliance.test_lane_count;
-			limits->max_lane_count = intel_dp->compliance.test_lane_count;
-		}
-
 		if (!set_filter_for_link_params(connector,
 						intel_dp->compliance.test_link_rate,
 						intel_dp->compliance.test_lane_count,
