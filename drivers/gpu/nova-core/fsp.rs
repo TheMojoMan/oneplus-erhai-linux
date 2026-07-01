@@ -85,16 +85,16 @@ impl FspMessageHeader {
     }
 }
 
-/// Complete FSP response structure with MCTP and NVDM headers.
+/// Common FSP response header with MCTP, NVDM and command response payloads.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
-struct FspResponse {
+struct FspResponseHeader {
     header: FspMessageHeader,
     response: NvdmPayloadCommandResponse,
 }
 
-// SAFETY: FspResponse is a packed C struct with only integral fields.
-unsafe impl FromBytes for FspResponse {}
+// SAFETY: FspResponseHeader is a packed C struct with only integral fields.
+unsafe impl FromBytes for FspResponseHeader {}
 
 /// Trait implemented by types representing a message to send to FSP.
 ///
@@ -273,10 +273,11 @@ impl<'a> Fsp<'a> {
             dev_err!(dev, "FSP response error: {:?}\n", e);
         })?;
 
-        let (response, _) = FspResponse::from_bytes_prefix(&response_buf[..]).ok_or_else(|| {
-            dev_err!(dev, "FSP response too small: {}\n", response_buf.len());
-            EIO
-        })?;
+        let (response, _) =
+            FspResponseHeader::from_bytes_prefix(&response_buf[..]).ok_or_else(|| {
+                dev_err!(dev, "FSP response too small: {}\n", response_buf.len());
+                EIO
+            })?;
 
         let mctp_header = response.header.mctp_header;
         let nvdm_header = response.header.nvdm_header;
