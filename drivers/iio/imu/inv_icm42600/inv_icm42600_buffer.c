@@ -189,7 +189,7 @@ static unsigned int inv_icm42600_wm_truncate(unsigned int watermark,
  * smallest latency but this is not as simple as choosing the smallest watermark
  * value. Latency depends on watermark and ODR. It requires several steps:
  * 1) compute gyro and accel latencies and choose the smallest value.
- * 2) adapt the choosen latency so that it is a multiple of both gyro and accel
+ * 2) adapt the chosen latency so that it is a multiple of both gyro and accel
  *    ones. Otherwise it is possible that you don't meet a requirement. (for
  *    example with gyro @100Hz wm 4 and accel @100Hz with wm 6, choosing the
  *    value of 4 will not meet accel latency requirement because 6 is not a

@@ -111,7 +111,7 @@
 
 #define ADIS16480_REG_SERIAL_NUM		ADIS16480_REG(0x04, 0x20)
 
-/* Each filter coefficent bank spans two pages */
+/* Each filter coefficient bank spans two pages */
 #define ADIS16480_FIR_COEF(page) (x < 60 ? ADIS16480_REG(page, (x) + 8) : \
 		ADIS16480_REG((page) + 1, (x) - 60 + 8))
 #define ADIS16480_FIR_COEF_A(x)			ADIS16480_FIR_COEF(0x05, (x))
@@ -1468,7 +1468,7 @@ static irqreturn_t adis16480_trigger_handler(int irq, void *p)
 			 * We need to perform the padding to have the buffer
 			 * elements naturally aligned in case there are any
 			 * 32-bit storage size channels enabled which are added
-			 * in the buffer after the temprature data. In case
+			 * in the buffer after the temperature data. In case
 			 * there is no data being added after the temperature
 			 * data, the padding is harmless.
 			 */
