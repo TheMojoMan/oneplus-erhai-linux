@@ -11,6 +11,34 @@
 #include "../sched.h"
 #include "types.h"
 
+#include <trace/events/sched_ext.h>
+
+/**
+ * scx_add_event - Increase an event counter for 'name' by 'cnt'
+ * @sch: scx_sched to account events for
+ * @name: an event name defined in struct scx_event_stats
+ * @cnt: the number of the event occurred
+ *
+ * This can be used when preemption is not disabled.
+ */
+#define scx_add_event(sch, name, cnt) do {					\
+	this_cpu_add((sch)->pcpu->event_stats.name, (cnt));			\
+	trace_sched_ext_event(#name, (cnt));					\
+} while(0)
+
+/**
+ * __scx_add_event - Increase an event counter for 'name' by 'cnt'
+ * @sch: scx_sched to account events for
+ * @name: an event name defined in struct scx_event_stats
+ * @cnt: the number of the event occurred
+ *
+ * This should be used only when preemption is disabled.
+ */
+#define __scx_add_event(sch, name, cnt) do {					\
+	__this_cpu_add((sch)->pcpu->event_stats.name, (cnt));			\
+	trace_sched_ext_event(#name, cnt);					\
+} while(0)
+
 #define SCX_OP_IDX(op)		(offsetof(struct sched_ext_ops, op) / sizeof(void (*)(void)))
 #define SCX_MOFF_IDX(moff)	((moff) / sizeof(void (*)(void)))
 
