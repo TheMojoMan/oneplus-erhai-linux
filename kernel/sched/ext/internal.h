@@ -1535,6 +1535,41 @@ enum scx_ops_state {
 #define SCX_OPSS_STATE_MASK	((1LU << SCX_OPSS_QSEQ_SHIFT) - 1)
 #define SCX_OPSS_QSEQ_MASK	(~SCX_OPSS_STATE_MASK)
 
+/*
+ * SCX task iterator.
+ */
+struct scx_task_iter {
+	struct sched_ext_entity		cursor;
+	struct task_struct		*locked_task;
+	struct rq			*rq;
+	struct rq_flags			rf;
+	u32				cnt;
+	bool				list_locked;
+#ifdef CONFIG_EXT_SUB_SCHED
+	struct cgroup			*cgrp;
+	struct cgroup_subsys_state	*css_pos;
+	struct css_task_iter		css_iter;
+#endif
+};
+
+/*
+ * scx_enable() is offloaded to a dedicated system-wide RT kthread to avoid
+ * starvation. During the READY -> ENABLED task switching loop, the calling
+ * thread's sched_class gets switched from fair to ext. As fair has higher
+ * priority than ext, the calling thread can be indefinitely starved under
+ * fair-class saturation, leading to a system hang.
+ */
+struct scx_enable_cmd {
+	struct kthread_work	work;
+	union {
+		struct sched_ext_ops		*ops;
+		struct sched_ext_ops_cid	*ops_cid;
+	};
+	bool			is_cid_type;
+	struct bpf_map		*arena_map;	/* arena ref to transfer to sch */
+	int			ret;
+};
+
 extern struct scx_sched __rcu *scx_root;
 DECLARE_PER_CPU(struct rq *, scx_locked_rq_state);
 
@@ -1554,6 +1589,51 @@ __printf(5, 0) bool scx_vexit(struct scx_sched *sch, enum scx_exit_kind kind,
 			      va_list args);
 __printf(5, 6) bool __scx_exit(struct scx_sched *sch, enum scx_exit_kind kind,
 			       s64 exit_code, s32 exit_cpu, const char *fmt, ...);
+
+u32 scx_get_task_state(const struct task_struct *p);
+void scx_set_task_state(struct task_struct *p, u32 state);
+void scx_task_iter_start(struct scx_task_iter *iter, struct cgroup *cgrp);
+void scx_task_iter_unlock(struct scx_task_iter *iter);
+void scx_task_iter_stop(struct scx_task_iter *iter);
+struct task_struct *scx_task_iter_next_locked(struct scx_task_iter *iter);
+bool scx_consume_dispatch_q(struct scx_sched *sch, struct rq *rq,
+			    struct scx_dispatch_q *dsq, u64 enq_flags);
+bool scx_consume_global_dsq(struct scx_sched *sch, struct rq *rq);
+bool scx_rq_online(struct rq *rq);
+void scx_flush_dispatch_buf(struct scx_sched *sch, struct rq *rq);
+void scx_kick_cpu(struct scx_sched *sch, s32 cpu, u64 flags);
+void schedule_dsq_reenq(struct scx_sched *sch, struct scx_dispatch_q *dsq,
+			u64 reenq_flags, struct rq *locked_rq);
+int __scx_init_task(struct scx_sched *sch, struct task_struct *p, bool fork);
+void scx_enable_task(struct scx_sched *sch, struct task_struct *p);
+void __scx_disable_and_exit_task(struct scx_sched *sch, struct task_struct *p);
+void scx_sub_init_cancel_task(struct scx_sched *sch, struct task_struct *p);
+void scx_disable_and_exit_task(struct scx_sched *sch, struct task_struct *p);
+#if defined(CONFIG_EXT_GROUP_SCHED) || defined(CONFIG_EXT_SUB_SCHED)
+void scx_cgroup_lock(void);
+void scx_cgroup_unlock(void);
+#endif
+s32 scx_set_cmask_scratch_alloc(struct scx_sched *sch);
+void scx_disable_bypass_dsp(struct scx_sched *sch);
+void scx_bypass(struct scx_sched *sch, bool bypass);
+s32 scx_link_sched(struct scx_sched *sch);
+void scx_unlink_sched(struct scx_sched *sch);
+void scx_disable_dump(struct scx_sched *sch);
+void scx_log_sched_disable(struct scx_sched *sch);
+void scx_flush_disable_work(struct scx_sched *sch);
+struct scx_sched *scx_alloc_and_add_sched(struct scx_enable_cmd *cmd,
+					  struct cgroup *cgrp,
+					  struct scx_sched *parent);
+int scx_validate_ops(struct scx_sched *sch, const struct sched_ext_ops *ops);
+
+extern raw_spinlock_t scx_sched_lock;
+extern struct mutex scx_enable_mutex;
+extern struct percpu_rw_semaphore scx_fork_rwsem;
+#ifdef CONFIG_EXT_SUB_SCHED
+extern const struct rhashtable_params scx_sched_hash_params;
+extern struct rhashtable scx_sched_hash;
+extern struct scx_sched *scx_enabling_sub_sched;
+#endif
 
 #define scx_exit(sch, kind, exit_code, fmt, args...)				\
 	__scx_exit(sch, kind, exit_code, raw_smp_processor_id(), fmt, ##args)
