@@ -19,6 +19,87 @@
 #include "intel_dp.h"
 #include "intel_dp_link_caps.h"
 
+/**
+ * DOC: DisplayPort link capabilities
+ *
+ * The Intel DP link caps API tracks the supported and allowed
+ * DisplayPort link configurations for a DP encoder and its attached
+ * connectors, and provides helpers to iterate over the allowed
+ * configurations and constrain them by filtering, disabling, or
+ * limiting them to maximum link parameters.
+ *
+ * Locking
+ * -------
+ *
+ * All accesses to this API must be serialized. The only exception
+ * is intel_dp_link_caps_get_max_limits(), which allow lockless
+ * lookup. Such lookups may observe an out-of-sync &struct
+ * intel_dp_link_config tuple, i.e. a rate from one state and a lane
+ * count from another.
+ *
+ * The Intel i915/xe drivers ensure the above serialization by holding
+ * &drm_mode_config.connection_mutex and, while holding the lock,
+ * waiting for any pending asynchronous atomic commits. This also allows
+ * use of the API from the tails of asynchronous atomic commits, which
+ * cannot hold the lock.
+ *
+ * Iterating and restricting link configurations
+ * ---------------------------------------------
+ *
+ * The link configuration iterators can iterate the ``allowed
+ * configurations`` during modeset configuration selection or link
+ * training fallback handling in a configurable order.
+ *
+ * The iteration order can depend on connector type (eDP, DP SST,
+ * DP MST) and modeset-specific conditions or driver policies, such
+ * as DSC vs. non-DSC modes, power saving vs. better user experience,
+ * or policy changes after a link training failure.
+ *
+ * The configurations exposed via the iterators can be additionally
+ * constrained in the following ways:
+ *
+ * - Filtered for a given modeset based on modeset-specific conditions.
+ *   Examples for such conditions include driver policies preferring
+ *   power saving or better user experience, post-link training failure
+ *   preference changes, or sink automated test requests limiting the
+ *   usable configurations.
+ *
+ * - Disabled permanently for the connected sink. Examples of reasons
+ *   to disable a configuration include a link training failure for a
+ *   given configuration or a driver workaround preventing the use of
+ *   a particular configuration.
+ *
+ * - Limited via a maximum link rate and lane count. For example, after
+ *   a link training failure, subsequent modesets may be limited to
+ *   configurations at or below the failed parameters.
+ *
+ *   This mechanism exists for backward compatibility only. Eventually,
+ *   it will be removed in favor of relying solely on individually
+ *   disabled configurations, as described above.
+ *
+ * Terminology
+ * -----------
+ *
+ * ``Common link capabilities`` (or ``common caps``) refer to the link
+ * rates and maximum lane count supported by both the source and the
+ * sink, i.e. the intersection of their respective capabilities.
+ *
+ * ``Supported configurations`` are all configurations defined by the
+ * ``Common link capabilities``' link rates and maximum lane count.
+ *
+ * ``Disabled configurations`` are ``Supported configurations`` disabled
+ * via this API.
+ *
+ * ``Enabled configurations`` are ``Supported configurations`` that are
+ * not disabled.
+ *
+ * ``Forced configurations`` are ``Enabled configurations`` forced via
+ * forced link parameter debugfs entries.
+ *
+ * ``Allowed configurations`` are the ``Enabled configurations``, or if
+ * forcing is in effect the ``Forced configurations``, constrained by a
+ * maximum rate and lane count set via the API.
+ */
 struct intel_dp_link_caps {
 	struct intel_dp *dp;
 
