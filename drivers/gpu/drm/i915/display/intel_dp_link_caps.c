@@ -249,7 +249,7 @@ static int intel_dp_common_len_rate_limit(struct intel_dp_link_caps *link_caps,
 				       link_caps->num_rates, max_rate);
 }
 
-int intel_dp_common_rate(struct intel_dp_link_caps *link_caps, int index)
+static int intel_dp_common_rate(struct intel_dp_link_caps *link_caps, int index)
 {
 	struct intel_display *display = to_intel_display(link_caps->dp);
 
@@ -260,15 +260,8 @@ int intel_dp_common_rate(struct intel_dp_link_caps *link_caps, int index)
 	return link_caps->rates[index];
 }
 
-int intel_dp_link_caps_common_rate_idx(struct intel_dp_link_caps *link_caps, int rate)
-{
-	return intel_dp_rate_index(link_caps->rates,
-				   link_caps->num_rates,
-				   rate);
-}
-
 /* Theoretical max between source and sink */
-int intel_dp_max_common_rate(struct intel_dp_link_caps *link_caps)
+static int intel_dp_max_common_rate(struct intel_dp_link_caps *link_caps)
 {
 	return intel_dp_common_rate(link_caps, link_caps->num_rates - 1);
 }
@@ -868,40 +861,6 @@ bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
 		reset_max_link_limits_reenable_all(link_caps);
 
 	return link_params_changed;
-}
-
-void intel_dp_link_config_get(struct intel_dp_link_caps *link_caps,
-			      int idx, int *link_rate, int *lane_count)
-{
-	struct intel_display *display = to_intel_display(link_caps->dp);
-	struct intel_dp_link_config config;
-
-	if (drm_WARN_ON(display->drm, idx < 0 || idx >= link_caps->num_configs))
-		idx = 0;
-
-	to_intel_dp_link_config(link_caps, idx, &config);
-
-	*link_rate = config.rate;
-	*lane_count = config.lane_count;
-}
-
-int intel_dp_link_config_index(struct intel_dp_link_caps *link_caps,
-			       int link_rate, int lane_count)
-{
-	int link_rate_idx = intel_dp_rate_index(link_caps->rates, link_caps->num_rates,
-						link_rate);
-	int lane_count_exp = ilog2(lane_count);
-	int i;
-
-	for (i = 0; i < link_caps->num_configs; i++) {
-		const struct intel_dp_link_config_entry *lce = &link_caps->configs[i];
-
-		if (lce->lane_count_exp == lane_count_exp &&
-		    lce->link_rate_idx == link_rate_idx)
-			return i;
-	}
-
-	return -1;
 }
 
 /**

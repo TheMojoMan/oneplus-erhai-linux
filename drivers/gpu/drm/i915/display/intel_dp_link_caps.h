@@ -119,19 +119,10 @@ intel_dp_link_caps_connector_compute_order(struct intel_connector *connector);
 struct intel_dp_link_caps_order
 intel_dp_link_caps_connector_fallback_order(bool is_mst);
 
-int intel_dp_common_rate(struct intel_dp_link_caps *link_caps, int index);
-int intel_dp_link_caps_common_rate_idx(struct intel_dp_link_caps *link_caps, int rate);
-int intel_dp_max_common_rate(struct intel_dp_link_caps *link_caps);
-
 void intel_dp_link_caps_print_common_rates(struct intel_dp_link_caps *link_caps);
 
 void intel_dp_link_caps_get_forced_params(struct intel_dp_link_caps *link_caps,
 					  struct intel_dp_link_config *forced_params);
-
-int intel_dp_link_config_index(struct intel_dp_link_caps *link_caps,
-			       int link_rate, int lane_count);
-void intel_dp_link_config_get(struct intel_dp_link_caps *link_caps,
-			      int idx, int *link_rate, int *lane_count);
 
 bool intel_dp_link_caps_filter_add(struct intel_dp_link_caps *link_caps,
 				   struct intel_dp_link_caps_filter *filter,

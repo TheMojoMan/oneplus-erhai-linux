@@ -1846,115 +1846,46 @@ static bool intel_dp_can_link_train_fallback_for_edp(struct intel_dp *intel_dp,
 	return true;
 }
 
-static bool reduce_link_params_in_bw_order(struct intel_dp *intel_dp,
-					   const struct intel_crtc_state *crtc_state,
-					   int *new_link_rate, int *new_lane_count)
-{
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
-	struct intel_dp_link_config forced_params;
-	int link_rate;
-	int lane_count;
-	int i;
-
-	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
-
-	i = intel_dp_link_config_index(intel_dp->link.caps,
-				       crtc_state->port_clock, crtc_state->lane_count);
-	for (i--; i >= 0; i--) {
-		intel_dp_link_config_get(intel_dp->link.caps, i, &link_rate, &lane_count);
-
-		if ((forced_params.rate &&
-		     forced_params.rate != link_rate) ||
-		    (forced_params.lane_count &&
-		     forced_params.lane_count != lane_count))
-			continue;
-
-		break;
-	}
-
-	if (i < 0)
-		return false;
-
-	*new_link_rate = link_rate;
-	*new_lane_count = lane_count;
-
-	return true;
-}
-
-static int reduce_link_rate(struct intel_dp *intel_dp, int current_rate)
-{
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
-	struct intel_dp_link_config forced_params;
-	int rate_index;
-	int new_rate;
-
-	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
-	if (forced_params.rate)
-		return -1;
-
-	rate_index = intel_dp_link_caps_common_rate_idx(link_caps,
-							current_rate);
-
-	if (rate_index <= 0)
-		return -1;
-
-	new_rate = intel_dp_common_rate(link_caps, rate_index - 1);
-
-	/* TODO: Make switching from UHBR to non-UHBR rates work. */
-	if (drm_dp_is_uhbr_rate(current_rate) != drm_dp_is_uhbr_rate(new_rate))
-		return -1;
-
-	return new_rate;
-}
-
-static int reduce_lane_count(struct intel_dp *intel_dp, int current_lane_count)
-{
-	struct intel_dp_link_config forced_params;
-
-	intel_dp_link_caps_get_forced_params(intel_dp->link.caps, &forced_params);
-	if (forced_params.lane_count)
-		return -1;
-
-	if (current_lane_count == 1)
-		return -1;
-
-	return current_lane_count >> 1;
-}
-
-static bool reduce_link_params_in_rate_lane_order(struct intel_dp *intel_dp,
-						  const struct intel_crtc_state *crtc_state,
-						  int *new_link_rate, int *new_lane_count)
-{
-	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
-	int link_rate;
-	int lane_count;
-
-	lane_count = crtc_state->lane_count;
-	link_rate = reduce_link_rate(intel_dp, crtc_state->port_clock);
-	if (link_rate < 0) {
-		lane_count = reduce_lane_count(intel_dp, crtc_state->lane_count);
-		link_rate = intel_dp_max_common_rate(link_caps);
-	}
-
-	if (lane_count < 0)
-		return false;
-
-	*new_link_rate = link_rate;
-	*new_lane_count = lane_count;
-
-	return true;
-}
-
 static bool reduce_link_params(struct intel_dp *intel_dp, const struct intel_crtc_state *crtc_state,
 			       int *new_link_rate, int *new_lane_count)
 {
-	/* TODO: Use the same fallback logic on SST as on MST. */
-	if (intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST))
-		return reduce_link_params_in_bw_order(intel_dp, crtc_state,
-						      new_link_rate, new_lane_count);
-	else
-		return reduce_link_params_in_rate_lane_order(intel_dp, crtc_state,
-							     new_link_rate, new_lane_count);
+	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
+	bool is_mst = intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST);
+	struct intel_dp_link_caps_order order =
+		intel_dp_link_caps_connector_fallback_order(is_mst);
+	struct intel_dp_link_config old_config = {
+		.rate = crtc_state->port_clock,
+		.lane_count = crtc_state->lane_count,
+	};
+	struct intel_dp_link_caps_iter iter;
+	struct intel_dp_link_config config;
+	bool old_found = false;
+	bool new_found = false;
+
+	intel_dp_link_caps_iter_start(&iter, link_caps, order, INTEL_DP_LINK_CAPS_FILTER_ALL);
+	for_each_dp_link_config(&iter, &config) {
+		if (!old_found) {
+			if (config.rate == old_config.rate &&
+			    config.lane_count == old_config.lane_count)
+				old_found = true;
+
+			continue;
+		}
+
+		if (!is_mst &&
+		    drm_dp_is_uhbr_rate(config.rate) !=
+		    drm_dp_is_uhbr_rate(old_config.rate))
+			continue;
+
+		*new_link_rate = config.rate;
+		*new_lane_count = config.lane_count;
+		new_found = true;
+
+		break;
+	}
+	intel_dp_link_caps_iter_end(&iter);
+
+	return new_found;
 }
 
 static int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
