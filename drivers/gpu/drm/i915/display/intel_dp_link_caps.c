@@ -123,6 +123,13 @@ struct intel_dp_link_caps {
 	} configs[INTEL_DP_MAX_LINK_CONFIGS];
 
 	/*
+	 * Indices to intel_dp_link_caps::configs[] in rate/lane count,
+	 * lane_count/rate order.
+	 */
+	u8 rate_lane_map[INTEL_DP_MAX_LINK_CONFIGS];
+	u8 lane_rate_map[INTEL_DP_MAX_LINK_CONFIGS];
+
+	/*
 	 * Forced parameters requested via debugfs. Remains set across sink
 	 * disconnects.
 	 */
@@ -350,6 +357,34 @@ static int link_config_cmp_by_bw(const void *a, const void *b, const void *p)
 	       intel_dp_link_config_rate(link_caps, lce_b);
 }
 
+static int link_config_cmp_by_rate_lane(const void *a, const void *b, const void *p)
+{
+	const struct intel_dp_link_caps *link_caps = p;
+	u8 *lce_a_idx = (u8 *)a;
+	u8 *lce_b_idx = (u8 *)b;
+	const struct intel_dp_link_config_entry *lce_a = &link_caps->configs[*lce_a_idx];
+	const struct intel_dp_link_config_entry *lce_b = &link_caps->configs[*lce_b_idx];
+
+	if (lce_a->link_rate_idx != lce_b->link_rate_idx)
+		return lce_a->link_rate_idx - lce_b->link_rate_idx;
+
+	return lce_a->lane_count_exp - lce_b->lane_count_exp;
+}
+
+static int link_config_cmp_by_lane_rate(const void *a, const void *b, const void *p)
+{
+	const struct intel_dp_link_caps *link_caps = p;
+	u8 *lce_a_idx = (u8 *)a;
+	u8 *lce_b_idx = (u8 *)b;
+	const struct intel_dp_link_config_entry *lce_a = &link_caps->configs[*lce_a_idx];
+	const struct intel_dp_link_config_entry *lce_b = &link_caps->configs[*lce_b_idx];
+
+	if (lce_a->lane_count_exp != lce_b->lane_count_exp)
+		return lce_a->lane_count_exp - lce_b->lane_count_exp;
+
+	return lce_a->link_rate_idx - lce_b->link_rate_idx;
+}
+
 /* Return %true if the supported link parameters have changed. */
 bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
 			       const int *rates, int num_rates, int max_lane_count)
@@ -403,6 +438,21 @@ bool intel_dp_link_caps_update(struct intel_dp_link_caps *link_caps,
 	       sizeof(link_caps->configs[0]),
 	       link_config_cmp_by_bw, NULL,
 	       intel_dp);
+
+	for (i = 0; i < link_caps->num_configs; i++) {
+		link_caps->rate_lane_map[i] = i;
+		link_caps->lane_rate_map[i] = i;
+	}
+
+	sort_r(link_caps->rate_lane_map, link_caps->num_configs,
+	       sizeof(link_caps->rate_lane_map[0]),
+	       link_config_cmp_by_rate_lane, NULL,
+	       link_caps);
+
+	sort_r(link_caps->lane_rate_map, link_caps->num_configs,
+	       sizeof(link_caps->lane_rate_map[0]),
+	       link_config_cmp_by_lane_rate, NULL,
+	       link_caps);
 
 	return link_params_changed;
 }
