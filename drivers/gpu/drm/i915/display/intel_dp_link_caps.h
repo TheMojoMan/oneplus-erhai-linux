@@ -146,6 +146,9 @@ bool intel_dp_link_caps_get_max_config(struct intel_dp_link_caps *link_caps,
 				       struct intel_dp_link_caps_filter filter,
 				       struct intel_dp_link_config *max_config);
 
+void intel_dp_link_caps_get_max_bw_config(struct intel_dp_link_caps *link_caps,
+					  struct intel_dp_link_config *max_config);
+
 void intel_dp_link_caps_get_max_limits(struct intel_dp_link_caps *link_caps,
 				       struct intel_dp_link_config *max_link_limits);
 bool intel_dp_link_caps_set_max_limits(struct intel_dp_link_caps *link_caps,

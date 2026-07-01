@@ -550,6 +550,23 @@ bool intel_dp_link_caps_get_max_config(struct intel_dp_link_caps *link_caps,
 	return true;
 }
 
+/**
+ * intel_dp_link_caps_get_max_bw_config - get maximum BW link configuration
+ * @link_caps: link capabilities state
+ * @max_config: returned maximum link configuration
+ *
+ * Return the maximum BW link configuration among the currently
+ * allowed configurations.
+ */
+void intel_dp_link_caps_get_max_bw_config(struct intel_dp_link_caps *link_caps,
+					  struct intel_dp_link_config *max_config)
+{
+	if (!intel_dp_link_caps_get_max_config(link_caps,
+					       bw_desc_config_order().key, INTEL_DP_LINK_CAPS_FILTER_ALL,
+					       max_config))
+		*max_config = INTEL_DP_LINK_CONFIG_NULL;
+}
+
 static int find_config_idx(struct intel_dp_link_caps *link_caps,
 			   struct intel_dp_link_caps_filter filter,
 			   const struct intel_dp_link_config *link_config)
