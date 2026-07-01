@@ -2135,6 +2135,7 @@ int cmd_kvm(int argc, const char **argv)
 	const char *const kvm_subcommands[] = { "top", "record", "report", "diff",
 						"buildid-list", "stat", NULL };
 	const char *kvm_usage[] = { NULL, NULL };
+	int ret;
 
 	exclude_GH_default = true;
 	perf_host  = 0;
@@ -2152,18 +2153,18 @@ int cmd_kvm(int argc, const char **argv)
 		file_name = get_filename_for_perf_kvm();
 
 	if (strlen(argv[0]) > 2 && strstarts("record", argv[0]))
-		return __cmd_record(file_name, argc, argv);
+		ret = __cmd_record(file_name, argc, argv);
 	else if (strlen(argv[0]) > 2 && strstarts("report", argv[0]))
-		return __cmd_report(file_name, argc, argv);
+		ret = __cmd_report(file_name, argc, argv);
 	else if (strlen(argv[0]) > 2 && strstarts("diff", argv[0]))
-		return cmd_diff(argc, argv);
+		ret = cmd_diff(argc, argv);
 	else if (!strcmp(argv[0], "top"))
-		return __cmd_top(argc, argv);
+		ret = __cmd_top(argc, argv);
 	else if (strlen(argv[0]) > 2 && strstarts("buildid-list", argv[0]))
-		return __cmd_buildid_list(file_name, argc, argv);
+		ret = __cmd_buildid_list(file_name, argc, argv);
 #if defined(HAVE_LIBTRACEEVENT)
 	else if (strlen(argv[0]) > 2 && strstarts("stat", argv[0]))
-		return kvm_cmd_stat(file_name, argc, argv);
+		ret = kvm_cmd_stat(file_name, argc, argv);
 #endif
 	else
 		usage_with_options(kvm_usage, kvm_options);
@@ -2171,5 +2172,5 @@ int cmd_kvm(int argc, const char **argv)
 	/* free usage string allocated by parse_options_subcommand */
 	free((void *)kvm_usage[0]);
 
-	return 0;
+	return ret;
 }
