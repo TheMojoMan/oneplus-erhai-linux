@@ -290,7 +290,7 @@ void intel_dp_link_caps_print_common_rates(struct intel_dp_link_caps *link_caps)
 	drm_dbg_kms(display->drm, "common rates: %s\n", seq_buf_str(&s));
 }
 
-int intel_dp_link_caps_max_common_lane_count(struct intel_dp_link_caps *link_caps)
+static int intel_dp_link_caps_max_common_lane_count(struct intel_dp_link_caps *link_caps)
 {
 	return link_caps->max_lane_count;
 }
