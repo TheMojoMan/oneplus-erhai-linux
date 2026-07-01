@@ -506,29 +506,23 @@ static int tiocspgrp(struct tty_struct *tty, struct tty_struct *real_tty, pid_t 
 	if (pgrp_nr < 0)
 		return -EINVAL;
 
-	spin_lock_irq(&real_tty->ctrl.lock);
+	guard(spinlock_irq)(&real_tty->ctrl.lock);
 	if (!current->signal->tty ||
 	    (current->signal->tty != real_tty) ||
-	    (real_tty->ctrl.session != task_session(current))) {
-		retval = -ENOTTY;
-		goto out_unlock_ctrl;
-	}
-	rcu_read_lock();
+	    (real_tty->ctrl.session != task_session(current)))
+		return -ENOTTY;
+
+	guard(rcu)();
 	pgrp = find_vpid(pgrp_nr);
-	retval = -ESRCH;
 	if (!pgrp)
-		goto out_unlock;
-	retval = -EPERM;
+		return -ESRCH;
 	if (session_of_pgrp(pgrp) != task_session(current))
-		goto out_unlock;
-	retval = 0;
+		return -EPERM;
+
 	put_pid(real_tty->ctrl.pgrp);
 	real_tty->ctrl.pgrp = get_pid(pgrp);
-out_unlock:
-	rcu_read_unlock();
-out_unlock_ctrl:
-	spin_unlock_irq(&real_tty->ctrl.lock);
-	return retval;
+
+	return 0;
 }
 
 /**
