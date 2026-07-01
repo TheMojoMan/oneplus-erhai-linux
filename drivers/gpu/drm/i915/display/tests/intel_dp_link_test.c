@@ -1031,6 +1031,317 @@ static void intel_dp_link_caps_test_update_params_expand_disable_random(struct k
 		test_update_params_expand_random(test, true);
 }
 
+/*
+ * TEST: Fallback sequence
+ * -----------------------
+ * Verify the eDP fallback logic to set the maximum supported configuration
+ * as a preference.
+ *
+ * For DP SST and MST verify fallback selection from the connector's
+ * maximum configuration and iteration of the resulting allowed
+ * configurations.
+ */
+static void intel_dp_link_test_fallback_for_edp(struct kunit *test)
+{
+	struct test_ctx *ctx = test->priv;
+	struct intel_dp_link_caps *link_caps = ctx->dev.dig_port.dp.link.caps;
+	struct test_config_table expected_table =
+		INIT_STANDARD_TABLE(test, LINK_TEST_NUM_STANDARD_RATES,
+					  LINK_TEST_MAX_LANE_COUNT);
+	struct intel_digital_port *dig_port = &ctx->dev.dig_port;
+	const struct intel_dp_link_training_test_ops *lt_ops =
+		ctx->link_training_ops;
+	const struct intel_dp_link_caps_test_ops *lc_ops =
+		ctx->link_caps_ops;
+	struct intel_dp_link_config min_config = {
+		.rate = expected_table.rates.entries[0],
+		.lane_count = 1,
+	};
+	struct intel_dp_link_config max_config = {
+		.rate = expected_table.rates.entries[expected_table.rates.size - 1],
+		.lane_count = LINK_TEST_MAX_LANE_COUNT,
+	};
+	struct intel_dp_link_caps_order order;
+	struct intel_dp_link_config iter_config;
+	struct intel_dp_link_caps_iter iter;
+	int fallback_err;
+
+	dig_port->base.type = INTEL_OUTPUT_EDP;
+	ctx->dev.dig_port.dp.use_max_params = false;
+
+	update_link_caps_and_verify(&expected_table, link_caps, true);
+
+	order = lc_ops->connector_compute_order(&ctx->dev.connector);
+
+	lc_ops->iter_start(&iter, link_caps, order, INTEL_DP_LINK_CAPS_FILTER_ALL);
+	for_each_dp_link_config(&iter, &iter_config)
+		break;
+	lc_ops->iter_end(&iter);
+
+	KUNIT_EXPECT_FALSE(test, ctx->dev.dig_port.dp.use_max_params);
+	KUNIT_EXPECT_TRUE(test, link_configs_match(&iter_config, &min_config));
+
+	ctx->dev.crtc_state.output_types = BIT(dig_port->base.type);
+	ctx->dev.crtc_state.port_clock = min_config.rate;
+	ctx->dev.crtc_state.lane_count = min_config.lane_count;
+
+	fallback_err = lt_ops->get_fallback_values(&ctx->dev.dig_port.dp, &ctx->dev.crtc_state);
+	KUNIT_EXPECT_EQ(test, fallback_err, 0);
+
+	/* The fallback should've changed the order. */
+	order = lc_ops->connector_compute_order(&ctx->dev.connector);
+
+	lc_ops->iter_start(&iter, link_caps, order, INTEL_DP_LINK_CAPS_FILTER_ALL);
+	for_each_dp_link_config(&iter, &iter_config)
+		break;
+	lc_ops->iter_end(&iter);
+
+	KUNIT_EXPECT_TRUE(test, ctx->dev.dig_port.dp.use_max_params);
+	KUNIT_EXPECT_TRUE(test, link_configs_match(&iter_config, &max_config));
+}
+
+static bool test_fallback_from_target(struct test_config_table *expected_table,
+				      enum intel_output_type output_type, int max_rate,
+				      const struct intel_dp_link_config *expected_target_config,
+				      const struct intel_dp_link_config *expected_fallback_config)
+{
+	struct kunit *test = expected_table->test;
+	struct test_ctx *ctx = test->priv;
+	struct intel_dp_link_caps *link_caps = ctx->dev.dig_port.dp.link.caps;
+	struct intel_dp_link_config iter_config;
+	const struct intel_dp_link_training_test_ops *lt_ops =
+		ctx->link_training_ops;
+	const struct intel_dp_link_caps_test_ops *lc_ops =
+		ctx->link_caps_ops;
+	/* Modify default order direction for max config lookup. */
+	struct intel_dp_link_caps_order fallback_order =
+		lc_ops->connector_fallback_order(ctx->dev.connector.mst.dp);
+	struct intel_dp_link_caps_iter iter;
+	int expected_fallback_err = 0;
+	int fallback_err;
+
+	/* Get the max connector config, optionally filtered to the max_rate limit. */
+	lc_ops->iter_start(&iter, link_caps, fallback_order, INTEL_DP_LINK_CAPS_FILTER_ALL);
+	for_each_dp_link_config(&iter, &iter_config)
+		if (max_rate == 0 || iter_config.rate <= max_rate)
+			break;
+	lc_ops->iter_end(&iter);
+
+	KUNIT_EXPECT_TRUE(test, link_configs_match(&iter_config,
+						   expected_target_config));
+	KUNIT_EXPECT_FALSE(test, link_configs_match(&iter_config,
+						    &INTEL_DP_LINK_CONFIG_NULL));
+
+	ctx->dev.crtc_state.output_types = BIT(output_type);
+	ctx->dev.crtc_state.port_clock = expected_target_config->rate;
+	ctx->dev.crtc_state.lane_count = expected_target_config->lane_count;
+
+	if (link_configs_match(expected_fallback_config, &INTEL_DP_LINK_CONFIG_NULL))
+		expected_fallback_err = -1;
+
+	fallback_err = lt_ops->get_fallback_values(&ctx->dev.dig_port.dp, &ctx->dev.crtc_state);
+	KUNIT_EXPECT_EQ(test, fallback_err, expected_fallback_err);
+
+	if (!fallback_err) {
+		/*
+		 * NOTE: This test does not verify any implied fallback
+		 * target selection.
+		 *
+		 * The current driver behavior may still select a fallback
+		 * configuration indirectly via max_limits, but that is an
+		 * implementation artifact rather than part of the intended
+		 * fallback API behavior, and is therefore not verified here.
+		 *
+		 * Instead, the effect of the fallback logic is verified by
+		 * checking that the failed target configuration is disabled.
+		 * Selecting the next target configuration from the remaining
+		 * allowed configurations belongs to the modeset link target
+		 * selection logic.
+		 */
+		add_config(test, &expected_table->disabled_configs,
+			   expected_target_config);
+	}
+
+	verify_link_caps(expected_table, link_caps);
+
+	return !fallback_err;
+}
+
+static const struct link_config_set *
+get_target_configs_for_output_type(struct kunit *test,
+				   enum intel_output_type output_type)
+{
+	switch (output_type) {
+	case INTEL_OUTPUT_DDI:
+	case INTEL_OUTPUT_DP:
+	case INTEL_OUTPUT_EDP:
+		return &standard_dp_link_configs[INTEL_DP_LINK_CAPS_ORDER_KEY_RATE_LANE];
+	case INTEL_OUTPUT_DP_MST:
+		return &standard_dp_link_configs[INTEL_DP_LINK_CAPS_ORDER_KEY_BW];
+	default:
+		KUNIT_FAIL_AND_ABORT(test, "Missing output type: %d", output_type);
+	}
+}
+
+static const struct link_config_set *
+get_fallback_configs_for_output_type(struct kunit *test,
+				     enum intel_output_type output_type)
+{
+	switch (output_type) {
+	case INTEL_OUTPUT_DDI:
+	case INTEL_OUTPUT_DP:
+	case INTEL_OUTPUT_EDP:
+		return &standard_dp_link_configs[INTEL_DP_LINK_CAPS_ORDER_KEY_LANE_RATE];
+	case INTEL_OUTPUT_DP_MST:
+		return &standard_dp_link_configs[INTEL_DP_LINK_CAPS_ORDER_KEY_BW];
+	default:
+		KUNIT_FAIL_AND_ABORT(test, "Missing output type: %d", output_type);
+	}
+}
+
+static bool output_type_allows_uhbr_fallback(enum intel_output_type output_type)
+{
+	return output_type == INTEL_OUTPUT_DP_MST;
+}
+
+static void assert_config_is_supported(const struct test_config_table *expected_table,
+				       const struct intel_dp_link_config *config)
+{
+	struct kunit *test = expected_table->test;
+
+	KUNIT_ASSERT_TRUE(test, has_rate(&expected_table->rates, config->rate));
+	KUNIT_ASSERT_LE(test, config->lane_count, expected_table->max_lane_count);
+}
+
+static bool get_fallback_config(const struct test_config_table *expected_table,
+				enum intel_output_type output_type,
+				const struct intel_dp_link_config *target_config,
+				struct intel_dp_link_config *fallback_config)
+{
+	struct kunit *test = expected_table->test;
+	const struct link_config_set *config_set =
+		get_fallback_configs_for_output_type(test, output_type);
+	int i;
+
+	i = lookup_config(config_set, target_config);
+	KUNIT_ASSERT_GE(test, i, 0);
+
+	for (i--; i >= 0; i--) {
+		const struct intel_dp_link_config *config =
+			&config_set->entries[i];
+
+		if (output_type_allows_uhbr_fallback(output_type) ||
+		    (drm_dp_is_uhbr_rate(target_config->rate) ==
+		     drm_dp_is_uhbr_rate(config->rate))) {
+			assert_config_is_supported(expected_table, config);
+			*fallback_config = *config;
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static bool get_target_config(const struct test_config_table *expected_table,
+			      enum intel_output_type output_type,
+			      int max_rate,
+			      struct intel_dp_link_config *target)
+{
+	struct kunit *test = expected_table->test;
+	const struct link_config_set *config_set =
+		get_target_configs_for_output_type(test, output_type);
+	int i;
+
+	for (i = config_set->size - 1; i >= 0; i--) {
+		const struct intel_dp_link_config *config =
+			&config_set->entries[i];
+
+		if (config->rate <= max_rate) {
+			assert_config_is_supported(expected_table, config);
+			*target = *config;
+
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void test_fallback_seq(struct kunit *test,
+			      enum intel_output_type output_type,
+			      bool uhbr)
+{
+	struct test_ctx *ctx = test->priv;
+	struct intel_dp_link_caps *link_caps = ctx->dev.dig_port.dp.link.caps;
+	struct test_config_table expected_table =
+		INIT_STANDARD_TABLE(test, LINK_TEST_NUM_STANDARD_RATES,
+					  LINK_TEST_MAX_LANE_COUNT);
+	struct intel_digital_port *dig_port = &ctx->dev.dig_port;
+	struct intel_dp_link_config fallback_config = {};
+	struct intel_dp_link_config target_config;
+	int fallback_count = 0;
+	bool target_found;
+	int max_rate;
+
+	if (uhbr)
+		max_rate = expected_table.rates.entries[expected_table.rates.size - 1];
+	else
+		max_rate = 810000;
+
+	dig_port->base.type = output_type;
+	ctx->dev.dig_port.dp.use_max_params = false;
+
+	update_link_caps_and_verify(&expected_table, link_caps, true);
+
+	/* Get the initial target config. */
+	target_found = get_target_config(&expected_table, output_type,
+					 max_rate, &target_config);
+	KUNIT_ASSERT_TRUE(test, target_found);
+
+	for (;;) {
+		/* Also test the case where no fallback is available. */
+		if (!get_fallback_config(&expected_table, output_type,
+					 &target_config, &fallback_config))
+			fallback_config = INTEL_DP_LINK_CONFIG_NULL;
+
+		if (!test_fallback_from_target(&expected_table, output_type, max_rate,
+					       &target_config, &fallback_config))
+			break;
+
+		/*
+		 * The fallback changed the max rate allowed for the next
+		 * target.
+		 */
+		max_rate = fallback_config.rate;
+
+		/* Simply select the fallback config as the next target. */
+		target_config = fallback_config;
+
+		fallback_count++;
+		KUNIT_ASSERT_LT(test, fallback_count, LINK_TEST_MAX_CONFIGS);
+	}
+}
+
+static void intel_dp_link_test_fallback_for_sst_max_non_uhbr(struct kunit *test)
+{
+	test_fallback_seq(test, INTEL_OUTPUT_DP, false);
+}
+
+static void intel_dp_link_test_fallback_for_sst_max_uhbr(struct kunit *test)
+{
+	test_fallback_seq(test, INTEL_OUTPUT_DP, true);
+}
+
+static void intel_dp_link_test_fallback_for_mst(struct kunit *test)
+{
+	struct test_ctx *ctx = test->priv;
+
+	ctx->dev.connector.mst.dp = &ctx->dev.dig_port.dp;
+
+	test_fallback_seq(test, INTEL_OUTPUT_DP_MST, true);
+}
+
 static struct kunit_case intel_dp_link_test_cases[] = {
 	KUNIT_CASE(intel_dp_link_caps_test_baseline),
 
@@ -1048,6 +1359,11 @@ static struct kunit_case intel_dp_link_test_cases[] = {
 	KUNIT_CASE(intel_dp_link_caps_test_update_params_shrink_disable_random),
 	KUNIT_CASE(intel_dp_link_caps_test_update_params_expand_random),
 	KUNIT_CASE(intel_dp_link_caps_test_update_params_expand_disable_random),
+
+	KUNIT_CASE(intel_dp_link_test_fallback_for_edp),
+	KUNIT_CASE(intel_dp_link_test_fallback_for_sst_max_non_uhbr),
+	KUNIT_CASE(intel_dp_link_test_fallback_for_sst_max_uhbr),
+	KUNIT_CASE(intel_dp_link_test_fallback_for_mst),
 
 	{}
 };
