@@ -16,6 +16,7 @@
 
 #include "intel_display_core.h"
 #include "intel_display_types.h"
+#include "intel_display_utils.h"
 #include "intel_dp.h"
 #include "intel_dp_link_caps.h"
 
@@ -146,6 +147,18 @@ struct intel_dp_link_caps {
 	 */
 	struct intel_dp_link_config max_limits;
 };
+static_assert(BITS_PER_TYPE(((struct intel_dp_link_caps_filter *)NULL)->config_mask) >=
+	      ARRAY_SIZE(((struct intel_dp_link_caps *)NULL)->configs));
+
+static struct intel_dp_link_caps_order bw_desc_config_order(void)
+{
+	struct intel_dp_link_caps_order order = {
+		.key = INTEL_DP_LINK_CAPS_ORDER_KEY_BW,
+		.dir = INTEL_DP_LINK_CAPS_ORDER_DIR_DESC,
+	};
+
+	return order;
+}
 
 /* Get length of common rates array potentially limited by max_rate. */
 int intel_dp_common_len_rate_limit(struct intel_dp_link_caps *link_caps,
@@ -250,6 +263,206 @@ to_intel_dp_link_config(struct intel_dp_link_caps *link_caps,
 
 	config->rate = intel_dp_link_config_rate(link_caps, lce);
 	config->lane_count = intel_dp_link_config_lane_count(lce);
+}
+
+static int
+iter_pos_to_idx(struct intel_dp_link_caps *link_caps,
+		struct intel_dp_link_caps_order config_order,
+		int iter_pos)
+{
+	int config_idx;
+
+	if (!in_range(iter_pos, 0, link_caps->num_configs))
+		return -1;
+
+	switch (config_order.dir) {
+	case INTEL_DP_LINK_CAPS_ORDER_DIR_ASC:
+		break;
+	case INTEL_DP_LINK_CAPS_ORDER_DIR_DESC:
+		iter_pos = link_caps->num_configs - 1 - iter_pos;
+
+		break;
+	default:
+		MISSING_CASE(config_order.dir);
+
+		return -1;
+	}
+
+	switch (config_order.key) {
+	case INTEL_DP_LINK_CAPS_ORDER_KEY_BW:
+		config_idx = iter_pos;
+
+		break;
+	case INTEL_DP_LINK_CAPS_ORDER_KEY_RATE_LANE:
+		config_idx = link_caps->rate_lane_map[iter_pos];
+
+		break;
+	case INTEL_DP_LINK_CAPS_ORDER_KEY_LANE_RATE:
+		config_idx = link_caps->lane_rate_map[iter_pos];
+
+		break;
+	default:
+		MISSING_CASE(config_order.key);
+
+		return -1;
+	}
+
+	return config_idx;
+}
+
+static bool iter_get_next_config(struct intel_dp_link_caps_iter *iter,
+				 struct intel_dp_link_config *config)
+{
+	while (true) {
+		int config_idx;
+
+		iter->pos++;
+
+		config_idx = iter_pos_to_idx(iter->link_caps, iter->order, iter->pos);
+		if (config_idx < 0) {
+			iter->pos = -1;
+			*config = INTEL_DP_LINK_CONFIG_NULL;
+
+			break;
+		}
+
+		if (!(BIT(config_idx) & iter->filter.config_mask))
+			continue;
+
+		to_intel_dp_link_config(iter->link_caps, config_idx, config);
+
+		break;
+	}
+
+	return iter->pos >= 0;
+}
+
+static void iter_start(struct intel_dp_link_caps_iter *iter,
+		       struct intel_dp_link_caps *link_caps,
+		       struct intel_dp_link_caps_order order,
+		       struct intel_dp_link_caps_filter filter)
+{
+	iter->link_caps = link_caps;
+	iter->pos = -1;
+	iter->order = order;
+	iter->filter = filter;
+
+	iter->get_next_config = iter_get_next_config;
+}
+
+static struct intel_dp_link_caps_filter
+calc_allowed_config_filter(struct intel_dp_link_caps *link_caps,
+			   struct intel_dp_link_caps_filter enabled_configs,
+			   const struct intel_dp_link_config *max_limits,
+			   const struct intel_dp_link_config *forced_params)
+{
+	struct intel_dp_link_caps_filter allowed_configs = INTEL_DP_LINK_CAPS_FILTER_NONE;
+	struct intel_dp_link_caps_order order = bw_desc_config_order();
+	struct intel_dp_link_caps_iter iter;
+	struct intel_dp_link_config config;
+
+	iter_start(&iter, link_caps, order, enabled_configs);
+	for_each_dp_link_config(&iter, &config) {
+		if (forced_params->rate &&
+		    forced_params->rate != config.rate)
+			continue;
+
+		if (forced_params->lane_count &&
+		    forced_params->lane_count != config.lane_count)
+			continue;
+
+		if (config.rate > max_limits->rate)
+			continue;
+
+		if (config.lane_count > max_limits->lane_count)
+			continue;
+
+		allowed_configs.config_mask |= BIT(iter_pos_to_idx(link_caps, order, iter.pos));
+	}
+	intel_dp_link_caps_iter_end(&iter);
+
+	return allowed_configs;
+}
+
+/*
+ * get_allowed_config_filter - get filter for the currently allowed configs
+ * @link_caps: link capabilities state
+ *
+ * Return:
+ * Filter of link configurations allowed after applying the current
+ * maximum link limits, and further narrowing them by removing any disabled
+ * configuration and limiting to forced link parameters.
+ *
+ * See also:
+ * - intel_dp_link_caps_get_max_limits()
+ * - intel_dp_link_caps_get_forced_params()
+ */
+static struct intel_dp_link_caps_filter
+get_allowed_config_filter(struct intel_dp_link_caps *link_caps)
+{
+	struct intel_dp_link_config forced_params;
+
+	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
+
+	/* TODO: Get filter for enabled configs. */
+	return calc_allowed_config_filter(link_caps, INTEL_DP_LINK_CAPS_FILTER_ALL,
+					  &link_caps->max_limits, &forced_params);
+}
+
+void intel_dp_link_caps_iter_start(struct intel_dp_link_caps_iter *iter,
+				   struct intel_dp_link_caps *link_caps,
+				   struct intel_dp_link_caps_order order,
+				   struct intel_dp_link_caps_filter filter)
+{
+	filter.config_mask &= get_allowed_config_filter(link_caps).config_mask;
+
+	iter_start(iter, link_caps, order, filter);
+}
+
+void intel_dp_link_caps_iter_end(struct intel_dp_link_caps_iter *iter)
+{
+	memset(iter, 0, sizeof(*iter));
+}
+
+static int find_config_idx(struct intel_dp_link_caps *link_caps,
+			   struct intel_dp_link_caps_filter filter,
+			   const struct intel_dp_link_config *link_config)
+{
+	struct intel_dp_link_caps_order order = bw_desc_config_order();
+	struct intel_dp_link_config iter_config;
+	struct intel_dp_link_caps_iter iter;
+	int pos = -1;
+
+	intel_dp_link_caps_iter_start(&iter, link_caps, order, filter);
+	for_each_dp_link_config(&iter, &iter_config) {
+		if (iter_config.rate == link_config->rate &&
+		    iter_config.lane_count == link_config->lane_count) {
+			pos = iter.pos;
+
+			break;
+		}
+	}
+	intel_dp_link_caps_iter_end(&iter);
+
+	if (pos < 0)
+		return pos;
+
+	return iter_pos_to_idx(link_caps, order, pos);
+}
+
+bool intel_dp_link_caps_filter_add(struct intel_dp_link_caps *link_caps,
+				   struct intel_dp_link_caps_filter *filter,
+				   const struct intel_dp_link_config *config)
+{
+	int idx;
+
+	idx = find_config_idx(link_caps, get_allowed_config_filter(link_caps), config);
+	if (idx < 0)
+		return false;
+
+	filter->config_mask |= BIT(idx);
+
+	return true;
 }
 
 static void set_max_link_limits_no_update(struct intel_dp_link_caps *link_caps,
