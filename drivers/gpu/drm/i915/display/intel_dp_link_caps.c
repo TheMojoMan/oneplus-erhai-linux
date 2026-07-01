@@ -596,6 +596,21 @@ bool intel_dp_link_caps_filter_add(struct intel_dp_link_caps *link_caps,
 	return true;
 }
 
+static bool intel_dp_link_caps_filter_remove(struct intel_dp_link_caps *link_caps,
+					     struct intel_dp_link_caps_filter *filter,
+					     const struct intel_dp_link_config *config)
+{
+	int idx;
+
+	idx = find_config_idx(link_caps, get_allowed_config_filter(link_caps), config);
+	if (idx < 0)
+		return false;
+
+	filter->config_mask &= ~BIT(idx);
+
+	return true;
+}
+
 static void set_max_link_limits(struct intel_dp_link_caps *link_caps,
 				const struct intel_dp_link_config *max_link_limits)
 {
@@ -616,6 +631,46 @@ static void reset_max_link_limits_reenable_all(struct intel_dp_link_caps *link_c
 {
 	link_caps->enabled_configs = INTEL_DP_LINK_CAPS_FILTER_ALL;
 	reset_max_link_limits(link_caps);
+}
+
+/**
+ * intel_dp_link_caps_disable_config - disable a configuration
+ * @link_caps: link capabilities state
+ * @config: configuration to disable
+ *
+ * Disable the configuration identified by @config. This removes the
+ * configuration from the set of allowed configurations. The disabling
+ * shouldn't leave the remaining configuration set empty.
+ *
+ * The configuration remains disallowed until intel_dp_link_caps() with
+ * reset=%true or changed sink capabilities is called, or
+ * intel_dp_link_caps_reset() is called. Each of these happens after a
+ * new sink is connected or the currently connected sink changes its
+ * capabilities.
+ *
+ * Return:
+ * - %true  if @config was valid and the derived state was updated.
+ * - %false if @config was invalid or the remaining configuration set
+ *   would remain empty.
+ */
+bool intel_dp_link_caps_disable_config(struct intel_dp_link_caps *link_caps,
+				       const struct intel_dp_link_config *config)
+{
+	struct intel_dp_link_caps_filter enabled_configs = link_caps->enabled_configs;
+	struct intel_dp_link_config forced_params;
+
+	if (!intel_dp_link_caps_filter_remove(link_caps, &enabled_configs, config))
+		return false;
+
+	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
+
+	if (!calc_allowed_config_filter(link_caps, enabled_configs,
+					&link_caps->max_limits, &forced_params).config_mask)
+		return false;
+
+	link_caps->enabled_configs = enabled_configs;
+
+	return true;
 }
 
 /**

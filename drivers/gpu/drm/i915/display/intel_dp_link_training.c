@@ -1894,6 +1894,10 @@ static int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
 	struct intel_display *display = to_intel_display(intel_dp);
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	struct intel_dp_link_config max_link_limits;
+	struct intel_dp_link_config current_config = {
+		.rate = crtc_state->port_clock,
+		.lane_count = crtc_state->lane_count,
+	};
 	int new_link_rate;
 	int new_lane_count;
 	int err = -1;
@@ -1920,6 +1924,13 @@ static int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
 	intel_dp_link_caps_get_max_limits(link_caps, &max_link_limits);
 	intel_dp_link_caps_reset_max_limits(link_caps);
 
+	/*
+	 * TODO: Make fallback depend only on disabling the current config,
+	 * once max_limit no longer constrains the allowed config set. Then
+	 * disabling the current config will define the allowed configs for
+	 * the subsequent modeset, so there will be no need to select a
+	 * reduced config separately here.
+	 */
 	if (!reduce_link_params(intel_dp, crtc_state, &new_link_rate, &new_lane_count))
 		goto out_restore_max_limits;
 
@@ -1932,6 +1943,14 @@ static int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
 
 		goto out_restore_max_limits;
 	}
+
+	/*
+	 * Shouldn't fail: the current config was enabled, and reducing the
+	 * link parameters should still leave the fallback config allowed.
+	 */
+	if (drm_WARN_ON(display->drm,
+			!intel_dp_link_caps_disable_config(link_caps, &current_config)))
+		return -1;
 
 	lt_dbg(intel_dp, DP_PHY_DPRX,
 	       "Reducing link parameters from %dx%d to %dx%d\n",
