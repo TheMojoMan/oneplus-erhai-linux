@@ -29,6 +29,7 @@ struct intel_dp_link_config;
  *
  * See also:
  *  - &struct intel_dp_link_caps_order
+ *  - intel_dp_link_caps_get_max_config()
  */
 enum intel_dp_link_caps_order_key {
 	INTEL_DP_LINK_CAPS_ORDER_KEY_BW,
@@ -139,6 +140,11 @@ void intel_dp_link_config_get(struct intel_dp_link_caps *link_caps,
 bool intel_dp_link_caps_filter_add(struct intel_dp_link_caps *link_caps,
 				   struct intel_dp_link_caps_filter *filter,
 				   const struct intel_dp_link_config *config);
+
+bool intel_dp_link_caps_get_max_config(struct intel_dp_link_caps *link_caps,
+				       enum intel_dp_link_caps_order_key order_key,
+				       struct intel_dp_link_caps_filter filter,
+				       struct intel_dp_link_config *max_config);
 
 void intel_dp_link_caps_get_max_limits(struct intel_dp_link_caps *link_caps,
 				       struct intel_dp_link_config *max_link_limits);

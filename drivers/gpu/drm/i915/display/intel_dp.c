@@ -2538,6 +2538,20 @@ bool intel_dp_mode_valid_with_dsc(struct intel_connector *connector,
 					       bw_overhead_flags);
 }
 
+bool
+intel_dp_get_connector_max_link_config(struct intel_connector *connector,
+				       const struct link_config_limits *limits,
+				       struct intel_dp_link_config *max_link_config)
+{
+	struct intel_dp *intel_dp = intel_attached_dp(connector);
+	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
+	struct intel_dp_link_caps_order order =
+		intel_dp_link_caps_connector_compute_order(connector);
+
+	return intel_dp_link_caps_get_max_config(link_caps, order.key, limits->link_config_filter,
+						 max_link_config);
+}
+
 /*
  * Calculate the output link min, max bpp values in limits based on the pipe bpp
  * range, crtc_state and dsc mode. Return true on success.
@@ -2554,6 +2568,7 @@ intel_dp_compute_config_link_bpp_limits(struct intel_connector *connector,
 		&crtc_state->hw.adjusted_mode;
 	const struct intel_crtc *crtc = to_intel_crtc(crtc_state->uapi.crtc);
 	const struct intel_encoder *encoder = &dp_to_dig_port(intel_dp)->base;
+	struct intel_dp_link_config max_link_config;
 	int max_link_bpp_x16;
 
 	max_link_bpp_x16 = min(crtc_state->max_link_bpp_x16,
@@ -2583,14 +2598,17 @@ intel_dp_compute_config_link_bpp_limits(struct intel_connector *connector,
 
 	limits->link.max_bpp_x16 = max_link_bpp_x16;
 
+	if (!intel_dp_get_connector_max_link_config(connector, limits, &max_link_config))
+		return false;
+
 	drm_dbg_kms(display->drm,
-		    "[ENCODER:%d:%s][CRTC:%d:%s] DP link limits: pixel clock %d kHz DSC %s max lanes %d max rate %d max pipe_bpp %d min link_bpp " FXP_Q4_FMT " max link_bpp " FXP_Q4_FMT "\n",
+		    "[ENCODER:%d:%s][CRTC:%d:%s] DP link limits: pixel clock %d kHz DSC %s max link %dx%d max pipe_bpp %d min link_bpp " FXP_Q4_FMT " max link_bpp " FXP_Q4_FMT "\n",
 		    encoder->base.base.id, encoder->base.name,
 		    crtc->base.base.id, crtc->base.name,
 		    adjusted_mode->crtc_clock,
 		    str_on_off(dsc),
-		    limits->max_lane_count,
-		    limits->max_rate,
+		    max_link_config.lane_count,
+		    max_link_config.rate,
 		    limits->pipe.max_bpp,
 		    FXP_Q4_ARGS(limits->link.min_bpp_x16),
 		    FXP_Q4_ARGS(limits->link.max_bpp_x16));
@@ -2641,10 +2659,15 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 			       struct link_config_limits *limits)
 {
 	struct intel_display *display = to_intel_display(intel_dp);
+	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	bool is_mst = intel_crtc_has_type(crtc_state, INTEL_OUTPUT_DP_MST);
 	struct intel_connector *connector =
 		to_intel_connector(conn_state->connector);
 
+	/*
+	 * TODO: Remove the following min/max rate and lane count setup, once
+	 * all users are converted to use link_config_mask instead.
+	 */
 	limits->min_rate = intel_dp_min_link_rate(intel_dp);
 	limits->max_rate = intel_dp_max_link_rate(intel_dp);
 
@@ -2652,6 +2675,8 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 
 	limits->min_lane_count = intel_dp_min_lane_count(intel_dp);
 	limits->max_lane_count = intel_dp_max_lane_count(intel_dp);
+
+	limits->link_config_filter = INTEL_DP_LINK_CAPS_FILTER_ALL;
 
 	limits->pipe.min_bpp = intel_dp_min_bpp(crtc_state->output_format);
 	if (is_mst) {
@@ -2716,6 +2741,9 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 			    crtc_state->pipe_bpp, limits->pipe.max_bpp);
 
 	if (is_mst || intel_dp->use_max_params) {
+		struct intel_dp_link_caps_filter new_filter = INTEL_DP_LINK_CAPS_FILTER_NONE;
+		struct intel_dp_link_config max_config;
+
 		/*
 		 * For MST we always configure max link bw - the spec doesn't
 		 * seem to suggest we should do otherwise.
@@ -2729,6 +2757,14 @@ intel_dp_compute_config_limits(struct intel_dp *intel_dp,
 		 */
 		limits->min_lane_count = limits->max_lane_count;
 		limits->min_rate = limits->max_rate;
+
+		if (!intel_dp_get_connector_max_link_config(connector, limits, &max_config))
+			return false;
+
+		if (!intel_dp_link_caps_filter_add(link_caps, &new_filter, &max_config))
+			return false;
+
+		limits->link_config_filter = new_filter;
 	}
 
 	intel_dp_test_compute_config(intel_dp, crtc_state, limits);

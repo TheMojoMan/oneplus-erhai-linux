@@ -504,6 +504,52 @@ void intel_dp_link_caps_iter_end(struct intel_dp_link_caps_iter *iter)
 	memset(iter, 0, sizeof(*iter));
 }
 
+/**
+ * intel_dp_link_caps_get_max_config - get the maximum config in a given order
+ * @link_caps: link capabilities state
+ * @order_key: ordering key used to rank candidate configurations
+ * @filter: filter for candidate configurations
+ * @max_config: returned maximum link configuration
+ *
+ * Find the last configuration among the currently allowed
+ * configurations filtered by @filter in the iteration order
+ * selected by @order_key, and store it in @max_config.
+ *
+ * See also:
+ * - &enum intel_dp_link_caps_order_key
+ *
+ * Returns:
+ * %true if a maximum config is returned
+ * %false otherwise.
+ */
+bool intel_dp_link_caps_get_max_config(struct intel_dp_link_caps *link_caps,
+				       enum intel_dp_link_caps_order_key order_key,
+				       struct intel_dp_link_caps_filter filter,
+				       struct intel_dp_link_config *max_config)
+{
+	struct intel_dp_link_caps_order order = {
+		.key = order_key,
+		.dir = INTEL_DP_LINK_CAPS_ORDER_DIR_DESC
+	};
+	struct intel_dp_link_config iter_config;
+	struct intel_dp_link_caps_iter iter;
+	bool found = false;
+
+	intel_dp_link_caps_iter_start(&iter, link_caps, order, filter);
+	for_each_dp_link_config(&iter, &iter_config) {
+		found = true;
+		break;
+	}
+	intel_dp_link_caps_iter_end(&iter);
+
+	if (!found)
+		return false;
+
+	*max_config = iter_config;
+
+	return true;
+}
+
 static int find_config_idx(struct intel_dp_link_caps *link_caps,
 			   struct intel_dp_link_caps_filter filter,
 			   const struct intel_dp_link_config *link_config)
