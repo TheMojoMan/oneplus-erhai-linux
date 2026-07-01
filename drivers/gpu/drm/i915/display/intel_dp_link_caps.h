@@ -113,6 +113,11 @@ void intel_dp_link_caps_iter_start(struct intel_dp_link_caps_iter *iter,
 
 void intel_dp_link_caps_iter_end(struct intel_dp_link_caps_iter *iter);
 
+struct intel_dp_link_caps_order
+intel_dp_link_caps_connector_compute_order(struct intel_connector *connector);
+struct intel_dp_link_caps_order
+intel_dp_link_caps_connector_fallback_order(bool is_mst);
+
 int intel_dp_common_len_rate_limit(struct intel_dp_link_caps *link_caps,
 				   int max_rate);
 int intel_dp_common_rate(struct intel_dp_link_caps *link_caps, int index);

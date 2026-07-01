@@ -160,6 +160,56 @@ static struct intel_dp_link_caps_order bw_desc_config_order(void)
 	return order;
 }
 
+static enum intel_dp_link_caps_order_key
+connector_compute_order_key(bool is_mst)
+{
+	if (is_mst)
+		return INTEL_DP_LINK_CAPS_ORDER_KEY_BW;
+	else
+		return INTEL_DP_LINK_CAPS_ORDER_KEY_RATE_LANE;
+}
+
+static enum intel_dp_link_caps_order_key
+connector_fallback_order_key(bool is_mst)
+{
+	if (is_mst)
+		return INTEL_DP_LINK_CAPS_ORDER_KEY_BW;
+	else
+		return INTEL_DP_LINK_CAPS_ORDER_KEY_LANE_RATE;
+}
+
+static enum intel_dp_link_caps_order_direction
+connector_compute_order_dir(bool is_mst, bool use_max_params)
+{
+	if (is_mst || use_max_params)
+		return INTEL_DP_LINK_CAPS_ORDER_DIR_DESC;
+	else
+		return INTEL_DP_LINK_CAPS_ORDER_DIR_ASC;
+}
+
+struct intel_dp_link_caps_order
+intel_dp_link_caps_connector_compute_order(struct intel_connector *connector)
+{
+	struct intel_dp *intel_dp = intel_attached_dp(connector);
+	struct intel_dp_link_caps_order order = {
+		.key = connector_compute_order_key(connector->mst.dp),
+		.dir = connector_compute_order_dir(connector->mst.dp, intel_dp->use_max_params)
+	};
+
+	return order;
+}
+
+struct intel_dp_link_caps_order
+intel_dp_link_caps_connector_fallback_order(bool is_mst)
+{
+	struct intel_dp_link_caps_order order = {
+		.key = connector_fallback_order_key(is_mst),
+		.dir = INTEL_DP_LINK_CAPS_ORDER_DIR_DESC,
+	};
+
+	return order;
+}
+
 /* Get length of common rates array potentially limited by max_rate. */
 int intel_dp_common_len_rate_limit(struct intel_dp_link_caps *link_caps,
 				   int max_rate)
