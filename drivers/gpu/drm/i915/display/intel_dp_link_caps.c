@@ -561,6 +561,12 @@ static void reset_max_link_limits_no_update(struct intel_dp_link_caps *link_caps
 	set_max_link_limits_no_update(link_caps, &max_link_limits);
 }
 
+static void reset_max_link_limits_reenable_all(struct intel_dp_link_caps *link_caps)
+{
+	link_caps->enabled_configs = INTEL_DP_LINK_CAPS_FILTER_ALL;
+	reset_max_link_limits_no_update(link_caps);
+}
+
 /**
  * intel_dp_link_caps_get_max_limits - get the current maximum link limits
  * @link_caps: link capabilities state
@@ -824,7 +830,7 @@ int intel_dp_link_config_index(struct intel_dp_link_caps *link_caps,
 void intel_dp_link_caps_reset(struct intel_dp_link_caps *link_caps)
 {
 	/* TODO: Update the maximum link information. */
-	reset_max_link_limits_no_update(link_caps);
+	reset_max_link_limits_reenable_all(link_caps);
 }
 
 static int i915_dp_force_link_rate_show(struct seq_file *m, void *data)
