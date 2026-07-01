@@ -558,6 +558,26 @@ void intel_dp_link_caps_get_max_limits(struct intel_dp_link_caps *link_caps,
 	*max_link_limits = link_caps->max_limits;
 }
 
+static bool max_link_limits_valid(struct intel_dp_link_caps *link_caps,
+				  const struct intel_dp_link_config *max_link_limits)
+{
+	struct intel_dp_link_caps_filter allowed_configs;
+	struct intel_dp_link_config forced_params;
+
+	if (max_link_limits->lane_count > INTEL_DP_MAX_LANE_COUNT ||
+	    !is_power_of_2(max_link_limits->lane_count))
+		return false;
+
+	/* TODO: Validate max_link_limits->rate against the source supported rates. */
+
+	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
+	/* TODO: Get filter for enabled configs. */
+	allowed_configs = calc_allowed_config_filter(link_caps, INTEL_DP_LINK_CAPS_FILTER_ALL,
+						     max_link_limits, &forced_params);
+
+	return allowed_configs.config_mask != 0;
+}
+
 /**
  * intel_dp_link_caps_set_max_limits - set the current maximum link limits
  * @link_caps: link capabilities state
@@ -565,6 +585,10 @@ void intel_dp_link_caps_get_max_limits(struct intel_dp_link_caps *link_caps,
  *
  * Set the current maximum rate and lane count limits to @max_link_limits,
  * constraining the set of allowed configurations.
+ *
+ * The new limits must leave at least one configuration allowed: the limits
+ * must not be below the currently active forced parameters or below all the
+ * configurations that remain after disabled configurations are excluded.
  *
  * Unlike intel_dp_link_caps_get_max_limits(), the caller must serialize
  * this call against concurrent queries and updates to @link_caps, in line
@@ -578,9 +602,11 @@ void intel_dp_link_caps_get_max_limits(struct intel_dp_link_caps *link_caps,
 bool intel_dp_link_caps_set_max_limits(struct intel_dp_link_caps *link_caps,
 				       const struct intel_dp_link_config *max_link_limits)
 {
+	if (!max_link_limits_valid(link_caps, max_link_limits))
+		return false;
+
 	set_max_link_limits_no_update(link_caps, max_link_limits);
 
-	/* TODO: validate max_link_limits */
 	return true;
 }
 
