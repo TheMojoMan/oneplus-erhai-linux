@@ -94,19 +94,19 @@ properties:
 
   reboot-mode:
     $ref: /schemas/power/reset/syscon-reboot-mode.yaml
-    type: object
+    unevaluatedProperties: false
     description:
       Reboot mode to alter bootloader behavior for the next boot
 
   syscon-poweroff:
     $ref: /schemas/power/reset/syscon-poweroff.yaml#
-    type: object
+    unevaluatedProperties: false
     description:
       Node for power off method
 
   syscon-reboot:
     $ref: /schemas/power/reset/syscon-reboot.yaml#
-    type: object
+    unevaluatedProperties: false
     description:
       Node for reboot method
 
