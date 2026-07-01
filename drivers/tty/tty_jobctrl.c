@@ -536,7 +536,6 @@ static int tiocspgrp(struct tty_struct *tty, struct tty_struct *real_tty, pid_t 
  */
 static int tiocgsid(struct tty_struct *tty, struct tty_struct *real_tty, pid_t __user *p)
 {
-	unsigned long flags;
 	pid_t sid;
 
 	/*
@@ -546,17 +545,13 @@ static int tiocgsid(struct tty_struct *tty, struct tty_struct *real_tty, pid_t _
 	if (tty == real_tty && current->signal->tty != real_tty)
 		return -ENOTTY;
 
-	spin_lock_irqsave(&real_tty->ctrl.lock, flags);
-	if (!real_tty->ctrl.session)
-		goto err;
-	sid = pid_vnr(real_tty->ctrl.session);
-	spin_unlock_irqrestore(&real_tty->ctrl.lock, flags);
+	scoped_guard(spinlock_irqsave, &real_tty->ctrl.lock) {
+		if (!real_tty->ctrl.session)
+			return -ENOTTY;
+		sid = pid_vnr(real_tty->ctrl.session);
+	}
 
 	return put_user(sid, p);
-
-err:
-	spin_unlock_irqrestore(&real_tty->ctrl.lock, flags);
-	return -ENOTTY;
 }
 
 /*
