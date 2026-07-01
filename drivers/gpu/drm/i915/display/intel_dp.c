@@ -2209,7 +2209,7 @@ static int dsc_compute_compressed_bpp(struct intel_dp *intel_dp,
 				      int pipe_bpp)
 {
 	struct intel_display *display = to_intel_display(intel_dp);
-	const struct intel_connector *connector = to_intel_connector(conn_state->connector);
+	struct intel_connector *connector = to_intel_connector(conn_state->connector);
 	int min_bpp_x16, max_bpp_x16, bpp_step_x16;
 	int bpp_x16;
 	int ret;
@@ -2221,8 +2221,19 @@ static int dsc_compute_compressed_bpp(struct intel_dp *intel_dp,
 	max_bpp_x16 = align_max_compressed_bpp_x16(connector, pipe_config->output_format,
 						   pipe_bpp, max_bpp_x16);
 	if (intel_dp_is_edp(intel_dp)) {
-		pipe_config->port_clock = limits->max_rate;
-		pipe_config->lane_count = limits->max_lane_count;
+		struct intel_dp_link_config max_link_config;
+
+		/*
+		 * FIXME: Clarify why eDP does not use the regular SST BW
+		 * check and instead always uses the maximum link config,
+		 * regardless of intel_dp::use_max_params. Then unify this eDP
+		 * path with the regular DP path.
+		 */
+		if (!intel_dp_get_connector_max_link_config(connector, limits, &max_link_config))
+			return -EINVAL;
+
+		pipe_config->port_clock = max_link_config.rate;
+		pipe_config->lane_count = max_link_config.lane_count;
 
 		pipe_config->dsc.compressed_bpp_x16 = max_bpp_x16;
 
