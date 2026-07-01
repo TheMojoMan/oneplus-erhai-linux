@@ -1960,10 +1960,12 @@ static bool reduce_link_params(struct intel_dp *intel_dp, const struct intel_crt
 static int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
 						   const struct intel_crtc_state *crtc_state)
 {
+	struct intel_display *display = to_intel_display(intel_dp);
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	struct intel_dp_link_config max_link_limits;
 	int new_link_rate;
 	int new_lane_count;
+	int err = -1;
 
 	if (intel_dp_is_edp(intel_dp) && !intel_dp->use_max_params) {
 		lt_dbg(intel_dp, DP_PHY_DPRX,
@@ -1972,14 +1974,32 @@ static int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
 		return 0;
 	}
 
+	/*
+	 * Temporarily reset the max link limit before selecting the fallback
+	 * config.
+	 *
+	 * After fallback, the current logic narrows the allowed configurations
+	 * to the selected config's rate and lane count. That can make a later
+	 * fallback candidate fall outside the current max_limit, so reset it
+	 * before searching.
+	 *
+	 * TODO: Constrain the allowed configurations by only disabling individual
+	 * configurations and remove setting maximum link parameters.
+	 */
+	intel_dp_link_caps_get_max_limits(link_caps, &max_link_limits);
+	intel_dp_link_caps_reset_max_limits(link_caps);
+
 	if (!reduce_link_params(intel_dp, crtc_state, &new_link_rate, &new_lane_count))
-		return -1;
+		goto out_restore_max_limits;
 
 	if (intel_dp_is_edp(intel_dp) &&
 	    !intel_dp_can_link_train_fallback_for_edp(intel_dp, new_link_rate, new_lane_count)) {
 		lt_dbg(intel_dp, DP_PHY_DPRX,
 		       "Retrying Link training for eDP with same parameters\n");
-		return 0;
+
+		err = 0;
+
+		goto out_restore_max_limits;
 	}
 
 	lt_dbg(intel_dp, DP_PHY_DPRX,
@@ -1990,10 +2010,19 @@ static int intel_dp_get_link_train_fallback_values(struct intel_dp *intel_dp,
 	max_link_limits.rate = new_link_rate;
 	max_link_limits.lane_count = new_lane_count;
 
-	/* TODO: handle an update failure */
-	intel_dp_link_caps_set_max_limits(link_caps, &max_link_limits);
+	err = 0;
 
-	return 0;
+out_restore_max_limits:
+	/*
+	 * Shouldn't fail: setting max_limits can only fail if they drop below
+	 * the optionally forced rate/lane-count parameters, but the reduced
+	 * config was chosen to satisfy those constraints.
+	 */
+	if (drm_WARN_ON(display->drm,
+			!intel_dp_link_caps_set_max_limits(link_caps, &max_link_limits)))
+		err = -1;
+
+	return err;
 }
 
 static bool intel_dp_schedule_fallback_link_training(struct intel_atomic_state *state,
