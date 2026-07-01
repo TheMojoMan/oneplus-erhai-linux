@@ -1754,43 +1754,42 @@ intel_dp_compute_link_config_wide(struct intel_dp *intel_dp,
 				  const struct drm_connector_state *conn_state,
 				  const struct link_config_limits *limits)
 {
+	struct intel_connector *connector = to_intel_connector(conn_state->connector);
+	int bpp, clock = intel_dp_mode_clock(pipe_config, conn_state);
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
-	int bpp, i, lane_count, clock = intel_dp_mode_clock(pipe_config, conn_state);
-	int link_rate, link_avail;
+	struct intel_dp_link_caps_order order =
+		intel_dp_link_caps_connector_compute_order(connector);
+	int link_avail;
 
 	for (bpp = fxp_q4_to_int(limits->link.max_bpp_x16);
 	     bpp >= fxp_q4_to_int(limits->link.min_bpp_x16);
 	     bpp -= 2 * 3) {
 		int link_bpp_x16 =
 			intel_dp_output_format_link_bpp_x16(pipe_config->output_format, bpp);
+		struct intel_dp_link_config link_config;
+		struct intel_dp_link_caps_iter iter;
 
-		for (i = 0; i < intel_dp_link_caps_num_common_rates(intel_dp->link.caps); i++) {
-			link_rate = intel_dp_common_rate(link_caps, i);
-			if (link_rate < limits->min_rate ||
-			    link_rate > limits->max_rate)
-				continue;
-
-			for (lane_count = limits->min_lane_count;
-			     lane_count <= limits->max_lane_count;
-			     lane_count <<= 1) {
-				const struct drm_display_mode *adjusted_mode =
+		intel_dp_link_caps_iter_start(&iter, link_caps, order, limits->link_config_filter);
+		for_each_dp_link_config(&iter, &link_config) {
+			const struct drm_display_mode *adjusted_mode =
 					&pipe_config->hw.adjusted_mode;
-				int mode_rate =
-					intel_dp_link_required(link_rate, lane_count,
-							       clock, adjusted_mode->hdisplay,
-							       link_bpp_x16, 0);
+			int mode_rate;
 
-				link_avail = intel_dp_max_link_data_rate(intel_dp,
-									 link_rate,
-									 lane_count);
+			mode_rate = intel_dp_link_required(link_config.rate,
+							   link_config.lane_count,
+							   clock, adjusted_mode->hdisplay,
+							   link_bpp_x16, 0);
 
-				if (mode_rate <= link_avail) {
-					pipe_config->lane_count = lane_count;
-					pipe_config->pipe_bpp = bpp;
-					pipe_config->port_clock = link_rate;
+			link_avail = intel_dp_max_link_data_rate(intel_dp,
+								 link_config.rate,
+								 link_config.lane_count);
 
-					return 0;
-				}
+			if (mode_rate <= link_avail) {
+				pipe_config->lane_count = link_config.lane_count;
+				pipe_config->pipe_bpp = bpp;
+				pipe_config->port_clock = link_config.rate;
+
+				return 0;
 			}
 		}
 	}
