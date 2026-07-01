@@ -131,6 +131,37 @@ struct intel_dp_link_caps {
 	u8 lane_rate_map[INTEL_DP_MAX_LINK_CONFIGS];
 
 	/*
+	 * Filter of configurations enabled for the current sink
+	 * connection.
+	 *
+	 * Each bit in the filter's configuration mask corresponds to a
+	 * configuration index in the intel_dp_link_caps::configs[] array.
+	 *
+	 * All configurations start out enabled in the filter after a
+	 * new sink is connected. Users disable configurations afterwards
+	 * via the link caps API. All configurations get re-enabled
+	 * internally in the following cases:
+	 * - when forcing a link rate or lane count
+	 * - when intel_dp_link_caps_update(reset=true) is called after
+	 *   a new sink is connected
+	 * - when intel_dp_link_caps_update(reset=false) with changed
+	 *   link capabilities is called
+	 * - when intel_dp_link_caps_reset() is called after a new sink
+	 *   is connected
+	 */
+	struct intel_dp_link_caps_filter enabled_configs;
+
+	/*
+	 * Allowed configurations are the supported configurations defined by
+	 * config_table.rates and config_table.max_lane_count, constrained by
+	 * config_table.enabled_configs and the forced_params and
+	 * max_limits values below.
+	 *
+	 * See get_allowed_config_filter() for the filter of these
+	 * configurations.
+	 */
+
+	/*
 	 * Forced parameters requested via debugfs. Remains set across sink
 	 * disconnects.
 	 */
@@ -454,8 +485,7 @@ get_allowed_config_filter(struct intel_dp_link_caps *link_caps)
 
 	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
 
-	/* TODO: Get filter for enabled configs. */
-	return calc_allowed_config_filter(link_caps, INTEL_DP_LINK_CAPS_FILTER_ALL,
+	return calc_allowed_config_filter(link_caps, link_caps->enabled_configs,
 					  &link_caps->max_limits, &forced_params);
 }
 
@@ -571,8 +601,7 @@ static bool max_link_limits_valid(struct intel_dp_link_caps *link_caps,
 	/* TODO: Validate max_link_limits->rate against the source supported rates. */
 
 	intel_dp_link_caps_get_forced_params(link_caps, &forced_params);
-	/* TODO: Get filter for enabled configs. */
-	allowed_configs = calc_allowed_config_filter(link_caps, INTEL_DP_LINK_CAPS_FILTER_ALL,
+	allowed_configs = calc_allowed_config_filter(link_caps, link_caps->enabled_configs,
 						     max_link_limits, &forced_params);
 
 	return allowed_configs.config_mask != 0;
@@ -1095,6 +1124,7 @@ struct intel_dp_link_caps *intel_dp_link_caps_init(struct intel_dp *intel_dp)
 		return NULL;
 
 	link_caps->dp = intel_dp;
+	link_caps->enabled_configs = INTEL_DP_LINK_CAPS_FILTER_ALL;
 
 	return link_caps;
 }
