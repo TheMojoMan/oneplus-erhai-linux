@@ -545,26 +545,26 @@ bool intel_dp_link_caps_filter_add(struct intel_dp_link_caps *link_caps,
 	return true;
 }
 
-static void set_max_link_limits_no_update(struct intel_dp_link_caps *link_caps,
-					  const struct intel_dp_link_config *max_link_limits)
+static void set_max_link_limits(struct intel_dp_link_caps *link_caps,
+				const struct intel_dp_link_config *max_link_limits)
 {
 	link_caps->max_limits = *max_link_limits;
 }
 
-static void reset_max_link_limits_no_update(struct intel_dp_link_caps *link_caps)
+static void reset_max_link_limits(struct intel_dp_link_caps *link_caps)
 {
 	struct intel_dp_link_config max_link_limits = {
 		.rate = intel_dp_max_common_rate(link_caps),
 		.lane_count = intel_dp_link_caps_max_common_lane_count(link_caps),
 	};
 
-	set_max_link_limits_no_update(link_caps, &max_link_limits);
+	set_max_link_limits(link_caps, &max_link_limits);
 }
 
 static void reset_max_link_limits_reenable_all(struct intel_dp_link_caps *link_caps)
 {
 	link_caps->enabled_configs = INTEL_DP_LINK_CAPS_FILTER_ALL;
-	reset_max_link_limits_no_update(link_caps);
+	reset_max_link_limits(link_caps);
 }
 
 /**
@@ -640,7 +640,7 @@ bool intel_dp_link_caps_set_max_limits(struct intel_dp_link_caps *link_caps,
 	if (!max_link_limits_valid(link_caps, max_link_limits))
 		return false;
 
-	set_max_link_limits_no_update(link_caps, max_link_limits);
+	set_max_link_limits(link_caps, max_link_limits);
 
 	return true;
 }
@@ -654,7 +654,7 @@ bool intel_dp_link_caps_set_max_limits(struct intel_dp_link_caps *link_caps,
  */
 void intel_dp_link_caps_reset_max_limits(struct intel_dp_link_caps *link_caps)
 {
-	reset_max_link_limits_no_update(link_caps);
+	reset_max_link_limits(link_caps);
 }
 
 static int intel_dp_link_config_bw(struct intel_dp_link_caps *link_caps,
@@ -860,7 +860,6 @@ int intel_dp_link_config_index(struct intel_dp_link_caps *link_caps,
  */
 void intel_dp_link_caps_reset(struct intel_dp_link_caps *link_caps)
 {
-	/* TODO: Update the maximum link information. */
 	reset_max_link_limits_reenable_all(link_caps);
 }
 
