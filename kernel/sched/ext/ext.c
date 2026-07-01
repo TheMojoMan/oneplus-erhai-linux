@@ -3080,9 +3080,14 @@ static void put_prev_task_scx(struct rq *rq, struct task_struct *p,
 		 * sched_class, %SCX_OPS_ENQ_LAST must be set. Tell
 		 * ops.enqueue() that @p is the only one available for this cpu,
 		 * which should trigger an explicit follow-up scheduling event.
+		 *
+		 * Core scheduling can force this CPU idle while @p stays
+		 * runnable. @p's cookie then won't match the core's, so skip
+		 * the warning in that case.
 		 */
 		if (next && sched_class_above(&ext_sched_class, next->sched_class)) {
-			WARN_ON_ONCE(!(sch->ops.flags & SCX_OPS_ENQ_LAST));
+			WARN_ON_ONCE(sched_cpu_cookie_match(rq, p) &&
+				     !(sch->ops.flags & SCX_OPS_ENQ_LAST));
 			do_enqueue_task(rq, p, SCX_ENQ_LAST, -1);
 		} else {
 			do_enqueue_task(rq, p, 0, -1);
@@ -4909,6 +4914,8 @@ static void scx_sched_free_rcu_work(struct work_struct *work)
 		cgroup_put(sch_cgroup(sch));
 	if (sch->sub_kset)
 		kobject_put(&sch->sub_kset->kobj);
+	if (scx_parent(sch))
+		kobject_put(&scx_parent(sch)->kobj);
 #endif	/* CONFIG_EXT_SUB_SCHED */
 
 	for_each_possible_cpu(cpu) {
@@ -6889,12 +6896,19 @@ static struct scx_sched *scx_alloc_and_add_sched(struct scx_enable_cmd *cmd,
 	INIT_LIST_HEAD(&sch->children);
 	INIT_LIST_HEAD(&sch->sibling);
 
-	if (parent)
+	if (parent) {
+		/*
+		 * Pin @parent for @sch's lifetime. The kobject hierarchy pins
+		 * it only via @parent->sub_kset, which is dropped during
+		 * disable. Released in scx_sched_free_rcu_work().
+		 */
+		kobject_get(&parent->kobj);
 		ret = kobject_init_and_add(&sch->kobj, &scx_ktype,
 					   &parent->sub_kset->kobj,
 					   "sub-%llu", cgroup_id(cgrp));
-	else
+	} else {
 		ret = kobject_init_and_add(&sch->kobj, &scx_ktype, NULL, "root");
+	}
 
 	if (ret < 0) {
 		RCU_INIT_POINTER(ops->priv, NULL);
