@@ -1344,12 +1344,16 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 	if (ret < 0)
 		goto end;
 
-	memset(li, 0, sizeof(*li));
-	ret = graph_for_each_link(priv, hooks, li, graph_link);
+	ret = simple_util_parse_card_name(priv, NULL);
 	if (ret < 0)
 		goto err;
 
-	ret = simple_util_parse_card_name(priv, NULL);
+	ret = simple_util_parse_aux_devs(priv, NULL);
+	if (ret < 0)
+		goto err;
+
+	memset(li, 0, sizeof(*li));
+	ret = graph_for_each_link(priv, hooks, li, graph_link);
 	if (ret < 0)
 		goto err;
 
@@ -1362,10 +1366,6 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 	}
 
 	simple_util_debug_info(priv);
-
-	ret = simple_util_parse_aux_devs(priv, NULL);
-	if (ret < 0)
-		goto err;
 
 	ret = devm_snd_soc_register_card(dev, card);
 err:
