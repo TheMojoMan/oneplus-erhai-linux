@@ -169,7 +169,7 @@ out:
 int ni_load_mi(struct ntfs_inode *ni, const struct ATTR_LIST_ENTRY *le,
 	       struct mft_inode **mi)
 {
-	CLST rno;
+	u64 rno;
 
 	if (!le) {
 		*mi = &ni->mi;
@@ -2961,8 +2961,8 @@ int ni_write_parents(struct ntfs_inode *ni, int sync)
 		if (IS_ERR(dir)) {
 			ntfs_inode_warn(
 				&ni->vfs_inode,
-				"failed to open parent directory r=%lx to write",
-				(long)ino_get(&fname->home));
+				"failed to open parent directory r=%llx to write",
+				(u64)ino_get(&fname->home));
 			continue;
 		}
 
@@ -3081,8 +3081,8 @@ static bool ni_update_parent(struct ntfs_inode *ni, struct NTFS_DUP_INFO *dup,
 		if (IS_ERR(dir)) {
 			ntfs_inode_warn(
 				&ni->vfs_inode,
-				"failed to open parent directory r=%lx to update",
-				(long)ino_get(&fname->home));
+				"failed to open parent directory r=%llx to update",
+				(u64)ino_get(&fname->home));
 			continue;
 		}
 

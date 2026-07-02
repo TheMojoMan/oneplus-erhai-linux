@@ -36,7 +36,7 @@ static struct inode *ntfs_read_mft(struct inode *inode,
 	bool is_match = false;
 	bool is_root = false;
 	bool is_dir;
-	unsigned long ino = inode->i_ino;
+	u64 ino = inode->i_ino;
 	u32 rp_fa = 0, asize, t32;
 	u16 roff, rsize, names = 0, links = 0;
 	const struct ATTR_FILE_NAME *fname = NULL;
@@ -79,7 +79,7 @@ static struct inode *ntfs_read_mft(struct inode *inode,
 		;
 	} else if (ref->seq != rec->seq) {
 		err = -EINVAL;
-		ntfs_err(sb, "MFT: r=%lx, expect seq=%x instead of %x!", ino,
+		ntfs_err(sb, "MFT: r=%llx, expect seq=%x instead of %x!", ino,
 			 le16_to_cpu(ref->seq), le16_to_cpu(rec->seq));
 		goto out;
 	} else if (!is_rec_inuse(rec)) {

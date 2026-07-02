@@ -281,7 +281,7 @@ static inline bool ntfs_dir_emit(struct ntfs_sb_info *sbi,
 				 u8 *name, struct dir_context *ctx)
 {
 	const struct ATTR_FILE_NAME *fname;
-	unsigned long ino;
+	u64 ino;
 	int name_len;
 	u32 dt_type;
 
@@ -313,7 +313,7 @@ static inline bool ntfs_dir_emit(struct ntfs_sb_info *sbi,
 	name_len = ntfs_utf16_to_nls(sbi, fname->name, fname->name_len, name,
 				     PATH_MAX);
 	if (name_len <= 0) {
-		ntfs_warn(sbi->sb, "failed to convert name for inode %lx.",
+		ntfs_warn(sbi->sb, "failed to convert name for inode %llx.",
 			  ino);
 		return true;
 	}
