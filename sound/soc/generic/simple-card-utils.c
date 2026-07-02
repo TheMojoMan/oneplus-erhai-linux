@@ -216,6 +216,27 @@ int simple_util_set_dailink_name(struct simple_util_priv *priv,
 }
 EXPORT_SYMBOL_GPL(simple_util_set_dailink_name);
 
+int simple_util_parse_property(struct simple_util_priv *priv,
+			       int (*func)(struct snd_soc_card *card, const char *propname),
+			       char *prefix, char *property)
+{
+	struct snd_soc_card *card = simple_priv_to_card(priv);
+	struct device_node *node = card->dev->of_node;
+	char prop[128];
+
+	if (!prefix)
+		prefix = "";
+
+	snprintf(prop, sizeof(prop), "%s%s", prefix, property);
+
+	/* no property is not error */
+	if (!of_property_present(node, prop))
+		return 0;
+
+	return func(card, prop);
+}
+EXPORT_SYMBOL_GPL(simple_util_parse_property);
+
 int simple_util_parse_card_name(struct simple_util_priv *priv,
 				char *prefix)
 {
@@ -746,57 +767,6 @@ void simple_util_clean_reference(struct snd_soc_card *card)
 	}
 }
 EXPORT_SYMBOL_GPL(simple_util_clean_reference);
-
-int simple_util_parse_routing(struct snd_soc_card *card,
-			      char *prefix)
-{
-	struct device_node *node = card->dev->of_node;
-	char prop[128];
-
-	if (!prefix)
-		prefix = "";
-
-	snprintf(prop, sizeof(prop), "%s%s", prefix, "routing");
-
-	if (!of_property_present(node, prop))
-		return 0;
-
-	return snd_soc_of_parse_audio_routing(card, prop);
-}
-EXPORT_SYMBOL_GPL(simple_util_parse_routing);
-
-int simple_util_parse_widgets(struct snd_soc_card *card,
-			      char *prefix)
-{
-	struct device_node *node = card->dev->of_node;
-	char prop[128];
-
-	if (!prefix)
-		prefix = "";
-
-	snprintf(prop, sizeof(prop), "%s%s", prefix, "widgets");
-
-	if (of_property_present(node, prop))
-		return snd_soc_of_parse_audio_simple_widgets(card, prop);
-
-	/* no widgets is not error */
-	return 0;
-}
-EXPORT_SYMBOL_GPL(simple_util_parse_widgets);
-
-int simple_util_parse_pin_switches(struct snd_soc_card *card,
-				   char *prefix)
-{
-	char prop[128];
-
-	if (!prefix)
-		prefix = "";
-
-	snprintf(prop, sizeof(prop), "%s%s", prefix, "pin-switches");
-
-	return snd_soc_of_parse_pin_switches(card, prop);
-}
-EXPORT_SYMBOL_GPL(simple_util_parse_pin_switches);
 
 int simple_util_init_jack(struct snd_soc_card *card,
 			  struct simple_util_jack *sjack,

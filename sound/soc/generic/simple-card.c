@@ -692,15 +692,15 @@ static int simple_parse_of(struct simple_util_priv *priv)
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_parse_widgets(card, PREFIX);
+	ret = simple_util_parse_widgets(priv, PREFIX);
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_parse_routing(card, PREFIX);
+	ret = simple_util_parse_routing(priv, PREFIX);
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_parse_pin_switches(card, PREFIX);
+	ret = simple_util_parse_pin_switches(priv, PREFIX);
 	if (ret < 0)
 		goto end;
 

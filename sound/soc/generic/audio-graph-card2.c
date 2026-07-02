@@ -1336,11 +1336,11 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 		goto end;
 	}
 
-	ret = simple_util_parse_widgets(card, NULL);
+	ret = simple_util_parse_widgets(priv, NULL);
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_parse_routing(card, NULL);
+	ret = simple_util_parse_routing(priv, NULL);
 	if (ret < 0)
 		goto end;
 
