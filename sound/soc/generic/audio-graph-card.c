@@ -603,14 +603,13 @@ int audio_graph_parse_of(struct simple_util_priv *priv, struct device *dev)
 	simple_util_debug_info(priv);
 
 	ret = devm_snd_soc_register_card(dev, card);
-	if (ret < 0)
-		goto err;
-
-	return 0;
 err:
-	simple_util_clean_reference(card);
+	if (ret < 0) {
+		simple_util_clean_reference(card);
+		return dev_err_probe(dev, ret, "parse error\n");
+	}
 end:
-	return dev_err_probe(dev, ret, "parse error\n");
+	return graph_ret(priv, ret);
 }
 EXPORT_SYMBOL_GPL(audio_graph_parse_of);
 
