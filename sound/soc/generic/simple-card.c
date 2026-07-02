@@ -517,44 +517,6 @@ end:
 	return simple_ret(priv, ret);
 }
 
-static int simple_parse_of(struct simple_util_priv *priv, struct link_info *li)
-{
-	struct snd_soc_card *card = simple_priv_to_card(priv);
-	int ret;
-
-	ret = simple_util_parse_widgets(card, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_util_parse_routing(card, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_util_parse_pin_switches(card, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	/* Single/Muti DAI link(s) & New style of DT node */
-	memset(li, 0, sizeof(*li));
-	ret = simple_for_each_link(priv, li,
-				   simple_dai_link_of,
-				   simple_dai_link_of_dpcm);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_util_parse_card_name(priv, PREFIX);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_populate_aux(priv);
-	if (ret < 0)
-		goto end;
-
-	ret = snd_soc_of_parse_aux_devs(card, PREFIX "aux-devs");
-end:
-	return simple_ret(priv, ret);
-}
-
 static int simple_count_noml(struct simple_util_priv *priv,
 			     struct device_node *np,
 			     struct device_node *codec,
@@ -700,6 +662,44 @@ static int simple_soc_probe(struct snd_soc_card *card)
 		goto end;
 
 	ret = simple_util_init_aux_jacks(priv, PREFIX);
+end:
+	return simple_ret(priv, ret);
+}
+
+static int simple_parse_of(struct simple_util_priv *priv, struct link_info *li)
+{
+	struct snd_soc_card *card = simple_priv_to_card(priv);
+	int ret;
+
+	ret = simple_util_parse_widgets(card, PREFIX);
+	if (ret < 0)
+		goto end;
+
+	ret = simple_util_parse_routing(card, PREFIX);
+	if (ret < 0)
+		goto end;
+
+	ret = simple_util_parse_pin_switches(card, PREFIX);
+	if (ret < 0)
+		goto end;
+
+	/* Single/Muti DAI link(s) & New style of DT node */
+	memset(li, 0, sizeof(*li));
+	ret = simple_for_each_link(priv, li,
+				   simple_dai_link_of,
+				   simple_dai_link_of_dpcm);
+	if (ret < 0)
+		goto end;
+
+	ret = simple_util_parse_card_name(priv, PREFIX);
+	if (ret < 0)
+		goto end;
+
+	ret = simple_populate_aux(priv);
+	if (ret < 0)
+		goto end;
+
+	ret = snd_soc_of_parse_aux_devs(card, PREFIX "aux-devs");
 end:
 	return simple_ret(priv, ret);
 }
