@@ -661,7 +661,7 @@ static int simple_soc_probe(struct snd_soc_card *card)
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_init_aux_jacks(priv, PREFIX);
+	ret = simple_util_init_aux_jacks(card, PREFIX);
 end:
 	return simple_ret(priv, ret);
 }

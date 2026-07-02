@@ -219,8 +219,7 @@ static inline int simple_util_parse_aux_devs(struct simple_util_priv *priv, char
 int simple_util_init_jack(struct snd_soc_card *card,
 			       struct simple_util_jack *sjack,
 			       int is_hp, char *prefix, char *pin);
-int simple_util_init_aux_jacks(struct simple_util_priv *priv,
-				char *prefix);
+int simple_util_init_aux_jacks(struct snd_soc_card *card, char *prefix);
 int simple_util_init_priv(struct simple_util_priv *priv,
 			       struct link_info *li);
 void simple_util_remove(struct platform_device *pdev);

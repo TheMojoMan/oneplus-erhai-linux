@@ -824,9 +824,9 @@ int simple_util_init_jack(struct snd_soc_card *card,
 }
 EXPORT_SYMBOL_GPL(simple_util_init_jack);
 
-int simple_util_init_aux_jacks(struct simple_util_priv *priv, char *prefix)
+int simple_util_init_aux_jacks(struct snd_soc_card *card, char *prefix)
 {
-	struct snd_soc_card *card = simple_priv_to_card(priv);
+	struct simple_util_priv *priv = snd_soc_card_get_drvdata(card);
 	struct snd_soc_component *component;
 	int found_jack_index = 0;
 	int type = 0;
