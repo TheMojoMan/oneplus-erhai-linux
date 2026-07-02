@@ -287,15 +287,6 @@ static inline bool hrtimer_is_queued(struct hrtimer *timer)
 	return READ_ONCE(timer->is_queued);
 }
 
-/*
- * Helper function to check, whether the timer is running the callback
- * function
- */
-static inline int hrtimer_callback_running(struct hrtimer *timer)
-{
-	return timer->base->running == timer;
-}
-
 /**
  * hrtimer_update_function - Update the timer's callback function
  * @timer:	Timer to update
