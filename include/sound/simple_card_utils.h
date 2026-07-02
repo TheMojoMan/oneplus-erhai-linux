@@ -210,6 +210,11 @@ static inline int simple_util_parse_pin_switches(struct simple_util_priv *priv, 
 					  prefix, "pin-switches");
 }
 
+static inline int simple_util_parse_aux_devs(struct simple_util_priv *priv, char *prefix)
+{
+	return simple_util_parse_property(priv, snd_soc_of_parse_aux_devs,
+					  prefix, "aux-devs");
+}
 
 int simple_util_init_jack(struct snd_soc_card *card,
 			       struct simple_util_jack *sjack,

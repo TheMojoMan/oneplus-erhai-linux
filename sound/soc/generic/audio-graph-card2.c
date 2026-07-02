@@ -1363,7 +1363,7 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 
 	simple_util_debug_info(priv);
 
-	ret = snd_soc_of_parse_aux_devs(card, "aux-devs");
+	ret = simple_util_parse_aux_devs(priv, NULL);
 	if (ret < 0)
 		goto err;
 

@@ -720,7 +720,7 @@ static int simple_parse_of(struct simple_util_priv *priv)
 	if (ret < 0)
 		goto err;
 
-	ret = snd_soc_of_parse_aux_devs(card, PREFIX "aux-devs");
+	ret = simple_util_parse_aux_devs(priv, PREFIX);
 	if (ret < 0)
 		goto err;
 
