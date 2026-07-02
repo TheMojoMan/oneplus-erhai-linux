@@ -287,28 +287,8 @@ static inline bool hrtimer_is_queued(struct hrtimer *timer)
 	return READ_ONCE(timer->is_queued);
 }
 
-/**
- * hrtimer_update_function - Update the timer's callback function
- * @timer:	Timer to update
- * @function:	New callback function
- *
- * Only safe to call if the timer is not enqueued. Can be called in the callback function if the
- * timer is not enqueued at the same time (see the comments above HRTIMER_STATE_ENQUEUED).
- */
-static inline void hrtimer_update_function(struct hrtimer *timer,
-					   enum hrtimer_restart (*function)(struct hrtimer *))
-{
-#ifdef CONFIG_PROVE_LOCKING
-	guard(raw_spinlock_irqsave)(&timer->base->cpu_base->lock);
-
-	if (WARN_ON_ONCE(hrtimer_is_queued(timer)))
-		return;
-
-	if (WARN_ON_ONCE(!function))
-		return;
-#endif
-	ACCESS_PRIVATE(timer, function) = function;
-}
+void hrtimer_update_function(struct hrtimer *timer,
+			     enum hrtimer_restart (*function)(struct hrtimer *));
 
 /* Forward a hrtimer so it expires after now: */
 extern u64

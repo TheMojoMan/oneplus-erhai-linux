@@ -1040,6 +1040,30 @@ static inline void unlock_hrtimer_base(const struct hrtimer *timer, unsigned lon
 }
 
 /**
+ * hrtimer_update_function - Update the timer's callback function
+ * @timer:	Timer to update
+ * @function:	New callback function
+ *
+ * Only safe to call if the timer is not enqueued. Can be called in the callback function if the
+ * timer is not enqueued at the same time (see the comments above HRTIMER_STATE_ENQUEUED).
+ */
+void hrtimer_update_function(struct hrtimer *timer,
+			     enum hrtimer_restart (*function)(struct hrtimer *))
+{
+#ifdef CONFIG_PROVE_LOCKING
+	guard(raw_spinlock_irqsave)(&timer->base->cpu_base->lock);
+
+	if (WARN_ON_ONCE(hrtimer_is_queued(timer)))
+		return;
+
+	if (WARN_ON_ONCE(!function))
+		return;
+#endif
+	ACCESS_PRIVATE(timer, function) = function;
+}
+EXPORT_SYMBOL_GPL(hrtimer_update_function);
+
+/**
  * hrtimer_forward() - forward the timer expiry
  * @timer:	hrtimer to forward
  * @now:	forward past this time
