@@ -26,6 +26,7 @@
 #include <linux/export.h>
 #include <linux/percpu.h>
 #include <linux/hrtimer.h>
+#include <linux/hrtimer_bases.h>
 #include <linux/notifier.h>
 #include <linux/syscalls.h>
 #include <linux/interrupt.h>
