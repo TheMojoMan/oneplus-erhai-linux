@@ -2919,7 +2919,6 @@ loff_t ni_seek_data_or_hole(struct ntfs_inode *ni, loff_t offset, bool data)
 				break;
 			}
 		}
-
 	}
 
 	vbo = (u64)vcn << cluster_bits;

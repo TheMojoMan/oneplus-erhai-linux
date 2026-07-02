@@ -606,7 +606,7 @@ static void ntfs_iomap_read_end_io(struct bio *bio)
 }
 
 static void ntfs_iomap_bio_submit_read(const struct iomap_iter *iter,
-		struct iomap_read_folio_ctx *ctx)
+				       struct iomap_read_folio_ctx *ctx)
 {
 	struct bio *bio = ctx->read_ctx;
 
@@ -614,10 +614,12 @@ static void ntfs_iomap_bio_submit_read(const struct iomap_iter *iter,
 	submit_bio(bio);
 }
 
+// clang-format off
 static const struct iomap_read_ops ntfs_iomap_bio_read_ops = {
 	.read_folio_range	= iomap_bio_read_folio_range,
 	.submit_read		= ntfs_iomap_bio_submit_read,
 };
+// clang-format on
 
 static int ntfs_read_folio(struct file *file, struct folio *folio)
 {
