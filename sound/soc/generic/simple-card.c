@@ -666,10 +666,31 @@ end:
 	return simple_ret(priv, ret);
 }
 
-static int simple_parse_of(struct simple_util_priv *priv, struct link_info *li)
+static int simple_parse_of(struct simple_util_priv *priv)
 {
 	struct snd_soc_card *card = simple_priv_to_card(priv);
-	int ret;
+	struct device *dev = card->dev;
+	int ret = -EINVAL;
+
+	if (!dev)
+		goto end;
+
+	ret = -ENOMEM;
+	struct link_info *li __free(kfree) = kzalloc_obj(*li);
+	if (!li)
+		goto end;
+
+	ret = simple_get_dais_count(priv, li);
+	if (ret < 0)
+		goto end;
+
+	ret = -EINVAL;
+	if (!li->link)
+		goto end;
+
+	ret = simple_util_init_priv(priv, li);
+	if (ret < 0)
+		goto end;
 
 	ret = simple_util_parse_widgets(card, PREFIX);
 	if (ret < 0)
@@ -689,17 +710,30 @@ static int simple_parse_of(struct simple_util_priv *priv, struct link_info *li)
 				   simple_dai_link_of,
 				   simple_dai_link_of_dpcm);
 	if (ret < 0)
-		goto end;
+		goto err;
 
 	ret = simple_util_parse_card_name(priv, PREFIX);
 	if (ret < 0)
-		goto end;
+		goto err;
 
 	ret = simple_populate_aux(priv);
 	if (ret < 0)
-		goto end;
+		goto err;
 
 	ret = snd_soc_of_parse_aux_devs(card, PREFIX "aux-devs");
+	if (ret < 0)
+		goto err;
+
+	snd_soc_card_set_drvdata(card, priv);
+
+	simple_util_debug_info(priv);
+
+	ret = devm_snd_soc_register_card(dev, card);
+err:
+	if (ret < 0) {
+		simple_util_clean_reference(card);
+		return dev_err_probe(dev, ret, "parse error\n");
+	}
 end:
 	return simple_ret(priv, ret);
 }
@@ -709,7 +743,6 @@ static int simple_probe(struct platform_device *pdev)
 	struct simple_util_priv *priv;
 	struct device *dev = &pdev->dev;
 	struct snd_soc_card *card;
-	int ret;
 
 	/* Allocate the private data and the DAI link array */
 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
@@ -722,42 +755,7 @@ static int simple_probe(struct platform_device *pdev)
 	card->probe		= simple_soc_probe;
 	card->driver_name       = "simple-card";
 
-	ret = -ENOMEM;
-	struct link_info *li __free(kfree) = kzalloc_obj(*li);
-	if (!li)
-		goto end;
-
-	ret = simple_get_dais_count(priv, li);
-	if (ret < 0)
-		goto end;
-
-	ret = -EINVAL;
-	if (!li->link)
-		goto end;
-
-	ret = simple_util_init_priv(priv, li);
-	if (ret < 0)
-		goto end;
-
-	ret = simple_parse_of(priv, li);
-	if (ret < 0) {
-		dev_err_probe(dev, ret, "parse error\n");
-		goto err;
-	}
-
-	snd_soc_card_set_drvdata(card, priv);
-
-	simple_util_debug_info(priv);
-
-	ret = devm_snd_soc_register_card(dev, card);
-	if (ret < 0)
-		goto err;
-
-	return 0;
-err:
-	simple_util_clean_reference(card);
-end:
-	return dev_err_probe(dev, ret, "parse error\n");
+	return simple_parse_of(priv);
 }
 
 static const struct of_device_id simple_of_match[] = {
