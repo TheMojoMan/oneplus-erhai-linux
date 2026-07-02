@@ -704,6 +704,14 @@ static int simple_parse_of(struct simple_util_priv *priv)
 	if (ret < 0)
 		goto end;
 
+	ret = simple_util_parse_card_name(priv, PREFIX);
+	if (ret < 0)
+		goto err;
+
+	ret = simple_util_parse_aux_devs(priv, PREFIX);
+	if (ret < 0)
+		goto err;
+
 	/* Single/Muti DAI link(s) & New style of DT node */
 	memset(li, 0, sizeof(*li));
 	ret = simple_for_each_link(priv, li,
@@ -712,15 +720,7 @@ static int simple_parse_of(struct simple_util_priv *priv)
 	if (ret < 0)
 		goto err;
 
-	ret = simple_util_parse_card_name(priv, PREFIX);
-	if (ret < 0)
-		goto err;
-
 	ret = simple_populate_aux(priv);
-	if (ret < 0)
-		goto err;
-
-	ret = simple_util_parse_aux_devs(priv, PREFIX);
 	if (ret < 0)
 		goto err;
 
