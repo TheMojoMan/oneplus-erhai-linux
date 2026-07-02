@@ -181,7 +181,7 @@ void simple_util_canonicalize_platform(struct snd_soc_dai_link_component *platfo
 void simple_util_canonicalize_cpu(struct snd_soc_dai_link_component *cpus,
 				  int is_single_links);
 
-void simple_util_clean_reference(struct snd_soc_card *card);
+void simple_util_clean_reference(struct simple_util_priv *priv);
 
 void simple_util_parse_convert(struct device_node *np, char *prefix,
 			       struct simple_util_data *data);

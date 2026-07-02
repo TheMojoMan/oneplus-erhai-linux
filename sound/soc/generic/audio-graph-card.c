@@ -605,7 +605,7 @@ int audio_graph_parse_of(struct simple_util_priv *priv, struct device *dev)
 	ret = devm_snd_soc_register_card(dev, card);
 err:
 	if (ret < 0) {
-		simple_util_clean_reference(card);
+		simple_util_clean_reference(priv);
 		return dev_err_probe(dev, ret, "parse error\n");
 	}
 end:
