@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-#ifndef _LINUX_HRTIMER_DEFS_H
-#define _LINUX_HRTIMER_DEFS_H
+#ifndef _LINUX_HRTIMER_BASES_H
+#define _LINUX_HRTIMER_BASES_H
 
 #include <linux/ktime.h>
 #include <linux/timerqueue.h>
