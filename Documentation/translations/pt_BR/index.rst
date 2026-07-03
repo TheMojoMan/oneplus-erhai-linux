@@ -69,6 +69,7 @@ kernel e sobre como ver seu trabalho integrado.
    Introdução <process/1.Intro>
    Guia do Processo de Desenvolvimento <process/development-process>
    Como aplicar patches <process/applying-patches>
+   Backporting e resolução de conflitos <process/backporting>
    Index de documentos do Kernel <process/kernel-docs>
    Regras de licenciamento <process/license-rules>
    Como começar <process/howto>
