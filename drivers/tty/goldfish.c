@@ -38,7 +38,6 @@ struct goldfish_tty {
 	spinlock_t lock;
 	void __iomem *base;
 	u32 irq;
-	int opencount;
 	struct console console;
 	u32 version;
 	struct device *dev;
