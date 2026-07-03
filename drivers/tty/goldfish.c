@@ -18,6 +18,7 @@
 #include <linux/mm.h>
 #include <linux/dma-mapping.h>
 #include <linux/serial_core.h>
+#include <linux/wordpart.h>
 
 /* Goldfish tty register's offsets */
 #define	GOLDFISH_TTY_REG_BYTES_READY	0x04
@@ -49,6 +50,14 @@ static u32 goldfish_tty_line_count = 8;
 static u32 goldfish_tty_current_line_count;
 static struct goldfish_tty *goldfish_ttys;
 
+static inline void gf_write_addr(unsigned long addr, void __iomem *portl, void __iomem *porth)
+{
+	gf_iowrite32(lower_32_bits(addr), portl);
+#ifdef CONFIG_64BIT
+	gf_iowrite32(upper_32_bits(addr), porth);
+#endif
+}
+
 static void do_rw_io(struct goldfish_tty *qtty, unsigned long address,
 		     size_t count, bool is_write)
 {
@@ -56,8 +65,8 @@ static void do_rw_io(struct goldfish_tty *qtty, unsigned long address,
 	void __iomem *base = qtty->base;
 
 	spin_lock_irqsave(&qtty->lock, irq_flags);
-	gf_write_ptr((void *)address, base + GOLDFISH_TTY_REG_DATA_PTR,
-		     base + GOLDFISH_TTY_REG_DATA_PTR_HIGH);
+	gf_write_addr(address, base + GOLDFISH_TTY_REG_DATA_PTR,
+		      base + GOLDFISH_TTY_REG_DATA_PTR_HIGH);
 	gf_iowrite32(count, base + GOLDFISH_TTY_REG_DATA_LEN);
 
 	if (is_write)
