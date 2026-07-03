@@ -603,6 +603,13 @@ irqreturn_t tegra30_mc_handle_irq(int irq, void *data)
 	if (!status)
 		return IRQ_NONE;
 
+	if (!mc->soc->regs) {
+		dev_err_ratelimited(mc->dev,
+				    "MC error interrupt 0x%08lx with no error register map, Clearing.\n",
+				    status);
+		goto clear;
+	}
+
 	for_each_set_bit(bit, &status, 32) {
 		const char *error = tegra_mc_status_names[bit] ?: "unknown";
 		const char *client = "unknown", *desc;
@@ -741,6 +748,7 @@ irqreturn_t tegra30_mc_handle_irq(int irq, void *data)
 				    desc, perm);
 	}
 
+clear:
 	/* clear interrupts */
 	if (mc->soc->num_channels) {
 		mc_ch_writel(mc, channel, status, MC_INTSTATUS);
