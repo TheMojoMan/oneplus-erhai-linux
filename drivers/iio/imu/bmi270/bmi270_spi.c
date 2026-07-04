@@ -76,6 +76,7 @@ static const struct of_device_id bmi270_of_match[] = {
 	{ .compatible = "bosch,bmi270", .data = &bmi270_chip_info },
 	{ }
 };
+MODULE_DEVICE_TABLE(of, bmi270_of_match);
 
 static struct spi_driver bmi270_spi_driver = {
 	.driver = {
