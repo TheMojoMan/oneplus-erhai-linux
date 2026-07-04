@@ -4,6 +4,8 @@
 // Copyright (c) 2012 Samsung Electronics Co., Ltd.
 // Author: Joonyoung Shim <jy0922.shim@samsung.com>
 
+#include <linux/bitfield.h>
+#include <linux/bits.h>
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/of.h>
@@ -76,9 +78,16 @@ struct mms_chip {
 	int (*get_version)(struct mms114_data *data);
 };
 
+#define MMS114_FLAGS_ID_MASK		GENMASK(3, 0)
+#define MMS114_FLAGS_TYPE_MASK		GENMASK(6, 5)
+#define MMS114_FLAGS_PRESSED_MASK	BIT(7)
+
+#define MMS114_XY_HI_X_MASK		GENMASK(3, 0)
+#define MMS114_XY_HI_Y_MASK		GENMASK(7, 4)
+
 struct mms114_touch {
-	u8 id:4, reserved_bit4:1, type:2, pressed:1;
-	u8 x_hi:4, y_hi:4;
+	u8 flags;
+	u8 xy_hi;
 	u8 x_lo;
 	u8 y_lo;
 	u8 width;
@@ -244,28 +253,30 @@ static void mms114_process_mt(struct mms114_data *data, struct mms114_touch *tou
 {
 	struct i2c_client *client = data->client;
 	struct input_dev *input_dev = data->input_dev;
-	unsigned int id;
+	unsigned int id = FIELD_GET(MMS114_FLAGS_ID_MASK, touch->flags);
+	unsigned int type = FIELD_GET(MMS114_FLAGS_TYPE_MASK, touch->flags);
+	bool pressed = FIELD_GET(MMS114_FLAGS_PRESSED_MASK, touch->flags);
 	unsigned int x;
 	unsigned int y;
 
-	if (touch->id == 0 || touch->id > MMS114_MAX_TOUCH) {
-		dev_err(&client->dev, "Wrong touch id (%d)\n", touch->id);
+	if (id == 0 || id > MMS114_MAX_TOUCH) {
+		dev_err(&client->dev, "Wrong touch id (%d)\n", id);
 		return;
 	}
 
-	id = touch->id - 1;
-	x = touch->x_lo | touch->x_hi << 8;
-	y = touch->y_lo | touch->y_hi << 8;
+	id--;
+	x = touch->x_lo | FIELD_GET(MMS114_XY_HI_X_MASK, touch->xy_hi) << 8;
+	y = touch->y_lo | FIELD_GET(MMS114_XY_HI_Y_MASK, touch->xy_hi) << 8;
 
 	dev_dbg(&client->dev,
 		"id: %d, type: %d, pressed: %d, x: %d, y: %d, width: %d, strength: %d\n",
-		id, touch->type, touch->pressed,
+		id, type, pressed,
 		x, y, touch->width, touch->strength);
 
 	input_mt_slot(input_dev, id);
-	input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, touch->pressed);
+	input_mt_report_slot_state(input_dev, MT_TOOL_FINGER, pressed);
 
-	if (touch->pressed) {
+	if (pressed) {
 		touchscreen_report_pos(input_dev, &data->props, x, y, true);
 		input_report_abs(input_dev, ABS_MT_TOUCH_MAJOR, touch->width);
 		input_report_abs(input_dev, ABS_MT_PRESSURE, touch->strength);
@@ -278,21 +289,23 @@ static void mms114_process_touchkey(struct mms114_data *data,
 	struct i2c_client *client = data->client;
 	struct input_dev *input_dev = data->input_dev;
 	unsigned int keycode_id;
+	unsigned int id = FIELD_GET(MMS114_FLAGS_ID_MASK, touch->flags);
+	bool pressed = FIELD_GET(MMS114_FLAGS_PRESSED_MASK, touch->flags);
 
-	if (touch->id == 0)
+	if (id == 0)
 		return;
 
-	if (touch->id > data->num_keycodes) {
+	if (id > data->num_keycodes) {
 		dev_err(&client->dev, "Wrong touch id for touchkey (%d)\n",
-			touch->id);
+			id);
 		return;
 	}
 
-	keycode_id = touch->id - 1;
+	keycode_id = id - 1;
 	dev_dbg(&client->dev, "keycode id: %d, pressed: %d\n", keycode_id,
-		touch->pressed);
+		pressed);
 
-	input_report_key(input_dev, data->keycodes[keycode_id], touch->pressed);
+	input_report_key(input_dev, data->keycodes[keycode_id], pressed);
 }
 
 static irqreturn_t mms114_interrupt(int irq, void *dev_id)
@@ -325,8 +338,9 @@ static irqreturn_t mms114_interrupt(int irq, void *dev_id)
 
 	for (index = 0; index < touch_size; index++) {
 		t = (struct mms114_touch *)((u8 *)touch + index * event_size);
+		unsigned int type = FIELD_GET(MMS114_FLAGS_TYPE_MASK, t->flags);
 
-		switch (t->type) {
+		switch (type) {
 		case MMS114_TYPE_TOUCHSCREEN:
 			mms114_process_mt(data, t);
 			break;
@@ -337,7 +351,7 @@ static irqreturn_t mms114_interrupt(int irq, void *dev_id)
 
 		default:
 			dev_err(&client->dev, "Wrong touch type (%d)\n",
-				t->type);
+				type);
 			break;
 		}
 	}
