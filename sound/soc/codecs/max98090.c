@@ -2646,12 +2646,18 @@ static void max98090_i2c_remove(struct i2c_client *client)
 static int max98090_runtime_resume(struct device *dev)
 {
 	struct max98090_priv *max98090 = dev_get_drvdata(dev);
+	int ret;
 
 	regcache_cache_only(max98090->regmap, false);
 
 	max98090_reset(max98090);
 
-	regcache_sync(max98090->regmap);
+	ret = regcache_sync(max98090->regmap);
+	if (ret < 0) {
+		regcache_cache_only(max98090->regmap, true);
+		regcache_mark_dirty(max98090->regmap);
+		return ret;
+	}
 
 	return 0;
 }
