@@ -550,7 +550,7 @@ static const struct acpi_device_id pca9685_acpi_ids[] = {
 MODULE_DEVICE_TABLE(acpi, pca9685_acpi_ids);
 
 static const struct of_device_id pca9685_dt_ids[] = {
-	{ .compatible = "nxp,pca9685-pwm", },
+	{ .compatible = "nxp,pca9685-pwm" },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, pca9685_dt_ids);

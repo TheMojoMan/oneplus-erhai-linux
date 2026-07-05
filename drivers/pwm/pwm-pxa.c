@@ -144,10 +144,10 @@ static const struct pwm_ops pxa_pwm_ops = {
  * supported identically.
  */
 static const struct of_device_id pwm_of_match[] = {
-	{ .compatible = "marvell,pxa250-pwm", .data = &pwm_id_table[0]},
-	{ .compatible = "marvell,pxa270-pwm", .data = &pwm_id_table[0]},
-	{ .compatible = "marvell,pxa168-pwm", .data = &pwm_id_table[0]},
-	{ .compatible = "marvell,pxa910-pwm", .data = &pwm_id_table[0]},
+	{ .compatible = "marvell,pxa250-pwm", .data = &pwm_id_table[0] },
+	{ .compatible = "marvell,pxa270-pwm", .data = &pwm_id_table[0] },
+	{ .compatible = "marvell,pxa168-pwm", .data = &pwm_id_table[0] },
+	{ .compatible = "marvell,pxa910-pwm", .data = &pwm_id_table[0] },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, pwm_of_match);
