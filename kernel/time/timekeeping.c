@@ -1202,10 +1202,21 @@ static inline u64 tk_clock_read_snapshot(const struct tk_read_base *tkr,
 
 /**
  * ktime_get_snapshot_id -  Simultaneously snapshot a given clock ID with
- *			    CLOCK_MONOTONIC_RAW and the underlying
+ *			    the corresponding monotonic raw and the underlying
  *			    clocksource counter value.
  * @clock_id:		The clock ID to snapshot
  * @systime_snapshot:	Pointer to struct receiving the system time snapshot
+ *
+ * For the system time keeping clocks (REALTIME, MONOTONIC and BOOTTIME) the
+ * monotonic raw clock is CLOCK_MONOTONIC_RAW. For AUX clocks this is the
+ * monotonic raw clock related to the AUX clock. These AUX clock related
+ * monotonic raw clocks have a strict linear offset to the system time
+ * CLOCK_MONOTONIC_RAW:
+ *
+ *	MONOTONIC_RAW(AUX$N) = CLOCK_MONOTONIC_RAW(system) + offset(AUX$N)
+ *
+ * The offset is established when a AUX clock is initialized, but it is
+ * currently not accessible.
  */
 void ktime_get_snapshot_id(clockid_t clock_id, struct system_time_snapshot *systime_snapshot)
 {
@@ -1512,6 +1523,9 @@ EXPORT_SYMBOL_GPL(ktime_real_to_base_clock);
  * @xtstamp:		Receives simultaneously captured system and device time
  *
  * Reads a timestamp from a device and correlates it to system time
+ *
+ * See documentation for ktime_get_snapshot_id() for information about the raw
+ * monotonic time stamp which is used here.
  */
 int get_device_system_crosststamp(int (*get_time_fn)
 				  (ktime_t *device_time,
