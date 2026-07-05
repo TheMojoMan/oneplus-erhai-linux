@@ -63,7 +63,7 @@ static const struct acpi_device_id pwm_lpss_acpi_match[] = {
 	{ .id = "80862288", .driver_data = (unsigned long)&pwm_lpss_bsw_info },
 	{ .id = "80862289", .driver_data = (unsigned long)&pwm_lpss_bsw_info },
 	{ .id = "80865AC8", .driver_data = (unsigned long)&pwm_lpss_bxt_info },
-	{ },
+	{ }
 };
 MODULE_DEVICE_TABLE(acpi, pwm_lpss_acpi_match);
 
