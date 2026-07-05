@@ -544,7 +544,7 @@ static const struct i2c_device_id pca9685_id[] = {
 MODULE_DEVICE_TABLE(i2c, pca9685_id);
 
 static const struct acpi_device_id pca9685_acpi_ids[] = {
-	{ "INT3492" },
+	{ .id = "INT3492" },
 	{ /* sentinel */ },
 };
 MODULE_DEVICE_TABLE(acpi, pca9685_acpi_ids);
