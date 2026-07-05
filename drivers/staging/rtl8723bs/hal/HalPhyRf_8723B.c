@@ -349,7 +349,7 @@ static u8 phy_PathA_IQK_8723B(
 	struct dm_odm_t *pDM_Odm = &pHalData->odmpriv;
 
 	/*  Save RF Path */
-	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord);
+	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord);
 
 	/* leave IQK mode */
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x000000);
@@ -387,10 +387,10 @@ static u8 phy_PathA_IQK_8723B(
 	/* Ant switch */
 	if (configPathB || (RF_Path == 0))
 		/*  wifi switch to S1 */
-		PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000000);
+		PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000000);
 	else
 		/*  wifi switch to S0 */
-		PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000280);
+		PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000280);
 
 	/* GNT_BT = 0 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00000800);
@@ -404,7 +404,7 @@ static u8 phy_PathA_IQK_8723B(
 	mdelay(IQK_DELAY_TIME_8723B);
 
 	/* restore Ant Path */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, Path_SEL_BB);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, Path_SEL_BB);
 	/* GNT_BT = 1 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00001800);
 
@@ -447,7 +447,7 @@ static u8 phy_PathA_RxIQK8723B(
 	struct dm_odm_t *pDM_Odm = &pHalData->odmpriv;
 
 	/*  Save RF Path */
-	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord);
+	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord);
 
 	/* leave IQK mode */
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x000000);
@@ -486,10 +486,10 @@ static u8 phy_PathA_RxIQK8723B(
 	/* Ant switch */
 	if (configPathB || (RF_Path == 0))
 		/*  wifi switch to S1 */
-		PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000000);
+		PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000000);
 	else
 		/*  wifi switch to S0 */
-		PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000280);
+		PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000280);
 
 	/* GNT_BT = 0 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00000800);
@@ -503,7 +503,7 @@ static u8 phy_PathA_RxIQK8723B(
 	mdelay(IQK_DELAY_TIME_8723B);
 
 	/* restore Ant Path */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, Path_SEL_BB);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, Path_SEL_BB);
 	/* GNT_BT = 1 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00001800);
 
@@ -572,10 +572,10 @@ static u8 phy_PathA_RxIQK8723B(
 	/* Ant switch */
 	if (configPathB || (RF_Path == 0))
 		/*  wifi switch to S1 */
-		PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000000);
+		PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000000);
 	else
 		/*  wifi switch to S0 */
-		PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000280);
+		PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000280);
 
 	/* GNT_BT = 0 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00000800);
@@ -589,7 +589,7 @@ static u8 phy_PathA_RxIQK8723B(
 	mdelay(IQK_DELAY_TIME_8723B);
 
 	/* restore Ant Path */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, Path_SEL_BB);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, Path_SEL_BB);
 	/* GNT_BT = 1 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00001800);
 
@@ -632,7 +632,7 @@ static u8 phy_PathB_IQK_8723B(struct adapter *padapter)
 	struct dm_odm_t *pDM_Odm = &pHalData->odmpriv;
 
 	/*  Save RF Path */
-	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord);
+	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord);
 
     /* leave IQK mode */
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x000000);
@@ -669,7 +669,7 @@ static u8 phy_PathB_IQK_8723B(struct adapter *padapter)
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x808000);
 
 	/* switch to path B */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000280);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000280);
 /* 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0xb0, bRFRegOffsetMask, 0xeffe0); */
 
 	/* GNT_BT = 0 */
@@ -684,7 +684,7 @@ static u8 phy_PathB_IQK_8723B(struct adapter *padapter)
 	mdelay(IQK_DELAY_TIME_8723B);
 
 	/* restore Ant Path */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, Path_SEL_BB);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, Path_SEL_BB);
 	/* GNT_BT = 1 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00001800);
 
@@ -723,12 +723,12 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 	struct dm_odm_t *pDM_Odm = &pHalData->odmpriv;
 
 	/*  Save RF Path */
-	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord);
+	Path_SEL_BB = PHY_QueryBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord);
     /* leave IQK mode */
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x000000);
 
 	/* switch to path B */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000280);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000280);
 	/* modify RXIQK mode table */
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, RF_WE_LUT, 0x80000, 0x1);
 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, RF_RCK_OS, bRFRegOffsetMask, 0x18000);
@@ -761,7 +761,7 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x808000);
 
 	/* switch to path B */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000280);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000280);
 /* 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0xb0, bRFRegOffsetMask, 0xeffe0); */
 
 	/* GNT_BT = 0 */
@@ -776,7 +776,7 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 	mdelay(IQK_DELAY_TIME_8723B);
 
 	/* restore Ant Path */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, Path_SEL_BB);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, Path_SEL_BB);
 	/* GNT_BT = 1 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00001800);
 
@@ -847,7 +847,7 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 	PHY_SetBBReg(pDM_Odm->Adapter, rFPGA0_IQK, bMaskH3Bytes, 0x808000);
 
 	/* switch to path B */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, 0x00000280);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, 0x00000280);
 /* 	PHY_SetRFReg(pDM_Odm->Adapter, RF_PATH_A, 0xb0, bRFRegOffsetMask, 0xeffe0); */
 
 	/* GNT_BT = 0 */
@@ -862,7 +862,7 @@ static u8 phy_PathB_RxIQK8723B(struct adapter *padapter, bool configPathB)
 	mdelay(IQK_DELAY_TIME_8723B);
 
 	/* restore Ant Path */
-	PHY_SetBBReg(pDM_Odm->Adapter, 0x948, bMaskDWord, Path_SEL_BB);
+	PHY_SetBBReg(pDM_Odm->Adapter, rS0S1_PathSwitch, bMaskDWord, Path_SEL_BB);
 	/* GNT_BT = 1 */
 	PHY_SetBBReg(pDM_Odm->Adapter, 0x764, bMaskDWord, 0x00001800);
 
