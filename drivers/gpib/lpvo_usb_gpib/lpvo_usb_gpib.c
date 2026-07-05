@@ -1811,14 +1811,9 @@ static ssize_t lpvo_write(struct file *file, const char __user *user_buffer,
 
 	dev = file->private_data;
 
-	buf = kmalloc(count, GFP_KERNEL);
-	if (!buf)
-		return -ENOMEM;
-
-	if (copy_from_user(buf, user_buffer, count)) {
-		kfree(buf);
-		return -EFAULT;
-	}
+	buf = memdup_user(user_buffer, count);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
 
 	rv = lpvo_do_write(dev, buf, count);
 	kfree(buf);
