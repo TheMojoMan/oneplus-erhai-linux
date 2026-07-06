@@ -12,6 +12,10 @@ use kernel::{
         Device,
         DmaMask, //
     },
+    io::{
+        io_project,
+        io_read, //
+    },
     page, pci,
     prelude::*,
     scatterlist::{Owned, SGTable},
@@ -77,7 +81,8 @@ impl pci::Driver for DmaSampleDriver {
                 Coherent::zeroed_slice(pdev.as_ref(), TEST_VALUES.len(), GFP_KERNEL)?;
 
             for (i, value) in TEST_VALUES.into_iter().enumerate() {
-                kernel::dma_write!(ca, [try: i], MyStruct::new(value.0, value.1));
+                // SAFETY: `ca` is not yet shared with device or other threads.
+                unsafe { *io_project!(ca, [panic: i]).as_mut() = MyStruct::new(value.0, value.1) };
             }
 
             let size = 4 * page::PAGE_SIZE;
@@ -97,8 +102,8 @@ impl pci::Driver for DmaSampleDriver {
 impl DmaSampleDriver {
     fn check_dma(&self) {
         for (i, value) in TEST_VALUES.into_iter().enumerate() {
-            let val0 = kernel::dma_read!(self.ca, [panic: i].h);
-            let val1 = kernel::dma_read!(self.ca, [panic: i].b);
+            let val0 = io_read!(self.ca, [panic: i].h);
+            let val1 = io_read!(self.ca, [panic: i].b);
 
             assert_eq!(val0, value.0);
             assert_eq!(val1, value.1);
