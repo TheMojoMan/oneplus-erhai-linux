@@ -119,9 +119,8 @@ static const struct iio_chan_spec als_channels[] = {
 
 /* Channel read_raw handler */
 static int als_read_raw(struct iio_dev *indio_dev,
-			      struct iio_chan_spec const *chan,
-			      int *val, int *val2,
-			      long mask)
+			struct iio_chan_spec const *chan,
+			int *val, int *val2, long mask)
 {
 	struct als_state *als_state = iio_priv(indio_dev);
 	struct hid_sensor_hub_device *hsdev = als_state->common_attributes.hsdev;
@@ -162,12 +161,12 @@ static int als_read_raw(struct iio_dev *indio_dev,
 		}
 		if (report_id >= 0) {
 			hid_sensor_power_state(&als_state->common_attributes,
-						true);
+					       true);
 			*val = sensor_hub_input_attr_get_raw_value(
 					hsdev, hsdev->usage, address, report_id,
 					SENSOR_HUB_SYNC, min < 0);
 			hid_sensor_power_state(&als_state->common_attributes,
-						false);
+					       false);
 		} else {
 			*val = 0;
 			return -EINVAL;
@@ -205,10 +204,8 @@ static int als_read_raw(struct iio_dev *indio_dev,
 
 /* Channel write_raw handler */
 static int als_write_raw(struct iio_dev *indio_dev,
-			       struct iio_chan_spec const *chan,
-			       int val,
-			       int val2,
-			       long mask)
+			 struct iio_chan_spec const *chan,
+			 int val, int val2, long mask)
 {
 	struct als_state *als_state = iio_priv(indio_dev);
 	int ret = 0;
@@ -240,8 +237,7 @@ static const struct iio_info als_info = {
 
 /* Callback handler to send event after all samples are received and captured */
 static int als_proc_event(struct hid_sensor_hub_device *hsdev,
-				u32 usage_id,
-				void *priv)
+			  u32 usage_id, void *priv)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(priv);
 	struct als_state *als_state = iio_priv(indio_dev);
@@ -262,9 +258,9 @@ static int als_proc_event(struct hid_sensor_hub_device *hsdev,
 
 /* Capture samples in local storage */
 static int als_capture_sample(struct hid_sensor_hub_device *hsdev,
-				u32 usage_id,
-				size_t raw_len, char *raw_data,
-				void *priv)
+			      u32 usage_id,
+			      size_t raw_len, char *raw_data,
+			      void *priv)
 {
 	struct iio_dev *indio_dev = platform_get_drvdata(priv);
 	struct als_state *als_state = iio_priv(indio_dev);
@@ -303,9 +299,9 @@ static int als_capture_sample(struct hid_sensor_hub_device *hsdev,
 
 /* Parse report which is specific to an usage id*/
 static int als_parse_report(struct platform_device *pdev,
-				struct hid_sensor_hub_device *hsdev,
-				u32 usage_id,
-				struct als_state *st)
+			    struct hid_sensor_hub_device *hsdev,
+			    u32 usage_id,
+			    struct als_state *st)
 {
 	struct iio_chan_spec *channels;
 	int ret, index = 0;
@@ -399,7 +395,7 @@ static int hid_als_probe(struct platform_device *pdev)
 	atomic_set(&als_state->common_attributes.data_ready, 0);
 
 	ret = hid_sensor_setup_trigger(indio_dev, name,
-				&als_state->common_attributes);
+				       &als_state->common_attributes);
 	if (ret < 0) {
 		dev_err(&pdev->dev, "trigger setup failed\n");
 		return ret;
