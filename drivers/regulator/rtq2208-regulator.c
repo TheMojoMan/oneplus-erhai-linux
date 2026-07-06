@@ -9,7 +9,6 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/machine.h>
 #include <linux/regulator/of_regulator.h>
-#include <linux/mod_devicetable.h>
 
 /* Register */
 #define RTQ2208_REG_FSOUTB_CNTL			0x11
