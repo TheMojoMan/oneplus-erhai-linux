@@ -2013,6 +2013,7 @@ static void dwcmshc_bf3_hw_reset(struct sdhci_host *host)
 {
 	struct arm_smccc_res res = { 0 };
 
+	pr_debug("%s: resetting...\n", __func__);
 	arm_smccc_smc(BLUEFIELD_SMC_SET_EMMC_RST_N, 0, 0, 0, 0, 0, 0, 0, &res);
 
 	if (res.a0)
