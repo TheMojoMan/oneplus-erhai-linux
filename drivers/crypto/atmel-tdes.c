@@ -285,7 +285,6 @@ static int atmel_tdes_write_ctrl(struct atmel_tdes_dev *dd)
 
 static int atmel_tdes_crypt_pdc_stop(struct atmel_tdes_dev *dd)
 {
-	int err = 0;
 	size_t count;
 
 	atmel_tdes_write(dd, TDES_PTCR, TDES_PTCR_TXTDIS|TDES_PTCR_RXTDIS);
@@ -297,16 +296,15 @@ static int atmel_tdes_crypt_pdc_stop(struct atmel_tdes_dev *dd)
 		dma_sync_single_for_cpu(dd->dev, dd->dma_addr_out,
 					dd->dma_size, DMA_FROM_DEVICE);
 
-		/* copy data */
 		count = atmel_tdes_sg_copy(&dd->out_sg, &dd->out_offset,
 				dd->buf_out, dd->buflen, dd->dma_size, 1);
 		if (count != dd->dma_size) {
-			err = -EINVAL;
 			dev_dbg(dd->dev, "not all data converted: %zu\n", count);
+			return -EINVAL;
 		}
 	}
 
-	return err;
+	return 0;
 }
 
 static int atmel_tdes_buff_init(struct atmel_tdes_dev *dd)
