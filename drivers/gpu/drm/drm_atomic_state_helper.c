@@ -873,7 +873,7 @@ EXPORT_SYMBOL(drm_atomic_helper_bridge_duplicate_state);
  * @state: bridge state to destroy
  *
  * Destroys a bridge state previously created by
- * &drm_atomic_helper_bridge_reset() or
+ * &drm_atomic_helper_bridge_create_state() or
  * &drm_atomic_helper_bridge_duplicate_state(). This helper is meant to be
  * used as a bridge &drm_bridge_funcs.atomic_destroy_state hook for bridges
  * that don't subclass the bridge state.
@@ -886,35 +886,39 @@ void drm_atomic_helper_bridge_destroy_state(struct drm_bridge *bridge,
 EXPORT_SYMBOL(drm_atomic_helper_bridge_destroy_state);
 
 /**
- * __drm_atomic_helper_bridge_reset() - Initialize a bridge state to its
+ * __drm_atomic_helper_bridge_state_init() - Initialize a bridge state to its
  *					default
- * @bridge: the bridge this state refers to
  * @state: bridge state to initialize
+ * @bridge: the bridge this state refers to
+ *
+ * @state is assumed to be zeroed.
  *
  * Initializes the bridge state to default values. This is meant to be called
- * by the bridge &drm_bridge_funcs.atomic_reset hook for bridges that subclass
- * the bridge state.
+ * by the bridge &drm_bridge_funcs.atomic_create_state hook for bridges that
+ * subclass the bridge state.
  */
-void __drm_atomic_helper_bridge_reset(struct drm_bridge *bridge,
-				      struct drm_bridge_state *state)
+void __drm_atomic_helper_bridge_state_init(struct drm_bridge_state *state,
+					   struct drm_bridge *bridge)
 {
-	memset(state, 0, sizeof(*state));
 	__drm_atomic_helper_private_obj_create_state(&bridge->base, &state->base);
 	state->bridge = bridge;
 }
-EXPORT_SYMBOL(__drm_atomic_helper_bridge_reset);
+EXPORT_SYMBOL(__drm_atomic_helper_bridge_state_init);
 
 /**
- * drm_atomic_helper_bridge_reset() - Allocate and initialize a bridge state
- *				      to its default
- * @bridge: the bridge this state refers to
+ * drm_atomic_helper_bridge_create_state - default
+ *              &drm_bridge_funcs.atomic_create_state hook for bridges
+ * @bridge: bridge object
  *
- * Allocates the bridge state and initializes it to default values. This helper
- * is meant to be used as a bridge &drm_bridge_funcs.atomic_reset hook for
- * bridges that don't subclass the bridge state.
+ * Allocates and initializes pristine @drm_bridge_state.
+ *
+ * This is useful for drivers that don't subclass @drm_bridge_state.
+ *
+ * RETURNS:
+ * Pointer to new bridge state, or ERR_PTR on failure.
  */
 struct drm_bridge_state *
-drm_atomic_helper_bridge_reset(struct drm_bridge *bridge)
+drm_atomic_helper_bridge_create_state(struct drm_bridge *bridge)
 {
 	struct drm_bridge_state *bridge_state;
 
@@ -922,7 +926,7 @@ drm_atomic_helper_bridge_reset(struct drm_bridge *bridge)
 	if (!bridge_state)
 		return ERR_PTR(-ENOMEM);
 
-	__drm_atomic_helper_bridge_reset(bridge, bridge_state);
+	__drm_atomic_helper_bridge_state_init(bridge_state, bridge);
 	return bridge_state;
 }
-EXPORT_SYMBOL(drm_atomic_helper_bridge_reset);
+EXPORT_SYMBOL(drm_atomic_helper_bridge_create_state);
