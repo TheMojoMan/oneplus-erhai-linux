@@ -6274,6 +6274,8 @@ static void mac80211_hwsim_free(void)
 						struct mac80211_hwsim_data,
 						list))) {
 		list_del(&data->list);
+		rhashtable_remove_fast(&hwsim_radios_rht, &data->rht,
+				       hwsim_rht_params);
 		spin_unlock_bh(&hwsim_radio_lock);
 		mac80211_hwsim_del_radio(data, wiphy_name(data->hw->wiphy),
 					 NULL);
