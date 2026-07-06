@@ -601,28 +601,25 @@ static int atmel_tdes_handle_queue(struct atmel_tdes_dev *dd,
 
 static int atmel_tdes_crypt_dma_stop(struct atmel_tdes_dev *dd)
 {
-	int err = -EINVAL;
 	size_t count;
 
-	if (dd->flags & TDES_FLAGS_DMA) {
-		err = 0;
-		if  (dd->flags & TDES_FLAGS_FAST) {
-			dma_unmap_sg(dd->dev, dd->out_sg, 1, DMA_FROM_DEVICE);
-			dma_unmap_sg(dd->dev, dd->in_sg, 1, DMA_TO_DEVICE);
-		} else {
-			dma_sync_single_for_cpu(dd->dev, dd->dma_addr_out,
-						dd->dma_size, DMA_FROM_DEVICE);
+	if  (dd->flags & TDES_FLAGS_FAST) {
+		dma_unmap_sg(dd->dev, dd->out_sg, 1, DMA_FROM_DEVICE);
+		dma_unmap_sg(dd->dev, dd->in_sg, 1, DMA_TO_DEVICE);
+	} else {
+		dma_sync_single_for_cpu(dd->dev, dd->dma_addr_out, dd->dma_size,
+					DMA_FROM_DEVICE);
 
-			/* copy data */
-			count = atmel_tdes_sg_copy(&dd->out_sg, &dd->out_offset,
-				dd->buf_out, dd->buflen, dd->dma_size, 1);
-			if (count != dd->dma_size) {
-				err = -EINVAL;
-				dev_dbg(dd->dev, "not all data converted: %zu\n", count);
-			}
+		count = atmel_tdes_sg_copy(&dd->out_sg, &dd->out_offset,
+					   dd->buf_out, dd->buflen,
+					   dd->dma_size, 1);
+		if (count != dd->dma_size) {
+			dev_dbg(dd->dev, "not all data converted: %zu\n", count);
+			return -EINVAL;
 		}
 	}
-	return err;
+
+	return 0;
 }
 
 static int atmel_tdes_crypt(struct skcipher_request *req, unsigned long mode)
