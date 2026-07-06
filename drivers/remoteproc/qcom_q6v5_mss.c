@@ -163,6 +163,7 @@ struct rproc_hexagon_res {
 	char **active_clk_names;
 	char **proxy_pd_names;
 	int version;
+	int ssctl_id;
 	bool need_mem_protection;
 	bool need_pas_mem_setup;
 	bool has_alt_reset;
@@ -2192,7 +2193,7 @@ static int q6v5_probe(struct platform_device *pdev)
 	qcom_add_smd_subdev(rproc, &qproc->smd_subdev);
 	qcom_add_pdm_subdev(rproc, &qproc->pdm_subdev);
 	qcom_add_ssr_subdev(rproc, &qproc->ssr_subdev, "mpss");
-	qproc->sysmon = qcom_add_sysmon_subdev(rproc, "modem", 0x12);
+	qproc->sysmon = qcom_add_sysmon_subdev(rproc, "modem", desc->ssctl_id);
 	if (IS_ERR(qproc->sysmon)) {
 		ret = PTR_ERR(qproc->sysmon);
 		goto remove_subdevs;
@@ -2272,6 +2273,7 @@ static const struct rproc_hexagon_res sc7180_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_SC7180,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res sc7280_mss = {
@@ -2302,6 +2304,7 @@ static const struct rproc_hexagon_res sc7280_mss = {
 	.has_ext_cntl_regs = true,
 	.has_vq6 = true,
 	.version = MSS_SC7280,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res sdm660_mss = {
@@ -2335,6 +2338,7 @@ static const struct rproc_hexagon_res sdm660_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_SDM660,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res sdm845_mss = {
@@ -2372,6 +2376,7 @@ static const struct rproc_hexagon_res sdm845_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_SDM845,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8998_mss = {
@@ -2405,6 +2410,7 @@ static const struct rproc_hexagon_res msm8998_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8998,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8996_mss = {
@@ -2445,6 +2451,7 @@ static const struct rproc_hexagon_res msm8996_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8996,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res mdm9607_mss = {
@@ -2480,6 +2487,7 @@ static const struct rproc_hexagon_res mdm9607_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MDM9607,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8909_mss = {
@@ -2516,6 +2524,7 @@ static const struct rproc_hexagon_res msm8909_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8909,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8916_mss = {
@@ -2563,6 +2572,7 @@ static const struct rproc_hexagon_res msm8916_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8916,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8917_mss = {
@@ -2607,6 +2617,7 @@ static const struct rproc_hexagon_res msm8917_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8917,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8937_mss = {
@@ -2651,6 +2662,7 @@ static const struct rproc_hexagon_res msm8937_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8937,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8940_mss = {
@@ -2695,6 +2707,7 @@ static const struct rproc_hexagon_res msm8940_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8940,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8953_mss = {
@@ -2732,6 +2745,7 @@ static const struct rproc_hexagon_res msm8953_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8953,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8974_mss = {
@@ -2786,6 +2800,7 @@ static const struct rproc_hexagon_res msm8974_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8974,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8226_mss = {
@@ -2825,6 +2840,7 @@ static const struct rproc_hexagon_res msm8226_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8226,
+	.ssctl_id = 0x12,
 };
 
 static const struct rproc_hexagon_res msm8926_mss = {
@@ -2872,6 +2888,7 @@ static const struct rproc_hexagon_res msm8926_mss = {
 	.has_ext_cntl_regs = false,
 	.has_vq6 = false,
 	.version = MSS_MSM8926,
+	.ssctl_id = 0x12,
 };
 
 static const struct of_device_id q6v5_of_match[] = {
