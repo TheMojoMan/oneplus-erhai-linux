@@ -1614,10 +1614,17 @@ Kernel parameters
 			on all PCI bridges while in the EFI boot stub
 
 	efi_no_storage_paranoia [EFI,X86,EARLY]
-			Using this parameter you can use more than 50% of
-			your efi variable storage. Use this parameter only if
-			you are really sure that your UEFI does sane gc and
-			fulfills the spec otherwise your board may brick.
+			The kernel reserves 5KB of EFI variable storage for
+			safety, because some UEFI implementation may fail to
+			boot if there's insufficient space in the EFI variable
+			storage.
+
+			Using this parameter, you can use the 5KB reservation
+			in the EFI variable storage.
+
+			However, Use this parameter only if you are really
+			sure that your UEFI does sane gc and fulfills the spec
+			otherwise your board may brick.
 
 	efivar_ssdt=	[EFI; X86] Name of an EFI variable that contains an SSDT
 			that is to be dynamically loaded by Linux. If there are
