@@ -6567,6 +6567,7 @@ err_virt:
 err_gmem:
 	kvm_vfio_ops_exit();
 err_vfio:
+	debugfs_remove_recursive(kvm_debugfs_dir);
 	kvm_async_pf_deinit();
 err_async_pf:
 	kvm_irqfd_exit();
