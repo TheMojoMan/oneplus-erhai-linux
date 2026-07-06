@@ -707,7 +707,7 @@ static inline void hrtimer_rearm_event(ktime_t expires_next, bool deferred)
 	tick_program_event(expires_next, 1);
 }
 
-static void __hrtimer_reprogram(struct hrtimer_cpu_base *cpu_base, struct hrtimer *next_timer,
+static void __hrtimer_reprogram(struct hrtimer_cpu_base *cpu_base,
 				ktime_t expires_next)
 {
 	cpu_base->expires_next = expires_next;
@@ -743,7 +743,7 @@ static void hrtimer_force_reprogram(struct hrtimer_cpu_base *cpu_base, bool skip
 	if (skip_equal && expires_next == cpu_base->expires_next)
 		return;
 
-	__hrtimer_reprogram(cpu_base, cpu_base->next_timer, expires_next);
+	__hrtimer_reprogram(cpu_base, expires_next);
 }
 
 /* High resolution timer related functions */
@@ -896,7 +896,7 @@ static void hrtimer_reprogram(struct hrtimer *timer, bool reprogram)
 
 	cpu_base->next_timer = timer;
 
-	__hrtimer_reprogram(cpu_base, timer, expires);
+	__hrtimer_reprogram(cpu_base, expires);
 }
 
 static bool update_needs_ipi(struct hrtimer_cpu_base *cpu_base, unsigned int active)
