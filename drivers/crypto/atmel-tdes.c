@@ -451,25 +451,19 @@ static int atmel_tdes_crypt_dma(struct atmel_tdes_dev *dd,
 
 static int atmel_tdes_crypt_start(struct atmel_tdes_dev *dd)
 {
-	int err, fast = 0, in, out;
+	bool fast;
+	int err;
 	size_t count;
 	dma_addr_t addr_in, addr_out;
 
-	if ((!dd->in_offset) && (!dd->out_offset)) {
-		/* check for alignment */
-		in = IS_ALIGNED((u32)dd->in_sg->offset, sizeof(u32)) &&
-			IS_ALIGNED(dd->in_sg->length, dd->ctx->block_size);
-		out = IS_ALIGNED((u32)dd->out_sg->offset, sizeof(u32)) &&
-			IS_ALIGNED(dd->out_sg->length, dd->ctx->block_size);
-		fast = in && out;
+	fast = !dd->in_offset && !dd->out_offset &&
+		dd->in_sg->length == dd->out_sg->length &&
+		IS_ALIGNED(dd->in_sg->offset, sizeof(u32)) &&
+		IS_ALIGNED(dd->out_sg->offset, sizeof(u32)) &&
+		IS_ALIGNED(dd->in_sg->length, dd->ctx->block_size);
 
-		if (dd->in_sg->length != dd->out_sg->length)
-			fast = 0;
-	}
-
-
-	if (fast)  {
-		count = min_t(size_t, dd->total, dd->in_sg->length);
+	if (fast) {
+		count = min(dd->total, dd->in_sg->length);
 
 		err = dma_map_sg(dd->dev, dd->in_sg, 1, DMA_TO_DEVICE);
 		if (!err) {
