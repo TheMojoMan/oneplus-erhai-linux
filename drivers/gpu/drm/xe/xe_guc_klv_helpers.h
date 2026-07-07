@@ -13,6 +13,7 @@ struct drm_printer;
 
 const char *xe_guc_klv_key_to_string(u16 key);
 
+void xe_guc_klv_print_one(u16 key, u16 len, const u32 *value, struct drm_printer *p);
 void xe_guc_klv_print(const u32 *klvs, u32 num_dwords, struct drm_printer *p);
 int xe_guc_klv_count(const u32 *klvs, u32 num_dwords);
 

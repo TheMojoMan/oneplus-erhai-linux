@@ -79,6 +79,39 @@ const char *xe_guc_klv_key_to_string(u16 key)
 }
 
 /**
+ * xe_guc_klv_print_one() - Print single `GuC KLV`_.
+ * @key: KLV key
+ * @len: KLV length (in u32 dwords) of the KLV @value
+ * @value: KLV value (as array of @len u32 dwords)
+ * @p: the &drm_printer
+ *
+ * The buffer may contain more than one KLV.
+ */
+void xe_guc_klv_print_one(u16 key, u16 len, const u32 *value, struct drm_printer *p)
+{
+	const char *name = xe_guc_klv_key_to_string(key);
+
+	switch (len) {
+	case 0:
+		drm_printf(p, "{ key %#06x : no value } # %s\n", key, name);
+		break;
+	case 1:
+		drm_printf(p, "{ key %#06x : 32b value %u } # %s\n",
+			   key, value[0], name);
+		break;
+	case 2:
+		drm_printf(p, "{ key %#06x : 64b value %#llx } # %s\n",
+			   key, make_u64(value[1], value[0]), name);
+		break;
+	default:
+		drm_printf(p, "{ key %#06x : %zu bytes %*ph } # %s\n",
+			   key, len * sizeof(u32), (int)(len * sizeof(u32)),
+			   value, name);
+		break;
+	}
+}
+
+/**
  * xe_guc_klv_print - Print content of the buffer with `GuC KLV`_.
  * @klvs: the buffer with KLVs
  * @num_dwords: number of dwords (u32) available in the buffer
@@ -103,26 +136,7 @@ void xe_guc_klv_print(const u32 *klvs, u32 num_dwords, struct drm_printer *p)
 			return;
 		}
 
-		switch (len) {
-		case 0:
-			drm_printf(p, "{ key %#06x : no value } # %s\n",
-				   key, xe_guc_klv_key_to_string(key));
-			break;
-		case 1:
-			drm_printf(p, "{ key %#06x : 32b value %u } # %s\n",
-				   key, klvs[0], xe_guc_klv_key_to_string(key));
-			break;
-		case 2:
-			drm_printf(p, "{ key %#06x : 64b value %#llx } # %s\n",
-				   key, make_u64(klvs[1], klvs[0]),
-				   xe_guc_klv_key_to_string(key));
-			break;
-		default:
-			drm_printf(p, "{ key %#06x : %zu bytes %*ph } # %s\n",
-				   key, len * sizeof(u32), (int)(len * sizeof(u32)),
-				   klvs, xe_guc_klv_key_to_string(key));
-			break;
-		}
+		xe_guc_klv_print_one(key, len, klvs, p);
 
 		klvs += len;
 		num_dwords -= len;
