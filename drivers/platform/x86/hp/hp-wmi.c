@@ -549,9 +549,9 @@ struct hp_wmi_hwmon_priv {
 	struct mutex lock;	/* protects mode, pwm */
 	u8 min_rpm;
 	u8 max_rpm;
-	int gpu_delta;
 	u8 mode;
-	u8 pwm;
+	u8 cpu_pwm;
+	u8 gpu_pwm;
 	struct delayed_work keep_alive_dwork;
 };
 
@@ -878,24 +878,20 @@ static int hp_wmi_fan_speed_max_set(int enabled)
 	return enabled;
 }
 
-static int hp_wmi_fan_speed_set(struct hp_wmi_hwmon_priv *priv, u8 speed)
+static int hp_wmi_fan_speed_set(struct hp_wmi_hwmon_priv *priv)
 {
 	u8 fan_speed[2];
-	int gpu_speed, ret;
+	int ret;
 
-	fan_speed[CPU_FAN] = speed;
-	fan_speed[GPU_FAN] = speed;
+	if (priv->cpu_pwm == HP_FAN_SPEED_AUTOMATIC)
+		fan_speed[CPU_FAN] = HP_FAN_SPEED_AUTOMATIC;
+	else
+		fan_speed[CPU_FAN] = pwm_to_rpm(priv->cpu_pwm, priv);
 
-	/*
-	 * GPU fan speed is always a little higher than CPU fan speed, we fetch
-	 * this delta value from the fan table during hwmon init.
-	 * Exception: Speed is set to HP_FAN_SPEED_AUTOMATIC, to revert to
-	 * automatic mode.
-	 */
-	if (speed != HP_FAN_SPEED_AUTOMATIC) {
-		gpu_speed = speed + priv->gpu_delta;
-		fan_speed[GPU_FAN] = clamp_val(gpu_speed, 0, U8_MAX);
-	}
+	if (priv->gpu_pwm == HP_FAN_SPEED_AUTOMATIC)
+		fan_speed[GPU_FAN] = HP_FAN_SPEED_AUTOMATIC;
+	else
+		fan_speed[GPU_FAN] = pwm_to_rpm(priv->gpu_pwm, priv);
 
 	ret = hp_wmi_get_fan_count_userdefine_trigger();
 	if (ret < 0)
@@ -912,7 +908,9 @@ static int hp_wmi_fan_speed_set(struct hp_wmi_hwmon_priv *priv, u8 speed)
 
 static int hp_wmi_fan_speed_reset(struct hp_wmi_hwmon_priv *priv)
 {
-	return hp_wmi_fan_speed_set(priv, HP_FAN_SPEED_AUTOMATIC);
+	priv->cpu_pwm = HP_FAN_SPEED_AUTOMATIC;
+	priv->gpu_pwm = HP_FAN_SPEED_AUTOMATIC;
+	return hp_wmi_fan_speed_set(priv);
 }
 
 static int hp_wmi_fan_speed_max_reset(struct hp_wmi_hwmon_priv *priv)
@@ -2503,7 +2501,7 @@ static int hp_wmi_apply_fan_settings(struct hp_wmi_hwmon_priv *priv)
 	case PWM_MODE_MANUAL:
 		if (!hp_wmi_fan_control_supported())
 			return -EOPNOTSUPP;
-		ret = hp_wmi_fan_speed_set(priv, pwm_to_rpm(priv->pwm, priv));
+		ret = hp_wmi_fan_speed_set(priv);
 		if (ret < 0)
 			return ret;
 		mod_delayed_work(system_dfl_wq, &priv->keep_alive_dwork,
@@ -2603,13 +2601,14 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 			      u32 attr, int channel, long val)
 {
 	struct hp_wmi_hwmon_priv *priv;
-	int rpm;
+	int cpu_rpm, gpu_rpm;
 
 	priv = dev_get_drvdata(dev);
 	guard(mutex)(&priv->lock);
 	switch (type) {
 	case hwmon_pwm:
 		if (attr == hwmon_pwm_input) {
+			int rpm;
 			if (!hp_wmi_fan_control_supported())
 				return -EOPNOTSUPP;
 			/* PWM input is invalid when not in manual mode */
@@ -2619,7 +2618,10 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 			/* ensure PWM input is within valid fan speeds */
 			rpm = pwm_to_rpm(val, priv);
 			rpm = clamp_val(rpm, priv->min_rpm, priv->max_rpm);
-			priv->pwm = rpm_to_pwm(rpm, priv);
+			if (channel == CPU_FAN)
+				priv->cpu_pwm = rpm_to_pwm(rpm, priv);
+			else if (channel == GPU_FAN)
+				priv->gpu_pwm = rpm_to_pwm(rpm, priv);
 			return hp_wmi_apply_fan_settings(priv);
 		}
 		switch (val) {
@@ -2633,10 +2635,14 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 			 * When switching to manual mode, set fan speed to
 			 * current RPM values to ensure a smooth transition.
 			 */
-			rpm = hp_wmi_get_active_fan_speed(channel);
-			if (rpm < 0)
-				return rpm;
-			priv->pwm = rpm_to_pwm(rpm / 100, priv);
+			cpu_rpm = hp_wmi_get_active_fan_speed(CPU_FAN);
+			if (cpu_rpm < 0)
+				return cpu_rpm;
+			gpu_rpm = hp_wmi_get_active_fan_speed(GPU_FAN);
+			if (gpu_rpm < 0)
+				return gpu_rpm;
+			priv->cpu_pwm = rpm_to_pwm(cpu_rpm / 100, priv);
+			priv->gpu_pwm = rpm_to_pwm(gpu_rpm / 100, priv);
 			priv->mode = PWM_MODE_MANUAL;
 			return hp_wmi_apply_fan_settings(priv);
 		case PWM_MODE_AUTO:
@@ -2652,7 +2658,7 @@ static int hp_wmi_hwmon_write(struct device *dev, enum hwmon_sensor_types type,
 
 static const struct hwmon_channel_info * const info[] = {
 	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT, HWMON_F_INPUT),
-	HWMON_CHANNEL_INFO(pwm, HWMON_PWM_ENABLE | HWMON_PWM_INPUT),
+	HWMON_CHANNEL_INFO(pwm, HWMON_PWM_ENABLE | HWMON_PWM_INPUT, HWMON_PWM_INPUT),
 	NULL
 };
 
@@ -2693,7 +2699,7 @@ static int hp_wmi_setup_fan_settings(struct hp_wmi_hwmon_priv *priv)
 	struct victus_s_fan_table *fan_table;
 	u8 min_rpm, max_rpm;
 	u8 cpu_rpm, gpu_rpm, noise_db;
-	int gpu_delta, i, num_entries, ret;
+	int i, num_entries, ret;
 	size_t header_size, entry_size;
 
 	/* Default behaviour on hwmon init is automatic mode */
@@ -2739,10 +2745,8 @@ static int hp_wmi_setup_fan_settings(struct hp_wmi_hwmon_priv *priv)
 	if (min_rpm == U8_MAX || max_rpm == 0)
 		return -EINVAL;
 
-	gpu_delta = fan_table->entries[0].gpu_rpm - fan_table->entries[0].cpu_rpm;
 	priv->min_rpm = min_rpm;
 	priv->max_rpm = max_rpm;
-	priv->gpu_delta = gpu_delta;
 
 	return 0;
 }
