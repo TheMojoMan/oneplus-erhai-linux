@@ -144,6 +144,28 @@ struct kobj_attribute {
 			 const char *buf, size_t count);
 };
 
+#define __KOBJ_ATTR(_name, _mode, _show, _store) {			\
+	.attr	= { .name = __stringify(_name),				\
+		    .mode = VERIFY_OCTAL_PERMISSIONS(_mode) },		\
+	.show	= _show,						\
+	.store	= _store,						\
+}
+
+#define __KOBJ_ATTR_RO_MODE(_name, _mode)				\
+	__KOBJ_ATTR(_name, _mode, _name##_show, NULL)
+
+#define __KOBJ_ATTR_RO(_name)						\
+	__KOBJ_ATTR_RO_MODE(_name, 0444)
+
+#define __KOBJ_ATTR_RW_MODE(_name, _mode)				\
+	__KOBJ_ATTR(_name, _mode, _name##_show, _name##_store)
+
+#define __KOBJ_ATTR_WO(_name)						\
+	__KOBJ_ATTR(_name, 0200, NULL, _name##_store)
+
+#define __KOBJ_ATTR_RW(_name)						\
+	__KOBJ_ATTR(_name, 0644, _name##_show, _name##_store)
+
 extern const struct sysfs_ops kobj_sysfs_ops;
 
 struct sock;
