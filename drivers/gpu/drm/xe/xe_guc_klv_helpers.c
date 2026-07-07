@@ -189,3 +189,59 @@ int xe_guc_klv_count(const u32 *klvs, u32 num_dwords)
 
 	return num_dwords ? -ENODATA : num_klvs;
 }
+
+static u16 to_num_dwords(size_t size)
+{
+	return round_up(size, sizeof(u32)) / sizeof(u32);
+}
+
+/**
+ * xe_guc_klv_encode_u32() - Encode 32-bit value as KLV.
+ * @klvs: the buffer where to place KLV
+ * @avail: number of dwords (u32) available in the buffer
+ * @key: key to be used
+ * @value: value to be encoded
+ *
+ * Return: pointer to the buffer location past the encoded KLV or
+ *         an ERR_PTR if there was no space to encode the KLV.
+ */
+u32 *xe_guc_klv_encode_u32(u32 *klvs, u32 avail, u16 key, u32 value)
+{
+	u16 len = to_num_dwords(sizeof(u32));
+
+	if (IS_ERR(klvs))
+		return klvs;
+
+	if (avail < GUC_KLV_LEN_MIN + len)
+		return ERR_PTR(-ENOSPC);
+
+	*klvs++ = PREP_GUC_KLV(key, len);
+	*klvs++ = value;
+	return klvs;
+}
+
+/**
+ * xe_guc_klv_encode_u64() - Encode 64-bit value as KLV.
+ * @klvs: the buffer where to place KLV
+ * @avail: number of dwords (u32) available in the buffer
+ * @key: key to be used
+ * @value: value to be encoded
+ *
+ * Return: pointer to the buffer location past the encoded KLV or
+ *         an ERR_PTR if there was no space to encode the KLV.
+ */
+u32 *xe_guc_klv_encode_u64(u32 *klvs, u32 avail, u16 key, u64 value)
+{
+	u16 len = to_num_dwords(sizeof(u64));
+
+	if (IS_ERR(klvs))
+		return klvs;
+
+	if (avail < GUC_KLV_LEN_MIN + len)
+		return ERR_PTR(-ENOSPC);
+
+	*klvs++ = PREP_GUC_KLV(key, len);
+	*klvs++ = lower_32_bits(value);
+	*klvs++ = upper_32_bits(value);
+	return klvs;
+}

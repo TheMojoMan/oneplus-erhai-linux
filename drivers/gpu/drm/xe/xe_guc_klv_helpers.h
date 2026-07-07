@@ -17,6 +17,9 @@ void xe_guc_klv_print_one(u16 key, u16 len, const u32 *value, struct drm_printer
 void xe_guc_klv_print(const u32 *klvs, u32 num_dwords, struct drm_printer *p);
 int xe_guc_klv_count(const u32 *klvs, u32 num_dwords);
 
+u32 *xe_guc_klv_encode_u32(u32 *klvs, u32 avail, u16 key, u32 value);
+u32 *xe_guc_klv_encode_u64(u32 *klvs, u32 avail, u16 key, u64 value);
+
 /**
  * PREP_GUC_KLV - Prepare KLV header value based on provided key and len.
  * @key: KLV key
