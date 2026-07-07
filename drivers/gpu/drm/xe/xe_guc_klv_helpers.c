@@ -280,3 +280,42 @@ u32 *xe_guc_klv_encode_string(u32 *klvs, u32 avail, u16 key, const char *s)
 	strscpy_pad((void *)klvs, s, to_num_bytes(len));
 	return klvs + len;
 }
+
+/**
+ * xe_guc_klv_encode_object() - Encode object using custom encoder as single KLV.
+ * @klvs: the buffer where to place KLV
+ * @avail: number of dwords (u32) available in the buffer
+ * @key: key to be used
+ * @obj: opaque object pointer
+ * @encoder: function pointer to the custom encoder
+ *
+ * Return: pointer to the buffer location past the encoded KLV or
+ *         an ERR_PTR if there was no space to encode the KLV.
+ */
+u32 *xe_guc_klv_encode_object(u32 *klvs, u32 avail, u16 key, const void *obj,
+			      u32 *(*encoder)(u32 *klvs, u32 avail, const void *obj))
+{
+	u32 *end;
+
+	if (IS_ERR(klvs))
+		return klvs;
+
+	if (avail < GUC_KLV_LEN_MIN)
+		return ERR_PTR(-ENOSPC);
+
+	if (avail > GUC_KLV_LEN_MIN + FIELD_MAX(GUC_KLV_0_LEN))
+		avail = GUC_KLV_LEN_MIN + FIELD_MAX(GUC_KLV_0_LEN);
+
+	end = encoder(klvs + GUC_KLV_LEN_MIN, avail - GUC_KLV_LEN_MIN, obj);
+	if (IS_ERR(end))
+		return end;
+
+	if (WARN_ON(end < klvs + GUC_KLV_LEN_MIN))
+		return ERR_PTR(-EPIPE);
+
+	if (WARN_ON(end > klvs + avail))
+		return ERR_PTR(-EFBIG);
+
+	*klvs = PREP_GUC_KLV(key, end - (klvs + GUC_KLV_LEN_MIN));
+	return end;
+}
