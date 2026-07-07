@@ -11,7 +11,6 @@
 #include <linux/linkage.h>
 #include <linux/nospec.h>
 #include <linux/objtool.h>
-#include <linux/randomize_kstack.h>
 #include <linux/syscalls.h>
 #include <linux/unistd.h>
 
@@ -70,9 +69,7 @@ void noinstr __no_stack_protector do_syscall(struct pt_regs *regs)
 	regs->orig_a0 = regs->regs[4];
 	regs->regs[4] = -ENOSYS;
 
-	nr = syscall_enter_from_user_mode(regs, nr);
-
-	add_random_kstack_offset();
+	nr = syscall_enter_from_user_mode_randomize_stack(regs, nr);
 
 	if (nr < NR_syscalls) {
 		syscall_fn = sys_call_table[array_index_nospec(nr, NR_syscalls)];
