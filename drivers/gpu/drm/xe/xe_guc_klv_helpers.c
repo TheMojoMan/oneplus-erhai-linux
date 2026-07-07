@@ -319,3 +319,41 @@ u32 *xe_guc_klv_encode_object(u32 *klvs, u32 avail, u16 key, const void *obj,
 	*klvs = PREP_GUC_KLV(key, end - (klvs + GUC_KLV_LEN_MIN));
 	return end;
 }
+
+/**
+ * xe_guc_klv_parser() - Parse and decode stream of KLVs.
+ * @klvs: the buffer with KLVs
+ * @num_dwords: number of dwords (u32) available in the buffer
+ * @obj: opaque pointer to be used by the @decoder function
+ * @decoder: pointer to the decoder function
+ *
+ * Return: The sum of all results returned by the decoder or
+ *         an -errno on decoder or buffer failure.
+ */
+int xe_guc_klv_parser(const u32 *klvs, u32 num_dwords, void *obj,
+		      int (*decoder)(void *obj, u16 key, u16 len, const u32 *value))
+{
+	int total = 0;
+	int ret;
+
+	while (num_dwords >= GUC_KLV_LEN_MIN) {
+		u16 key = FIELD_GET(GUC_KLV_0_KEY, klvs[0]);
+		u16 len = FIELD_GET(GUC_KLV_0_LEN, klvs[0]);
+
+		klvs += GUC_KLV_LEN_MIN;
+		num_dwords -= GUC_KLV_LEN_MIN;
+
+		if (num_dwords < len)
+			return -ENODATA;
+
+		ret = decoder(obj, key, len, klvs);
+		if (ret < 0)
+			return ret;
+		total += ret;
+
+		klvs += len;
+		num_dwords -= len;
+	}
+
+	return total;
+}
