@@ -68,7 +68,7 @@ invoked from low-level assembly code looks like this:
   noinstr void syscall(struct pt_regs *regs, int nr)
   {
 	arch_syscall_enter(regs);
-	nr = syscall_enter_from_user_mode(regs, nr);
+	nr = syscall_enter_from_user_mode_randomize_stack(regs, nr);
 
 	instrumentation_begin();
 	if (!invoke_syscall(regs, nr) && nr != -1)
@@ -78,12 +78,14 @@ invoked from low-level assembly code looks like this:
 	syscall_exit_to_user_mode(regs);
   }
 
-syscall_enter_from_user_mode() first invokes enter_from_user_mode() which
-establishes state in the following order:
+syscall_enter_from_user_mode_randomize_stack() first invokes
+enter_from_user_mode_randomize_stack() which establishes state in the
+following order:
 
   * Lockdep
   * RCU / Context tracking
   * Tracing
+  * Apply stack randomization
 
 and then invokes the various entry work functions like ptrace, seccomp, audit,
 syscall tracing, etc. After all that is done, the instrumentable invoke_syscall
@@ -99,10 +101,11 @@ transition in the reverse order:
   * RCU / Context tracking
   * Lockdep
 
-syscall_enter_from_user_mode() and syscall_exit_to_user_mode() are also
-available as fine grained subfunctions in cases where the architecture code
-has to do extra work between the various steps. In such cases it has to
-ensure that enter_from_user_mode() is called first on entry and
+syscall_enter_from_user_mode_randomize_stack() and
+syscall_exit_to_user_mode() are also available as fine grained subfunctions
+in cases where the architecture code has to do extra work between the
+various steps. In such cases it has to ensure that
+enter_from_user_mode_randomize_stack() is called first on entry and
 exit_to_user_mode() is called last on exit.
 
 Do not nest syscalls. Nested syscalls will cause RCU and/or context tracking

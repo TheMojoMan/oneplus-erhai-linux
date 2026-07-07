@@ -20,7 +20,7 @@
 #endif
 
 /*
- * SYSCALL_WORK flags handled in syscall_enter_from_user_mode()
+ * SYSCALL_WORK flags handled in syscall_enter_from_user_mode_work()
  */
 #define SYSCALL_WORK_ENTER	(SYSCALL_WORK_SECCOMP |			\
 				 SYSCALL_WORK_SYSCALL_TRACEPOINT |	\
@@ -205,42 +205,10 @@ do {									\
 	_ret;								\
 })
 
-/**
- * syscall_enter_from_user_mode - Establish state and check and handle work
- *				  before invoking a syscall
- * @regs:	Pointer to currents pt_regs
- * @syscall:	The syscall number
- *
- * Invoked from architecture specific syscall entry code with interrupts
- * disabled. The calling code has to be non-instrumentable. When the
- * function returns all state is correct, interrupts are enabled and the
- * subsequent functions can be instrumented.
- *
- * This is the combination of enter_from_user_mode() and
- * syscall_enter_from_user_mode_work() to be used when there is no
- * architecture specific work to be done between the two.
- *
- * Returns: The original or a modified syscall number. See
- * syscall_enter_from_user_mode_work() for further explanation.
- */
-static __always_inline long syscall_enter_from_user_mode(struct pt_regs *regs, long syscall)
-{
-	long ret;
-
-	enter_from_user_mode(regs);
-
-	instrumentation_begin();
-	local_irq_enable();
-	ret = syscall_enter_from_user_mode_work(regs, syscall);
-	instrumentation_end();
-
-	return ret;
-}
-
 /*
- * If SYSCALL_EMU is set, then the only reason to report is when
- * SINGLESTEP is set (i.e. PTRACE_SYSEMU_SINGLESTEP).  This syscall
- * instruction has been already reported in syscall_enter_from_user_mode().
+ * If SYSCALL_EMU is set, then the only reason to report is when SINGLESTEP is
+ * set (i.e. PTRACE_SYSEMU_SINGLESTEP).  This syscall instruction has been
+ * already reported in syscall_enter_from_user_mode_work().
  */
 static __always_inline bool report_single_step(unsigned long work)
 {
