@@ -16,6 +16,7 @@
 #include <linux/acpi.h>
 #include <linux/array_size.h>
 #include <linux/bitfield.h>
+#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/dmi.h>
 #include <linux/err.h>
@@ -1010,7 +1011,8 @@ fail_class_get:
 static int init_rog_tunables(void)
 {
 	const struct power_limits *ac_limits, *dc_limits;
-	struct rog_tunables *ac_rog_tunables = NULL, *dc_rog_tunables = NULL;
+	struct rog_tunables *ac_rog_tunables __free(kfree) = NULL;
+	struct rog_tunables *dc_rog_tunables __free(kfree) = NULL;
 	const struct power_data *power_data;
 	const struct dmi_system_id *dmi_id;
 
@@ -1080,10 +1082,8 @@ static int init_rog_tunables(void)
 	dc_limits = power_data->dc_data;
 	if (dc_limits) {
 		dc_rog_tunables = kzalloc_obj(*dc_rog_tunables);
-		if (!dc_rog_tunables) {
-			kfree(ac_rog_tunables);
+		if (!dc_rog_tunables)
 			return -ENOMEM;
-		}
 
 		dc_rog_tunables->power_limits = dc_limits;
 
@@ -1124,8 +1124,8 @@ static int init_rog_tunables(void)
 		pr_debug("No DC PPT limits defined\n");
 	}
 
-	asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_AC] = ac_rog_tunables;
-	asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_DC] = dc_rog_tunables;
+	asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_AC] = no_free_ptr(ac_rog_tunables);
+	asus_armoury.rog_tunables[ASUS_ROG_TUNABLE_DC] = no_free_ptr(dc_rog_tunables);
 
 	return 0;
 }
