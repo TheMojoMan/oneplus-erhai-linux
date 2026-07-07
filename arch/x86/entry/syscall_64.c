@@ -68,7 +68,7 @@ static __always_inline bool do_syscall_x64(struct pt_regs *regs, int nr)
 	return false;
 }
 
-static __always_inline bool do_syscall_x32(struct pt_regs *regs, int nr)
+static __always_inline void do_syscall_x32(struct pt_regs *regs, int nr)
 {
 	/*
 	 * Adjust the starting offset of the table, and convert numbers
@@ -80,9 +80,7 @@ static __always_inline bool do_syscall_x32(struct pt_regs *regs, int nr)
 	if (IS_ENABLED(CONFIG_X86_X32_ABI) && likely(xnr < X32_NR_syscalls)) {
 		xnr = array_index_nospec(xnr, X32_NR_syscalls);
 		regs->ax = x32_sys_call(regs, xnr);
-		return true;
 	}
-	return false;
 }
 
 /* Returns true to return using SYSRET, or false to use IRET */
@@ -92,10 +90,8 @@ __visible noinstr bool do_syscall_64(struct pt_regs *regs, int nr)
 
 	instrumentation_begin();
 
-	if (!do_syscall_x64(regs, nr) && !do_syscall_x32(regs, nr) && nr != -1) {
-		/* Invalid system call, but still a system call. */
-		regs->ax = __x64_sys_ni_syscall(regs);
-	}
+	if (!do_syscall_x64(regs, nr))
+		do_syscall_x32(regs, nr);
 
 	instrumentation_end();
 	syscall_exit_to_user_mode(regs);
