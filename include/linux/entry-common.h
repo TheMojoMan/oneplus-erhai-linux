@@ -39,21 +39,22 @@
 				 SYSCALL_WORK_SYSCALL_EXIT_TRAP)
 
 /**
- * arch_ptrace_report_syscall_entry - Architecture specific ptrace_report_syscall_entry() wrapper
+ * arch_ptrace_report_syscall_permit_entry - Architecture specific wrapper for
+ *					     ptrace_report_syscall_permit_entry()
  * @regs: Pointer to the register state at syscall entry
  *
- * Invoked from syscall_trace_enter() to wrap ptrace_report_syscall_entry().
+ * Invoked from syscall_trace_enter() to wrap ptrace_report_syscall_permit_entry().
  *
- * This allows architecture specific ptrace_report_syscall_entry()
+ * This allows architecture specific ptrace_report_syscall_permit_entry()
  * implementations. If not defined by the architecture this falls back to
- * to ptrace_report_syscall_entry().
+ * to ptrace_report_syscall_permit_entry().
  */
-static __always_inline int arch_ptrace_report_syscall_entry(struct pt_regs *regs);
+static __always_inline bool arch_ptrace_report_syscall_permit_entry(struct pt_regs *regs);
 
-#ifndef arch_ptrace_report_syscall_entry
-static __always_inline int arch_ptrace_report_syscall_entry(struct pt_regs *regs)
+#ifndef arch_ptrace_report_syscall_permit_entry
+static __always_inline bool arch_ptrace_report_syscall_permit_entry(struct pt_regs *regs)
 {
-	return ptrace_report_syscall_entry(regs);
+	return ptrace_report_syscall_permit_entry(regs);
 }
 #endif
 
@@ -73,8 +74,6 @@ static inline void syscall_enter_audit(struct pt_regs *regs, long syscall)
 static __always_inline long syscall_trace_enter(struct pt_regs *regs, unsigned long work,
 						long syscall)
 {
-	long ret = 0;
-
 	/*
 	 * Handle Syscall User Dispatch.  This must comes first, since
 	 * the ABI here can be something that doesn't make sense for
@@ -95,8 +94,8 @@ static __always_inline long syscall_trace_enter(struct pt_regs *regs, unsigned l
 
 	/* Handle ptrace */
 	if (work & (SYSCALL_WORK_SYSCALL_TRACE | SYSCALL_WORK_SYSCALL_EMU)) {
-		ret = arch_ptrace_report_syscall_entry(regs);
-		if (ret || (work & SYSCALL_WORK_SYSCALL_EMU))
+		if (!arch_ptrace_report_syscall_permit_entry(regs) ||
+		    (work & SYSCALL_WORK_SYSCALL_EMU))
 			return -1L;
 	}
 
@@ -137,7 +136,7 @@ static __always_inline long syscall_trace_enter(struct pt_regs *regs, unsigned l
  * It handles the following work items:
  *
  *  1) syscall_work flag dependent invocations of
- *     ptrace_report_syscall_entry(), __seccomp_permit_syscall(), trace_sys_enter()
+ *     ptrace_report_syscall_permit_entry(), __seccomp_permit_syscall(), trace_sys_enter()
  *  2) Invocation of audit_syscall_entry()
  */
 static __always_inline long syscall_enter_from_user_mode_work(struct pt_regs *regs, long syscall)

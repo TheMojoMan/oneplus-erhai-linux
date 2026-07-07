@@ -2379,7 +2379,7 @@ static int report_syscall_entry(struct pt_regs *regs)
 	int regno, ret;
 
 	saved_reg = ptrace_save_reg(regs, PTRACE_SYSCALL_ENTER, &regno);
-	ret = ptrace_report_syscall_entry(regs);
+	ret = !ptrace_report_syscall_permit_entry(regs);
 	if (ret)
 		forget_syscall(regs);
 	regs->regs[regno] = saved_reg;

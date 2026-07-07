@@ -840,7 +840,7 @@ static void report_syscall(struct pt_regs *regs, enum ptrace_syscall_dir dir)
 
 	if (dir == PTRACE_SYSCALL_EXIT)
 		ptrace_report_syscall_exit(regs, 0);
-	else if (ptrace_report_syscall_entry(regs))
+	else if (!ptrace_report_syscall_permit_entry(regs))
 		current_thread_info()->abi_syscall = -1;
 
 	regs->ARM_ip = ip;

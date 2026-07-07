@@ -455,7 +455,7 @@ long arch_ptrace(struct task_struct *child, long request,
 asmlinkage long do_syscall_trace_enter(struct pt_regs *regs)
 {
 	if (test_thread_flag(TIF_SYSCALL_TRACE) &&
-	    ptrace_report_syscall_entry(regs)) {
+	    !ptrace_report_syscall_permit_entry(regs)) {
 		regs->regs[0] = -ENOSYS;
 		return -1;
 	}
