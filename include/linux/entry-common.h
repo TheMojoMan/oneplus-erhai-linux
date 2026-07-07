@@ -102,9 +102,8 @@ static __always_inline long syscall_trace_enter(struct pt_regs *regs, unsigned l
 
 	/* Do seccomp after ptrace, to catch any tracer changes. */
 	if (work & SYSCALL_WORK_SECCOMP) {
-		ret = __secure_computing();
-		if (ret == -1L)
-			return ret;
+		if (!__seccomp_permit_syscall())
+			return -1L;
 	}
 
 	/* Either of the above might have changed the syscall number */
@@ -115,7 +114,7 @@ static __always_inline long syscall_trace_enter(struct pt_regs *regs, unsigned l
 
 	syscall_enter_audit(regs, syscall);
 
-	return ret ? : syscall;
+	return syscall;
 }
 
 /**
@@ -138,7 +137,7 @@ static __always_inline long syscall_trace_enter(struct pt_regs *regs, unsigned l
  * It handles the following work items:
  *
  *  1) syscall_work flag dependent invocations of
- *     ptrace_report_syscall_entry(), __secure_computing(), trace_sys_enter()
+ *     ptrace_report_syscall_entry(), __seccomp_permit_syscall(), trace_sys_enter()
  *  2) Invocation of audit_syscall_entry()
  */
 static __always_inline long syscall_enter_from_user_mode_work(struct pt_regs *regs, long syscall)
