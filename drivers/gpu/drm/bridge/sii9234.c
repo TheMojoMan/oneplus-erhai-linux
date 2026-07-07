@@ -13,6 +13,7 @@
  *    Dharam Kumar <dharam.kr@samsung.com>
  */
 #include <drm/bridge/mhl.h>
+#include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_bridge.h>
 #include <drm/drm_crtc.h>
 #include <drm/drm_edid.h>
@@ -874,6 +875,9 @@ static enum drm_mode_status sii9234_mode_valid(struct drm_bridge *bridge,
 }
 
 static const struct drm_bridge_funcs sii9234_bridge_funcs = {
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
+	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.mode_valid = sii9234_mode_valid,
 };
 
