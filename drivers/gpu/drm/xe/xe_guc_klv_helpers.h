@@ -19,6 +19,7 @@ int xe_guc_klv_count(const u32 *klvs, u32 num_dwords);
 
 u32 *xe_guc_klv_encode_u32(u32 *klvs, u32 avail, u16 key, u32 value);
 u32 *xe_guc_klv_encode_u64(u32 *klvs, u32 avail, u16 key, u64 value);
+u32 *xe_guc_klv_encode_string(u32 *klvs, u32 avail, u16 key, const char *s);
 
 /**
  * PREP_GUC_KLV - Prepare KLV header value based on provided key and len.

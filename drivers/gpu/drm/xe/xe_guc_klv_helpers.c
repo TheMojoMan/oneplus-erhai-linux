@@ -190,6 +190,11 @@ int xe_guc_klv_count(const u32 *klvs, u32 num_dwords)
 	return num_dwords ? -ENODATA : num_klvs;
 }
 
+static size_t to_num_bytes(u16 dwords)
+{
+	return dwords * sizeof(u32);
+}
+
 static u16 to_num_dwords(size_t size)
 {
 	return round_up(size, sizeof(u32)) / sizeof(u32);
@@ -244,4 +249,34 @@ u32 *xe_guc_klv_encode_u64(u32 *klvs, u32 avail, u16 key, u64 value)
 	*klvs++ = lower_32_bits(value);
 	*klvs++ = upper_32_bits(value);
 	return klvs;
+}
+
+/**
+ * xe_guc_klv_encode_string() - Encode string as KLV.
+ * @klvs: the buffer where to place KLV
+ * @avail: number of dwords (u32) available in the buffer
+ * @key: key to be used
+ * @s: string to be encoded
+ *
+ * Return: pointer to the buffer location past the encoded KLV or
+ *         an ERR_PTR if there was no space to encode the KLV.
+ */
+u32 *xe_guc_klv_encode_string(u32 *klvs, u32 avail, u16 key, const char *s)
+{
+	size_t longest = to_num_bytes(FIELD_MAX(GUC_KLV_0_LEN));
+	size_t size = strnlen(s, longest) + 1; /* \0 */
+	u16 len = to_num_dwords(size);
+
+	if (IS_ERR(klvs))
+		return klvs;
+
+	if (size > longest)
+		return ERR_PTR(-E2BIG);
+
+	if (avail < GUC_KLV_LEN_MIN + len)
+		return ERR_PTR(-ENOSPC);
+
+	*klvs++ = PREP_GUC_KLV(key, len);
+	strscpy_pad((void *)klvs, s, to_num_bytes(len));
+	return klvs + len;
 }
