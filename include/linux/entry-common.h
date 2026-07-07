@@ -6,6 +6,7 @@
 #include <linux/irq-entry-common.h>
 #include <linux/livepatch.h>
 #include <linux/ptrace.h>
+#include <linux/randomize_kstack.h>
 #include <linux/resume_user_mode.h>
 #include <linux/seccomp.h>
 #include <linux/sched.h>
@@ -148,6 +149,61 @@ static __always_inline long syscall_enter_from_user_mode_work(struct pt_regs *re
 
 	return syscall;
 }
+
+/**
+ * enter_from_user_mode_randomize_stack - Establish state and add stack randomization
+ *					  before invoking syscall_enter_from_user_mode_work()
+ * @regs:	Pointer to currents pt_regs
+ *
+ * Invoked from architecture specific syscall entry code with interrupts
+ * disabled. The calling code has to be non-instrumentable. When the function
+ * returns all state is correct, interrupts are still disabled and the
+ * subsequent functions can be instrumented.
+ *
+ * Implemented as a macro so that the stack randomization is effective
+ * throughout the function in which it is invoked. An inline would only make it
+ * effective in the scope of the inline function.
+ */
+#define enter_from_user_mode_randomize_stack(regs)			\
+do {									\
+	enter_from_user_mode(regs);					\
+	instrumentation_begin();					\
+	add_random_kstack_offset_irqsoff();				\
+	instrumentation_end();						\
+} while (0)
+
+/**
+ * syscall_enter_from_user_mode_randomize_stack - Establish state and check and handle work
+ *						  before invoking a syscall
+ * @regs:	Pointer to currents pt_regs
+ * @syscall:	The syscall number
+ *
+ * Invoked from architecture specific syscall entry code with interrupts
+ * disabled. The calling code has to be non-instrumentable. When the
+ * function returns all state is correct, interrupts are enabled and the
+ * subsequent functions can be instrumented.
+ *
+ * This is the combination of enter_from_user_mode_randomize_stack() and
+ * syscall_enter_from_user_mode_work() to be used when there is no
+ * architecture specific work to be done between the two.
+ *
+ * Returns: The original or a modified syscall number. See
+ * syscall_enter_from_user_mode_work() for further explanation.
+ *
+ * Implemented as a macro to make stack randomization effective in the calling
+ * scope.
+ */
+#define syscall_enter_from_user_mode_randomize_stack(regs, syscall)	\
+({									\
+	enter_from_user_mode_randomize_stack(regs);			\
+									\
+	instrumentation_begin();					\
+	local_irq_enable();						\
+	long _ret = syscall_enter_from_user_mode_work(regs, syscall);	\
+	instrumentation_end();						\
+									\
+	_ret;								\
+})
 
 /**
  * syscall_enter_from_user_mode - Establish state and check and handle work
