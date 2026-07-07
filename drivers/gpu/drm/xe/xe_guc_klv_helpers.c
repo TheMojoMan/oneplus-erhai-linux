@@ -371,3 +371,7 @@ int xe_guc_klv_parser(const u32 *klvs, u32 num_dwords, void *obj,
 
 	return total;
 }
+
+#if IS_BUILTIN(CONFIG_DRM_XE_KUNIT_TEST)
+#include "tests/xe_guc_klv_helpers_kunit.c"
+#endif
