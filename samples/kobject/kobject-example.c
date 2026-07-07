@@ -45,7 +45,7 @@ static ssize_t foo_store(struct kobject *kobj, struct kobj_attribute *attr,
 
 /* Sysfs attributes cannot be world-writable. */
 static struct kobj_attribute foo_attribute =
-	__ATTR(foo, 0664, foo_show, foo_store);
+	__KOBJ_ATTR(foo, 0664, foo_show, foo_store);
 
 /*
  * More complex function where we determine which variable is being accessed by
@@ -80,9 +80,9 @@ static ssize_t b_store(struct kobject *kobj, struct kobj_attribute *attr,
 }
 
 static struct kobj_attribute baz_attribute =
-	__ATTR(baz, 0664, b_show, b_store);
+	__KOBJ_ATTR(baz, 0664, b_show, b_store);
 static struct kobj_attribute bar_attribute =
-	__ATTR(bar, 0664, b_show, b_store);
+	__KOBJ_ATTR(bar, 0664, b_show, b_store);
 
 
 /*
