@@ -4,6 +4,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <kunit/static_stub.h>
 #include <drm/drm_print.h>
 
 #include "abi/guc_klvs_abi.h"
@@ -11,6 +12,12 @@
 #include "xe_guc_klv_thresholds_set.h"
 
 #define make_u64(hi, lo) ((u64)((u64)(u32)(hi) << 32 | (u32)(lo)))
+
+static bool is_group_key(u16 key)
+{
+	KUNIT_STATIC_STUB_REDIRECT(is_group_key, key);
+	return false;
+}
 
 /**
  * xe_guc_klv_key_to_string - Convert KLV key into friendly name.
@@ -90,6 +97,17 @@ const char *xe_guc_klv_key_to_string(u16 key)
 void xe_guc_klv_print_one(u16 key, u16 len, const u32 *value, struct drm_printer *p)
 {
 	const char *name = xe_guc_klv_key_to_string(key);
+
+	if (is_group_key(key)) {
+		struct drm_printer gp = drm_line_printer(p, name, 0);
+
+		drm_printf(p, "{ key %#06x : group %u dwords } # %s\n",
+			   key, len, name);
+
+		/* print group recursively */
+		xe_guc_klv_print(value, len, &gp);
+		return;
+	}
 
 	switch (len) {
 	case 0:
