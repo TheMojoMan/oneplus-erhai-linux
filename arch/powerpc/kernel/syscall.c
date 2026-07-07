@@ -2,7 +2,6 @@
 
 #include <linux/compat.h>
 #include <linux/context_tracking.h>
-#include <linux/randomize_kstack.h>
 #include <linux/entry-common.h>
 
 #include <asm/interrupt.h>
@@ -19,8 +18,7 @@ notrace long system_call_exception(struct pt_regs *regs, unsigned long r0)
 	long ret;
 	syscall_fn f;
 
-	r0 = syscall_enter_from_user_mode(regs, r0);
-	add_random_kstack_offset();
+	r0 = syscall_enter_from_user_mode_randomize_stack(regs, r0);
 
 	if (unlikely(r0 >= NR_syscalls)) {
 		if (unlikely(trap_is_unsupported_scv(regs))) {
