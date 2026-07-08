@@ -426,7 +426,7 @@ static int qcom_pdc_gic_set_type(struct irq_data *d, unsigned int type)
 }
 
 /**
- * qcom_pdc_gic_set_type: Configure PDC for the interrupt
+ * qcom_pdc_gic_secondary_set_type: Configure PDC for the interrupt in secondary mode
  *
  * @d:    the interrupt data
  * @type: the interrupt type
