@@ -97,6 +97,9 @@ size_t dma_fence_dedup_array(struct dma_fence **fences, size_t num_fences)
 {
 	size_t i, j;
 
+	if (!num_fences)
+		return 0;
+
 	sort(fences, num_fences, sizeof(*fences), fence_cmp, NULL);
 
 	/*

@@ -331,7 +331,7 @@ static void sdma_v7_1_ring_emit_fence(struct amdgpu_ring *ring, u64 addr, u64 se
 	amdgpu_ring_write(ring, SDMA_PKT_COPY_LINEAR_HEADER_OP(SDMA_OP_FENCE) |
 			  SDMA_PKT_FENCE_HEADER_MTYPE(0x3)); /* Ucached(UC) */
 	/* zero in first two bits */
-	BUG_ON(addr & 0x3);
+	WARN_ON(addr & 0x3);
 	amdgpu_ring_write(ring, lower_32_bits(addr));
 	amdgpu_ring_write(ring, upper_32_bits(addr));
 	amdgpu_ring_write(ring, lower_32_bits(seq));
@@ -342,7 +342,7 @@ static void sdma_v7_1_ring_emit_fence(struct amdgpu_ring *ring, u64 addr, u64 se
 		amdgpu_ring_write(ring, SDMA_PKT_COPY_LINEAR_HEADER_OP(SDMA_OP_FENCE) |
 				  SDMA_PKT_FENCE_HEADER_MTYPE(0x3));
 		/* zero in first two bits */
-		BUG_ON(addr & 0x3);
+		WARN_ON(addr & 0x3);
 		amdgpu_ring_write(ring, lower_32_bits(addr));
 		amdgpu_ring_write(ring, upper_32_bits(addr));
 		amdgpu_ring_write(ring, upper_32_bits(seq));
@@ -773,23 +773,6 @@ static int sdma_v7_1_soft_reset(struct amdgpu_ip_block *ip_block)
 	}
 
 	return sdma_v7_1_inst_start(adev, inst_mask);
-}
-
-static bool sdma_v7_1_check_soft_reset(struct amdgpu_ip_block *ip_block)
-{
-	struct amdgpu_device *adev = ip_block->adev;
-	struct amdgpu_ring *ring;
-	int i, r;
-	long tmo = msecs_to_jiffies(1000);
-
-	for (i = 0; i < adev->sdma.num_instances; i++) {
-		ring = &adev->sdma.instance[i].ring;
-		r = amdgpu_ring_test_ib(ring, tmo);
-		if (r)
-			return true;
-	}
-
-	return false;
 }
 
 static int sdma_v7_1_reset_queue(struct amdgpu_ring *ring,
@@ -1644,7 +1627,6 @@ const struct amd_ip_funcs sdma_v7_1_ip_funcs = {
 	.is_idle = sdma_v7_1_is_idle,
 	.wait_for_idle = sdma_v7_1_wait_for_idle,
 	.soft_reset = sdma_v7_1_soft_reset,
-	.check_soft_reset = sdma_v7_1_check_soft_reset,
 	.set_clockgating_state = sdma_v7_1_set_clockgating_state,
 	.set_powergating_state = sdma_v7_1_set_powergating_state,
 	.get_clockgating_state = sdma_v7_1_get_clockgating_state,

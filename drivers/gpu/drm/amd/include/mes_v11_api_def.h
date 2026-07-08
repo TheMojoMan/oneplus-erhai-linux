@@ -238,8 +238,9 @@ union MESAPI_SET_HW_RESOURCES {
 				uint32_t enable_mes_sch_stb_log : 1;
 				uint32_t limit_single_process : 1;
 				uint32_t is_strix_tmz_wa_enabled  :1;
-				uint32_t enable_lr_compute_wa : 1;
-				uint32_t reserved : 12;
+				uint32_t enable_lr_compute_wa : 2;
+				uint32_t enable_compute_pipe_reset : 1;
+				uint32_t reserved : 10;
 			};
 			uint32_t	uint32_t_all;
 		};
@@ -427,6 +428,7 @@ union MESAPI__SUSPEND {
 		uint32_t		suspend_fence_value;
 
 		struct MES_API_STATUS	api_status;
+		uint32_t		doorbell_offset;
 	};
 
 	uint32_t	max_dwords_in_api[API_FRAME_SIZE_IN_DWORDS];
@@ -444,6 +446,7 @@ union MESAPI__RESUME {
 		uint64_t		gang_context_addr;
 
 		struct MES_API_STATUS	api_status;
+		uint32_t		doorbell_offset;
 	};
 
 	uint32_t	max_dwords_in_api[API_FRAME_SIZE_IN_DWORDS];
