@@ -926,7 +926,7 @@ static struct sk_buff *br_ip4_multicast_alloc_query(struct net_bridge_mcast *brm
 						    struct net_bridge_port_group *pg,
 						    __be32 ip_dst, __be32 group,
 						    bool with_srcs, bool over_lmqt,
-						    u8 sflag, u8 *igmp_type,
+						    u8 sflag,
 						    bool *need_rexmit)
 {
 	struct net_bridge_port *p = pg ? pg->key.port : NULL;
@@ -1006,7 +1006,6 @@ static struct sk_buff *br_ip4_multicast_alloc_query(struct net_bridge_mcast *brm
 	skb_set_transport_header(skb, skb->len);
 	mrt = group ? brmctx->multicast_last_member_interval :
 		      brmctx->multicast_query_response_interval;
-	*igmp_type = IGMP_HOST_MEMBERSHIP_QUERY;
 
 	switch (brmctx->multicast_igmp_version) {
 	case 2:
@@ -1072,7 +1071,7 @@ static struct sk_buff *br_ip6_multicast_alloc_query(struct net_bridge_mcast *brm
 						    const struct in6_addr *ip6_dst,
 						    const struct in6_addr *group,
 						    bool with_srcs, bool over_llqt,
-						    u8 sflag, u8 *igmp_type,
+						    u8 sflag,
 						    bool *need_rexmit)
 {
 	struct net_bridge_port *p = pg ? pg->key.port : NULL;
@@ -1166,7 +1165,6 @@ static struct sk_buff *br_ip6_multicast_alloc_query(struct net_bridge_mcast *brm
 	interval = ipv6_addr_any(group) ?
 			brmctx->multicast_query_response_interval :
 			brmctx->multicast_last_member_interval;
-	*igmp_type = ICMPV6_MGM_QUERY;
 	switch (brmctx->multicast_mld_version) {
 	case 1:
 		mldq = (struct mld_msg *)icmp6_hdr(skb);
@@ -1237,8 +1235,7 @@ static struct sk_buff *br_multicast_alloc_query(struct net_bridge_mcast *brmctx,
 						struct br_ip *ip_dst,
 						struct br_ip *group,
 						bool with_srcs, bool over_lmqt,
-						u8 sflag, u8 *igmp_type,
-						bool *need_rexmit)
+						u8 sflag, bool *need_rexmit)
 {
 	__be32 ip4_dst;
 
@@ -1248,8 +1245,7 @@ static struct sk_buff *br_multicast_alloc_query(struct net_bridge_mcast *brmctx,
 		return br_ip4_multicast_alloc_query(brmctx, pmctx, pg,
 						    ip4_dst, group->dst.ip4,
 						    with_srcs, over_lmqt,
-						    sflag, igmp_type,
-						    need_rexmit);
+						    sflag, need_rexmit);
 #if IS_ENABLED(CONFIG_IPV6)
 	case htons(ETH_P_IPV6): {
 		struct in6_addr ip6_dst;
@@ -1263,8 +1259,7 @@ static struct sk_buff *br_multicast_alloc_query(struct net_bridge_mcast *brmctx,
 		return br_ip6_multicast_alloc_query(brmctx, pmctx, pg,
 						    &ip6_dst, &group->dst.ip6,
 						    with_srcs, over_lmqt,
-						    sflag, igmp_type,
-						    need_rexmit);
+						    sflag, need_rexmit);
 	}
 #endif
 	}
@@ -1844,7 +1839,6 @@ static void __br_multicast_send_query(struct net_bridge_mcast *brmctx,
 	struct sk_buff_head *queue;
 	bool over_lmqt = !!sflag;
 	struct sk_buff *skb;
-	u8 igmp_type;
 
 	if (!br_multicast_ctx_should_use(brmctx, pmctx) ||
 	    !br_multicast_ctx_matches_vlan_snooping(brmctx))
@@ -1857,7 +1851,7 @@ again_under_lmqt:
 		return;
 
 	skb = br_multicast_alloc_query(brmctx, pmctx, pg, ip_dst, group,
-				       with_srcs, over_lmqt, sflag, &igmp_type,
+				       with_srcs, over_lmqt, sflag,
 				       need_rexmit);
 	if (!skb)
 		return;
