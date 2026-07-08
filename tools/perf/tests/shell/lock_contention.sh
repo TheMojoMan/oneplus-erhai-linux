@@ -11,7 +11,8 @@ errout=$(mktemp /tmp/__perf_test.errout.XXXXX)
 
 # Workload to generate lock contention.
 # Using 1 group (-g 1) keeps runtime low while generating sufficient lock events.
-msg_workload="perf bench sched messaging -g 1"
+# We include -p (pipes) because socketpairs don't generate enough lock events on s390.
+msg_workload="perf bench sched messaging -g 1 -p"
 
 cleanup() {
 	rm -f ${perfdata}
