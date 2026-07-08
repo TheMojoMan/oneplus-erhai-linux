@@ -2655,6 +2655,13 @@ int cmd_stat(int argc, const char **argv)
 
 	stat_config.aggr_mode = opt_aggr_mode_to_aggr_mode(&opt_mode);
 
+	if (stat_config.csv_sep && stat_config.json_output) {
+		fprintf(stderr, "cannot use both --field-separator and --json-output\n");
+		parse_options_usage(stat_usage, stat_options, "x", 1);
+		parse_options_usage(NULL, stat_options, "j", 1);
+		goto out;
+	}
+
 	if (stat_config.csv_sep) {
 		stat_config.csv_output = true;
 		if (!strcmp(stat_config.csv_sep, "\\t"))
