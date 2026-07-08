@@ -14,6 +14,8 @@
 #include <linux/pm_runtime.h>
 #include <linux/regmap.h>
 
+#include "dc-drv.h"
+
 #define USERINTERRUPTMASK(n)	(0x8 + 4 * (n))
 #define INTERRUPTENABLE(n)	(0x10 + 4 * (n))
 #define INTERRUPTPRESET(n)	(0x18 + 4 * (n))
