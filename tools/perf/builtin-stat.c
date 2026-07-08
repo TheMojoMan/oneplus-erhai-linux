@@ -2895,7 +2895,8 @@ int cmd_stat(int argc, const char **argv)
 			goto out;
 		}
 
-		if (evlist__expand_cgroup(evsel_list, stat_config.cgroup_list, true) < 0) {
+		if (evlist__expand_cgroup(evsel_list, stat_config.cgroup_list,
+					  !target.use_bpf) < 0) {
 			parse_options_usage(stat_usage, stat_options,
 					    "for-each-cgroup", 0);
 			goto out;
