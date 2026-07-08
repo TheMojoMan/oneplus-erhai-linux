@@ -2058,7 +2058,6 @@ static const struct irq_domain_ops a10_eccmgr_ic_ops = {
 /************** Stratix 10 EDAC Double Bit Error Handler ************/
 #define to_a10edac(p, m) container_of(p, struct altr_arria10_edac, m)
 
-#ifdef CONFIG_64BIT
 /* panic routine issues reboot on non-zero panic_timeout */
 extern int panic_timeout;
 
@@ -2105,7 +2104,6 @@ static int s10_edac_dberr_handler(struct notifier_block *this,
 
 	return NOTIFY_DONE;
 }
-#endif
 
 /****************** Arria 10 EDAC Probe Function *********************/
 static int altr_edac_a10_probe(struct platform_device *pdev)
@@ -2154,8 +2152,7 @@ static int altr_edac_a10_probe(struct platform_device *pdev)
 	irq_set_chained_handler_and_data(edac->sb_irq,
 					 altr_edac_a10_irq_handler,
 					 edac);
-
-#ifdef CONFIG_64BIT
+	if (edac->is_s10)
 	{
 		int dberror, err_addr;
 
@@ -2178,15 +2175,14 @@ static int altr_edac_a10_probe(struct platform_device *pdev)
 			regmap_write(edac->ecc_mgr_map,
 				     S10_SYSMGR_UE_ADDR_OFST, 0);
 		}
-	}
-#else
-	edac->db_irq = platform_get_irq(pdev, 1);
-	if (edac->db_irq < 0)
-		return edac->db_irq;
+	} else {
+		edac->db_irq = platform_get_irq(pdev, 1);
+		if (edac->db_irq < 0)
+			return edac->db_irq;
 
-	irq_set_chained_handler_and_data(edac->db_irq,
-					 altr_edac_a10_irq_handler, edac);
-#endif
+		irq_set_chained_handler_and_data(edac->db_irq,
+						 altr_edac_a10_irq_handler, edac);
+	}
 
 	for_each_child_of_node(pdev->dev.of_node, child) {
 		if (!of_device_is_available(child))
