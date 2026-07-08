@@ -241,8 +241,8 @@ static int rp1_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	}
 
 	pci_set_drvdata(pdev, rp1);
-	rp1->domain = irq_domain_add_linear(rp1_node, RP1_INT_END,
-					    &rp1_domain_ops, rp1);
+	rp1->domain = irq_domain_create_linear(of_fwnode_handle(rp1_node), RP1_INT_END,
+					       &rp1_domain_ops, rp1);
 	if (!rp1->domain) {
 		dev_err(&pdev->dev, "Error creating IRQ domain\n");
 		err = -ENOMEM;
