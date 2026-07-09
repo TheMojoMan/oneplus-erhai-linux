@@ -422,11 +422,6 @@ static inline void scx_call_op_set_cpumask(struct scx_sched *sch, struct rq *rq,
 					   struct task_struct *task,
 					   const struct cpumask *cpumask)
 {
-	WARN_ON_ONCE(current->scx.kf_tasks[0]);
-	current->scx.kf_tasks[0] = task;
-	if (rq)
-		update_locked_rq(rq);
-
 	if (scx_is_cid_type()) {
 		struct scx_cmask *kern_va = *this_cpu_ptr(sch->set_cmask_scratch);
 		/*
@@ -435,14 +430,11 @@ static inline void scx_call_op_set_cpumask(struct scx_sched *sch, struct rq *rq,
 		 * the sole user of the scratch area.
 		 */
 		scx_cpumask_to_cmask(cpumask, kern_va);
-		sch->ops_cid.set_cmask(task, scx_kaddr_to_arena(sch, kern_va));
+		SCX_CALL_CID_OP_TASK(sch, set_cmask, rq, task,
+				     scx_kaddr_to_arena(sch, kern_va));
 	} else {
-		sch->ops.set_cpumask(task, cpumask);
+		SCX_CALL_OP_TASK(sch, set_cpumask, rq, task, cpumask);
 	}
-
-	if (rq)
-		update_locked_rq(NULL);
-	current->scx.kf_tasks[0] = NULL;
 }
 
 enum scx_dsq_iter_flags {

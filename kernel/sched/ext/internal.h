@@ -1751,8 +1751,11 @@ static inline void update_locked_rq(struct rq *rq)
 /*
  * SCX ops can recurse via scx_bpf_sub_dispatch() - the inner call must not
  * clobber the outer's scx_locked_rq_state. Save it on entry, restore on exit.
+ *
+ * @ops is the ops table to dispatch through: ops for the cpu form, ops_cid
+ * for the cid form.
  */
-#define SCX_CALL_OP(sch, op, locked_rq, args...)				\
+#define __SCX_CALL_OP(sch, ops, op, locked_rq, args...)				\
 do {										\
 	struct rq *__prev_locked_rq;						\
 										\
@@ -1764,6 +1767,9 @@ do {										\
 	if (locked_rq)								\
 		update_locked_rq(__prev_locked_rq);				\
 } while (0)
+
+#define SCX_CALL_OP(sch, op, locked_rq, args...)				\
+	__SCX_CALL_OP(sch, ops, op, locked_rq, ##args)
 
 #define SCX_CALL_OP_RET(sch, op, locked_rq, args...)				\
 ({										\
@@ -1796,13 +1802,24 @@ do {										\
  * WARN_ON_ONCE() in each macro catches a re-entry of any of the three variants
  * while a previous one is still in progress.
  */
-#define SCX_CALL_OP_TASK(sch, op, locked_rq, task, args...)			\
+#define __SCX_CALL_OP_TASK(sch, ops, op, locked_rq, task, args...)		\
 do {										\
 	WARN_ON_ONCE(current->scx.kf_tasks[0]);					\
 	current->scx.kf_tasks[0] = task;					\
-	SCX_CALL_OP((sch), op, locked_rq, task, ##args);			\
+	__SCX_CALL_OP((sch), ops, op, locked_rq, task, ##args);			\
 	current->scx.kf_tasks[0] = NULL;					\
 } while (0)
+
+#define SCX_CALL_OP_TASK(sch, op, locked_rq, task, args...)			\
+	__SCX_CALL_OP_TASK(sch, ops, op, locked_rq, task, ##args)
+
+/*
+ * Dispatch a task op through the cid-form ops_cid table. Only set_cmask() needs
+ * this: it takes an arena cmask address instead of a cpumask, so it cannot be
+ * invoked via its cpu-form set_cpumask() slot.
+ */
+#define SCX_CALL_CID_OP_TASK(sch, op, locked_rq, task, args...)			\
+	__SCX_CALL_OP_TASK(sch, ops_cid, op, locked_rq, task, ##args)
 
 #define SCX_CALL_OP_TASK_RET(sch, op, locked_rq, task, args...)			\
 ({										\
