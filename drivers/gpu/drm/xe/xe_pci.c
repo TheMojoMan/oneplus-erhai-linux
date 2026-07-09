@@ -22,6 +22,7 @@
 #include "xe_device.h"
 #include "xe_drv.h"
 #include "xe_gt.h"
+#include "xe_gt_printk.h"
 #include "xe_gt_sriov_vf.h"
 #include "xe_guc.h"
 #include "xe_mmio.h"
@@ -888,6 +889,10 @@ static struct xe_gt *alloc_primary_gt(struct xe_tile *tile,
 	gt->info.has_uncorrectable_error_reporting =
 		graphics_desc->has_uncorrectable_error_reporting;
 	gt->info.multi_queue_engine_class_mask = graphics_desc->multi_queue_engine_class_mask;
+	if (!xe_configfs_get_enable_multi_queue(to_pci_dev(xe->drm.dev))) {
+		xe_gt_info(gt, "Multi-queue disabled via configfs\n");
+		gt->info.multi_queue_engine_class_mask = 0;
+	}
 	gt->info.engine_mask = graphics_desc->hw_engine_mask;
 	gt->info.num_geometry_xecore_fuse_regs = graphics_desc->num_geometry_xecore_fuse_regs;
 	gt->info.num_compute_xecore_fuse_regs = graphics_desc->num_compute_xecore_fuse_regs;
