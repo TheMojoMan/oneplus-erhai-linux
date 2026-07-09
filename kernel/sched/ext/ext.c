@@ -2195,13 +2195,14 @@ static bool task_can_run_on_remote_rq(struct scx_sched *sch,
 }
 
 /**
- * unlink_dsq_and_lock_src_rq() - Unlink task from its DSQ and lock its task_rq
+ * unlink_dsq_and_switch_rq_lock() - Unlink task and switch to its rq lock
  * @p: target task
  * @dsq: locked DSQ @p is currently on
+ * @locked_rq: currently locked rq
  * @src_rq: rq @p is currently on, stable with @dsq locked
  *
- * Called with @dsq locked but no rq's locked. We want to move @p to a different
- * DSQ, including any local DSQ, but are not locking @src_rq. Locking @src_rq is
+ * Called with @dsq and @locked_rq locked. We want to move @p to a different DSQ,
+ * including any local DSQ, but are not locking @src_rq. Locking @src_rq is
  * required when transferring into a local DSQ. Even when transferring into a
  * non-local DSQ, it's better to use the same mechanism to protect against
  * dequeues and maintain the invariant that @p->scx.dsq can only change while
@@ -2223,20 +2224,22 @@ static bool task_can_run_on_remote_rq(struct scx_sched *sch,
  * On return, @dsq is unlocked and @src_rq is locked. Returns %true if @p is
  * still valid. %false if lost to dequeue.
  */
-static bool unlink_dsq_and_lock_src_rq(struct task_struct *p,
-				       struct scx_dispatch_q *dsq,
-				       struct rq *src_rq)
+static bool unlink_dsq_and_switch_rq_lock(struct task_struct *p,
+					  struct scx_dispatch_q *dsq,
+					  struct rq *locked_rq,
+					  struct rq *src_rq)
 {
 	s32 cpu = raw_smp_processor_id();
 
 	lockdep_assert_held(&dsq->lock);
+	lockdep_assert_rq_held(locked_rq);
 
 	WARN_ON_ONCE(p->scx.holding_cpu >= 0);
 	task_unlink_from_dsq(p, dsq);
 	p->scx.holding_cpu = cpu;
 
 	raw_spin_unlock(&dsq->lock);
-	raw_spin_rq_lock(src_rq);
+	switch_rq_lock(locked_rq, src_rq);
 
 	/* task_rq couldn't have changed if we're still the holding cpu */
 	return likely(p->scx.holding_cpu == cpu) &&
@@ -2247,14 +2250,11 @@ static bool consume_remote_task(struct rq *this_rq,
 				struct task_struct *p, u64 enq_flags,
 				struct scx_dispatch_q *dsq, struct rq *src_rq)
 {
-	raw_spin_rq_unlock(this_rq);
-
-	if (unlink_dsq_and_lock_src_rq(p, dsq, src_rq)) {
+	if (unlink_dsq_and_switch_rq_lock(p, dsq, this_rq, src_rq)) {
 		move_remote_task_to_local_dsq(p, enq_flags, src_rq, this_rq);
 		return true;
 	} else {
-		raw_spin_rq_unlock(src_rq);
-		raw_spin_rq_lock(this_rq);
+		switch_rq_lock(src_rq, this_rq);
 		return false;
 	}
 }
@@ -2427,7 +2427,7 @@ static void dispatch_to_local_dsq(struct scx_sched *sch, struct rq *rq,
 	 * As DISPATCHING guarantees that @p is wholly ours, we can pretend that
 	 * we're moving from a DSQ and use the same mechanism - mark the task
 	 * under transfer with holding_cpu, release DISPATCHING and then follow
-	 * the same protocol. See unlink_dsq_and_lock_src_rq().
+	 * the same protocol. See unlink_dsq_and_switch_rq_lock().
 	 */
 	p->scx.holding_cpu = raw_smp_processor_id();
 
