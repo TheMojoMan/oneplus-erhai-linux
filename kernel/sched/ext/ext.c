@@ -1836,7 +1836,7 @@ static void enqueue_task_scx(struct rq *rq, struct task_struct *p, int core_enq_
 {
 	struct scx_sched *sch = scx_task_sched(p);
 	int sticky_cpu = p->scx.sticky_cpu;
-	u64 enq_flags = core_enq_flags | rq->scx.extra_enq_flags;
+	u64 enq_flags = core_enq_flags | rq->scx.remote_activate_enq_flags;
 
 	if (enq_flags & ENQUEUE_WAKEUP)
 		rq->scx.flags |= SCX_RQ_IN_WAKEUP;
@@ -2108,13 +2108,13 @@ static void move_remote_task_to_local_dsq(struct task_struct *p, u64 enq_flags,
 	/*
 	 * We want to pass scx-specific enq_flags but activate_task() will
 	 * truncate the upper 32 bit. As we own @rq, we can pass them through
-	 * @rq->scx.extra_enq_flags instead.
+	 * @rq->scx.remote_activate_enq_flags instead.
 	 */
 	WARN_ON_ONCE(!cpumask_test_cpu(cpu_of(dst_rq), p->cpus_ptr));
-	WARN_ON_ONCE(dst_rq->scx.extra_enq_flags);
-	dst_rq->scx.extra_enq_flags = enq_flags;
+	WARN_ON_ONCE(dst_rq->scx.remote_activate_enq_flags);
+	dst_rq->scx.remote_activate_enq_flags = enq_flags;
 	activate_task(dst_rq, p, 0);
-	dst_rq->scx.extra_enq_flags = 0;
+	dst_rq->scx.remote_activate_enq_flags = 0;
 }
 
 /*
