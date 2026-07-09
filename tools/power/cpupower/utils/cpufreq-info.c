@@ -477,12 +477,13 @@ static int get_latency(unsigned int cpu, unsigned int human)
 }
 
 /* --performance / -c */
-
 static int get_perf_cap(unsigned int cpu)
 {
 	if (cpupower_cpu_info.vendor == X86_VENDOR_AMD &&
 	    cpupower_cpu_info.caps & CPUPOWER_CAP_AMD_PSTATE)
 		amd_pstate_show_perf_and_freq(cpu, no_rounding);
+	else
+		cppc_show_perf_and_freq(cpu, no_rounding);
 
 	return 0;
 }
