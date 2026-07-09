@@ -1071,7 +1071,7 @@ static void scpsys_remove_one_domain(struct scpsys_domain *pd)
 		if (scpsys_hwv_domain_is_enable_done(pd))
 			scpsys_hwv_power_off_internal(pd);
 	} else {
-		if (scpsys_domain_is_on(pd))
+		if (scpsys_domain_is_on(pd) || MTK_SCPD_CAPS(pd, MTK_SCPD_SIMPLE_PWRSEQ))
 			scpsys_power_off_internal(pd);
 	}
 
@@ -1287,6 +1287,10 @@ static const struct of_device_id scpsys_of_match[] = {
 	{
 		.compatible = "mediatek,mt8196-power-controller",
 		.data = &mt8196_scpsys_data,
+	},
+	{
+		.compatible = "mediatek,mt8196-hfrp-power-controller",
+		.data = &mt8196_hfrpsys_data,
 	},
 	{
 		.compatible = "mediatek,mt8196-hwv-hfrp-power-controller",
