@@ -324,6 +324,7 @@ static const char *btf_type_name(const struct btf *btf, u32 id)
 }
 
 static DEFINE_MUTEX(bpf_verifier_lock);
+static DEFINE_MUTEX(btf_vmlinux_lock);
 static DEFINE_MUTEX(bpf_percpu_ma_lock);
 
 __printf(2, 3) static void verbose(void *private_data, const char *fmt, ...)
@@ -19559,13 +19560,25 @@ int bpf_check_attach_btf_id_multi(struct btf *btf, struct bpf_prog *prog, u32 bt
 
 struct btf *bpf_get_btf_vmlinux(void)
 {
-	if (!btf_vmlinux && IS_ENABLED(CONFIG_DEBUG_INFO_BTF)) {
-		mutex_lock(&bpf_verifier_lock);
-		if (!btf_vmlinux)
-			btf_vmlinux = btf_parse_vmlinux();
-		mutex_unlock(&bpf_verifier_lock);
+	/* Pairs with the smp_store_release() on the parse path below. */
+	struct btf *btf = smp_load_acquire(&btf_vmlinux);
+
+	if (!btf && IS_ENABLED(CONFIG_DEBUG_INFO_BTF)) {
+		mutex_lock(&btf_vmlinux_lock);
+		btf = btf_vmlinux;
+		if (!btf) {
+			btf = btf_parse_vmlinux();
+			/*
+			 * Order the parsed BTF contents and the globals the
+			 * parse populated (e.g. bpf_ctx_convert.t) before
+			 * the pointer publication. Pairs with the acquire
+			 * on the lockless fast path above.
+			 */
+			smp_store_release(&btf_vmlinux, btf);
+		}
+		mutex_unlock(&btf_vmlinux_lock);
 	}
-	return btf_vmlinux;
+	return btf;
 }
 
 /*
@@ -20077,13 +20090,14 @@ int bpf_check(struct bpf_prog **prog, union bpf_attr *attr, bpfptr_t uattr,
 
 	bpf_get_btf_vmlinux();
 
-	/* grab the mutex to protect few globals used by verifier */
+	/* Serialize verification of unprivileged programs. */
 	if (!is_priv)
 		mutex_lock(&bpf_verifier_lock);
 
 	len = env->prog->len;
 	env->insn_aux_data =
-		vzalloc(array_size(sizeof(struct bpf_insn_aux_data), len));
+		__vmalloc(array_size(sizeof(struct bpf_insn_aux_data), len),
+			  GFP_KERNEL_ACCOUNT | __GFP_ZERO);
 	ret = -ENOMEM;
 	if (!env->insn_aux_data)
 		goto skip_full_check;
