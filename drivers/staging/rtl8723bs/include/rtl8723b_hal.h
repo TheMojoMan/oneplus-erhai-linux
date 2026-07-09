@@ -193,11 +193,6 @@ enum { /* tag_Package_Definition */
 	PACKAGE_TFBGA79
 };
 
-#define INCLUDE_MULTI_FUNC_BT(_Adapter)  \
-	(GET_HAL_DATA(_Adapter)->MultiFunc & RT_MULTI_FUNC_BT)
-#define INCLUDE_MULTI_FUNC_GPS(_Adapter) \
-	(GET_HAL_DATA(_Adapter)->MultiFunc & RT_MULTI_FUNC_GPS)
-
 /*  rtl8723a_hal_init.c */
 s32 rtl8723b_FirmwareDownload(struct adapter *padapter, bool  bUsedWoWLANFw);
 void rtl8723b_FirmwareSelfReset(struct adapter *padapter);

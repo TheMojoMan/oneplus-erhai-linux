@@ -12,16 +12,6 @@
 
 #include <hal_sdio.h>
 
-/*  */
-/*  <Roger_Notes> For RTL8723 WiFi/BT/GPS multi-function configuration. 2010.10.06. */
-/*  */
-enum rt_multi_func {
-	RT_MULTI_FUNC_NONE	= 0x00,
-	RT_MULTI_FUNC_WIFI	= 0x01,
-	RT_MULTI_FUNC_BT		= 0x02,
-	RT_MULTI_FUNC_GPS	= 0x04,
-};
-
 enum rt_ampdu_burst {
 	RT_AMPDU_BURST_NONE	= 0,
 	RT_AMPDU_BURST_92D	= 1,
@@ -149,8 +139,6 @@ struct dm_priv {
 
 
 struct hal_com_data {
-	enum rt_multi_func MultiFunc; /*  For multi-function consideration. */
-
 	u16 FirmwareVersion;
 	u16 FirmwareVersionRev;
 	u16 FirmwareSubVersion;

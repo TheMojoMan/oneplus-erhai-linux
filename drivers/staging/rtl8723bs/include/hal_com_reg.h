@@ -589,8 +589,6 @@
 #define C2H_EVT_FW_CLOSE		0xFF	/*  Set by FW indicating that FW had set the C2H command message and it's not yet read by driver. */
 
 /* 2REG_MULTI_FUNC_CTRL(For RTL8723 Only) */
-#define WL_FUNC_EN				BIT(2)	/*  WiFi function enable */
 #define BT_FUNC_EN				BIT(18)	/*  BT function enable */
-#define GPS_FUNC_EN			BIT(22)	/*  GPS function enable */
 
 #endif /* __HAL_COMMON_H__ */
