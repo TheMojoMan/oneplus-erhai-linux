@@ -270,10 +270,10 @@ static int get_freq_hardware(unsigned int cpu, unsigned int human)
 {
 	unsigned long freq;
 
-	if (!(cpupower_cpu_info.caps & CPUPOWER_CAP_APERF))
+	freq = cpufreq_get_freq_hardware(cpu);
+	if (!(cpupower_cpu_info.caps & CPUPOWER_CAP_APERF) && !freq)
 		return -EINVAL;
 
-	freq = cpufreq_get_freq_hardware(cpu);
 	printf(_("  current CPU frequency: "));
 	if (!freq) {
 		printf("Unable to call hardware\n");
@@ -514,8 +514,8 @@ static void debug_output_one(unsigned int cpu)
 
 	get_available_governors(cpu);
 	get_policy(cpu);
-	if (get_freq_hardware(cpu, 1) < 0)
-		get_freq_kernel(cpu, 1);
+	get_freq_hardware(cpu, 1);
+	get_freq_kernel(cpu, 1);
 	get_boost_mode(cpu);
 	get_perf_cap(cpu);
 }
