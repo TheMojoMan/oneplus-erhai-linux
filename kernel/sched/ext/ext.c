@@ -7026,6 +7026,21 @@ static bool bpf_scx_is_valid_access(int off, int size,
 	return btf_ctx_access(off, size, type, prog, info);
 }
 
+/* common to both forms: only scx.disallow is writable */
+static int bpf_scx_btf_struct_access_common(const struct bpf_reg_state *reg,
+					    int off, int size)
+{
+	const struct btf_type *t;
+
+	t = btf_type_by_id(reg->btf, reg->btf_id);
+	if (t == task_struct_type &&
+	    off >= offsetof(struct task_struct, scx.disallow) &&
+	    off + size <= offsetofend(struct task_struct, scx.disallow))
+		return SCALAR_VALUE;
+
+	return -EACCES;
+}
+
 static int bpf_scx_btf_struct_access(struct bpf_verifier_log *log,
 				     const struct bpf_reg_state *reg, int off,
 				     int size)
@@ -7034,29 +7049,34 @@ static int bpf_scx_btf_struct_access(struct bpf_verifier_log *log,
 
 	t = btf_type_by_id(reg->btf, reg->btf_id);
 	if (t == task_struct_type) {
-		/*
-		 * COMPAT: Will be removed in v6.23.
-		 */
 		if ((off >= offsetof(struct task_struct, scx.slice) &&
 		     off + size <= offsetofend(struct task_struct, scx.slice)) ||
 		    (off >= offsetof(struct task_struct, scx.dsq_vtime) &&
-		     off + size <= offsetofend(struct task_struct, scx.dsq_vtime))) {
-			pr_warn_ratelimited("sched_ext: Writing directly to p->scx.slice/dsq_vtime is deprecated, use scx_bpf_task_set_slice/dsq_vtime()\n");
-			return SCALAR_VALUE;
-		}
-
-		if (off >= offsetof(struct task_struct, scx.disallow) &&
-		    off + size <= offsetofend(struct task_struct, scx.disallow))
+		     off + size <= offsetofend(struct task_struct, scx.dsq_vtime)))
 			return SCALAR_VALUE;
 	}
 
-	return -EACCES;
+	return bpf_scx_btf_struct_access_common(reg, off, size);
+}
+
+/* cid-form rejects direct slice and dsq_vtime writes in favor of the kfuncs */
+static int bpf_scx_cid_btf_struct_access(struct bpf_verifier_log *log,
+					 const struct bpf_reg_state *reg, int off,
+					 int size)
+{
+	return bpf_scx_btf_struct_access_common(reg, off, size);
 }
 
 static const struct bpf_verifier_ops bpf_scx_verifier_ops = {
 	.get_func_proto = bpf_base_func_proto,
 	.is_valid_access = bpf_scx_is_valid_access,
 	.btf_struct_access = bpf_scx_btf_struct_access,
+};
+
+static const struct bpf_verifier_ops bpf_scx_cid_verifier_ops = {
+	.get_func_proto = bpf_base_func_proto,
+	.is_valid_access = bpf_scx_is_valid_access,
+	.btf_struct_access = bpf_scx_cid_btf_struct_access,
 };
 
 static int bpf_scx_init_member(const struct btf_type *t,
@@ -7399,7 +7419,7 @@ static struct sched_ext_ops_cid __bpf_ops_sched_ext_ops_cid = {
  * verified to match by the BUILD_BUG_ON checks in scx_init().
  */
 static struct bpf_struct_ops bpf_sched_ext_ops_cid = {
-	.verifier_ops = &bpf_scx_verifier_ops,
+	.verifier_ops = &bpf_scx_cid_verifier_ops,
 	.reg = bpf_scx_reg_cid,
 	.unreg = bpf_scx_unreg,
 	.check_member = bpf_scx_check_member,
