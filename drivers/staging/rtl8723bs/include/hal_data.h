@@ -22,12 +22,6 @@ enum rt_multi_func {
 	RT_MULTI_FUNC_GPS	= 0x04,
 };
 
-/*  For RTL8723 regulator mode. by tynli. 2011.01.14. */
-enum rt_regulator_mode {
-	RT_SWITCHING_REGULATOR	= 0,
-	RT_LDO_REGULATOR	= 1,
-};
-
 enum rt_ampdu_burst {
 	RT_AMPDU_BURST_NONE	= 0,
 	RT_AMPDU_BURST_92D	= 1,
@@ -156,7 +150,6 @@ struct dm_priv {
 
 struct hal_com_data {
 	enum rt_multi_func MultiFunc; /*  For multi-function consideration. */
-	enum rt_regulator_mode	RegulatorMode; /*  switching regulator or LDO */
 
 	u16 FirmwareVersion;
 	u16 FirmwareVersionRev;

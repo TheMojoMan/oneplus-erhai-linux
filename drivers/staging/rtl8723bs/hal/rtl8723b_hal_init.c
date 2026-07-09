@@ -829,9 +829,6 @@ static void ReadChipVersion8723B(struct adapter *padapter)
 	value32 = rtw_read32(padapter, REG_SYS_CFG);
 	pHalData->chip_normal = ((value32 & RTL_ID) ? false : true);
 
-	/*  For regulator mode. by tynli. 2011.01.14 */
-	pHalData->RegulatorMode = ((value32 & SPS_SEL) ? RT_LDO_REGULATOR : RT_SWITCHING_REGULATOR);
-
 	/*  For multi-function consideration. Added by Roger, 2010.10.06. */
 	pHalData->MultiFunc = RT_MULTI_FUNC_NONE;
 	value32 = rtw_read32(padapter, REG_MULTI_FUNC_CTRL);

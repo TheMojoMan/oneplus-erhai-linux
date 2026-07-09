@@ -342,7 +342,6 @@
 #define VENDOR_ID				BIT(19)
 
 #define RTL_ID					BIT(23) /*  TestChip ID, 1:Test(RLE); 0:MP(RL) */
-#define SPS_SEL					BIT(24) /*  1:LDO regulator mode; 0:Switching regulator mode */
 
 
 #define CHIP_VER_RTL_MASK		0xF000	/* Bit 12 ~ 15 */
