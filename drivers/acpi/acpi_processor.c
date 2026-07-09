@@ -1018,7 +1018,7 @@ static int obj_get_integer(union acpi_object *obj, u32 *value)
 static void process_lpi_state_package(union acpi_object *lpi_pkg,
 				      struct acpi_lpi_state *lpi_state,
 				      acpi_handle handle,
-				      unsigned int state_idx)
+				      unsigned int state_idx, bool strict)
 {
 	union acpi_object *lpi_pkg_elem, *obj;
 
@@ -1054,11 +1054,21 @@ static void process_lpi_state_package(union acpi_object *lpi_pkg,
 	}
 
 	if (obj_get_integer(&lpi_pkg_elem[0], &lpi_state->min_residency)) {
+		if (strict) {
+			lpi_state_debug(handle, "No min. residency", state_idx);
+			return;
+		}
+
 		lpi_state_debug(handle, "Assuming 10 us min. residency", state_idx);
 		lpi_state->min_residency = 10;
 	}
 
 	if (obj_get_integer(&lpi_pkg_elem[1], &lpi_state->wake_latency)) {
+		if (strict) {
+			lpi_state_debug(handle, "No wake latency", state_idx);
+			return;
+		}
+
 		lpi_state_debug(handle, "Assuming 10 us wake latency", state_idx);
 		lpi_state->wake_latency = 10;
 	}
@@ -1090,7 +1100,8 @@ static void process_lpi_state_package(union acpi_object *lpi_pkg,
 }
 
 static int acpi_processor_evaluate_lpi(acpi_handle handle,
-				       struct acpi_lpi_states_array *info)
+				       struct acpi_lpi_states_array *info,
+				       bool strict)
 {
 	struct acpi_buffer buffer = { ACPI_ALLOCATE_BUFFER, NULL };
 	union acpi_object *lpi_data, *lpi_pkg;
@@ -1138,7 +1149,8 @@ static int acpi_processor_evaluate_lpi(acpi_handle handle,
 
 	for (state_idx = 1; state_idx <= lpi_pkg_count; state_idx++) {
 		lpi_state->index = state_idx;
-		process_lpi_state_package(lpi_pkg++, lpi_state++, handle, state_idx);
+		process_lpi_state_package(lpi_pkg++, lpi_state++, handle,
+					  state_idx, strict);
 	}
 
 	acpi_handle_debug(handle, "Found %u power states\n", lpi_pkg_count);
@@ -1245,7 +1257,8 @@ static unsigned int flatten_lpi_states(acpi_handle handle,
 }
 
 int acpi_processor_extract_lpi_info(acpi_handle pr_handle,
-				    struct acpi_processor_power *pr_power)
+				    struct acpi_processor_power *pr_power,
+				    bool strict)
 {
 	struct acpi_lpi_states_array info[2], *prev, *curr;
 	acpi_handle handle = pr_handle;
@@ -1259,7 +1272,7 @@ int acpi_processor_extract_lpi_info(acpi_handle pr_handle,
 	curr = &info[0];
 	curr->composite_states_size = 0;
 
-	ret = acpi_processor_evaluate_lpi(handle, curr);
+	ret = acpi_processor_evaluate_lpi(handle, curr, strict);
 	if (ret)
 		return ret;
 
@@ -1312,7 +1325,7 @@ int acpi_processor_extract_lpi_info(acpi_handle pr_handle,
 
 		curr->composite_states_size = 0;
 
-		ret = acpi_processor_evaluate_lpi(handle, curr);
+		ret = acpi_processor_evaluate_lpi(handle, curr, strict);
 		if (ret)
 			break;
 
