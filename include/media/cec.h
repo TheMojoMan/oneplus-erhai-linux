@@ -221,6 +221,8 @@ struct cec_adap_ops {
  * @tx_error_log_cnt:	number of logged Error transmits since the adapter was
  *                      enabled. Used to avoid flooding the kernel log if this
  *                      happens a lot.
+ * @error_inj_tx_timeouts: error injection: the next @error_inj_tx_timeouts
+ *			transmits will time out.
  * @notifier:		CEC notifier
  * @pin:		CEC pin status struct
  * @cec_dir:		debugfs cec directory
@@ -280,6 +282,8 @@ struct cec_adapter {
 	u32 tx_arb_lost_cnt;
 	u32 tx_low_drive_log_cnt;
 	u32 tx_error_log_cnt;
+
+	u32 error_inj_tx_timeouts;
 
 #ifdef CONFIG_CEC_NOTIFIER
 	struct cec_notifier *notifier;

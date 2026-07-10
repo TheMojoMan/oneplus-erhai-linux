@@ -629,6 +629,13 @@ void cec_transmit_done_ts(struct cec_adapter *adap, u8 status,
 		attempts_made = 1;
 
 	mutex_lock(&adap->lock);
+	if (adap->error_inj_tx_timeouts) {
+		dprintk(2, "%s: error_inj_tx_timeouts %u\n",
+			__func__, adap->error_inj_tx_timeouts);
+		adap->error_inj_tx_timeouts--;
+		mutex_unlock(&adap->lock);
+		return;
+	}
 	data = adap->transmitting;
 	if (!data) {
 		/*

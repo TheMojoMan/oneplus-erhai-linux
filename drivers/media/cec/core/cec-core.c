@@ -223,6 +223,34 @@ static int cec_error_inj_show(struct seq_file *sf, void *unused)
 	return call_op(adap, error_inj_show, sf);
 }
 DEFINE_SHOW_STORE_ATTRIBUTE(cec_error_inj);
+
+static ssize_t cec_error_inj_tx_timeouts_write(struct file *file,
+			const char __user *ubuf, size_t count, loff_t *ppos)
+{
+	struct seq_file *sf = file->private_data;
+	struct cec_adapter *adap = sf->private;
+	int ret;
+
+	if (count > 5)
+		return -EINVAL;
+
+	mutex_lock(&adap->lock);
+	ret = kstrtou32_from_user(ubuf, count, 0, &adap->error_inj_tx_timeouts);
+	if (ret)
+		adap->error_inj_tx_timeouts = 0;
+	mutex_unlock(&adap->lock);
+	return ret ? : count;
+}
+
+static int cec_error_inj_tx_timeouts_show(struct seq_file *sf, void *unused)
+{
+	struct cec_adapter *adap = sf->private;
+
+	seq_printf(sf, "%u", adap->error_inj_tx_timeouts);
+	return 0;
+}
+
+DEFINE_SHOW_STORE_ATTRIBUTE(cec_error_inj_tx_timeouts);
 #endif
 
 struct cec_adapter *cec_allocate_adapter(const struct cec_adap_ops *ops,
@@ -366,6 +394,9 @@ int cec_register_adapter(struct cec_adapter *adap,
 
 	debugfs_create_devm_seqfile(&adap->devnode.dev, "status", adap->cec_dir,
 				    cec_adap_status);
+
+	debugfs_create_file("error-inj-tx-timeouts", 0644, adap->cec_dir, adap,
+			    &cec_error_inj_tx_timeouts_fops);
 
 	if (!adap->ops->error_inj_show || !adap->ops->error_inj_parse_line)
 		return 0;
