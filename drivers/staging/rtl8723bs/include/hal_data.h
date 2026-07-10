@@ -161,7 +161,6 @@ struct hal_com_data {
 	u8 PackageType;
 
 	/*  EEPROM setting. */
-	u8 EEPROMVersion;
 	u8 EEPROMRegulatory;
 	u8 EEPROMThermalMeter;
 	u8 EEPROMBluetoothCoexist;

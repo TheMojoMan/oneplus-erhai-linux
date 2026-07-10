@@ -211,8 +211,6 @@ void Hal_EfuseParseTxPowerInfo_8723B(struct adapter *padapter, u8 *PROMContent,
 				     bool AutoLoadFail);
 void Hal_EfuseParseBTCoexistInfo_8723B(struct adapter *padapter, u8 *hwinfo,
 				       bool AutoLoadFail);
-void Hal_EfuseParseEEPROMVer_8723B(struct adapter *padapter, u8 *hwinfo,
-				   bool AutoLoadFail);
 void Hal_EfuseParseChnlPlan_8723B(struct adapter *padapter, u8 *hwinfo,
 				  bool AutoLoadFail);
 void Hal_EfuseParseXtal_8723B(struct adapter *padapter, u8 *hwinfo,

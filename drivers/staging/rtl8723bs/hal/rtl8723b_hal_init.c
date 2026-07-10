@@ -1389,18 +1389,6 @@ void Hal_EfuseParseBTCoexistInfo_8723B(
 		hal_btcoex_SetSingleAntPath(padapter, pHalData->ant_path);
 }
 
-void Hal_EfuseParseEEPROMVer_8723B(
-	struct adapter *padapter, u8 *hwinfo, bool AutoLoadFail
-)
-{
-	struct hal_com_data	*pHalData = GET_HAL_DATA(padapter);
-
-	if (!AutoLoadFail)
-		pHalData->EEPROMVersion = hwinfo[EEPROM_VERSION_8723B];
-	else
-		pHalData->EEPROMVersion = 1;
-}
-
 void Hal_EfuseParsePackageType_8723B(
 	struct adapter *padapter, u8 *hwinfo, bool AutoLoadFail
 )
