@@ -1345,8 +1345,6 @@ void Hal_EfuseParseBTCoexistInfo_8723B(
 		else
 			pHalData->EEPROMBluetoothCoexist = false;
 
-		pHalData->EEPROMBluetoothType = BT_RTL8723B;
-
 		tempval = hwinfo[EEPROM_RF_BT_SETTING_8723B];
 		if (tempval != 0xFF) {
 			pHalData->EEPROMBluetoothAntNum = tempval & BIT(0);
@@ -1365,7 +1363,6 @@ void Hal_EfuseParseBTCoexistInfo_8723B(
 		}
 	} else {
 		pHalData->EEPROMBluetoothCoexist = false;
-		pHalData->EEPROMBluetoothType = BT_RTL8723B;
 		pHalData->EEPROMBluetoothAntNum = Ant_x1;
 		pHalData->ant_path = RF_PATH_A;
 	}

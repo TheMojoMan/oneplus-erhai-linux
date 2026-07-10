@@ -60,8 +60,4 @@ enum {
 	Ant_x1	= 1
 };
 
-enum {
-	BT_RTL8723B = 8,
-};
-
 #endif
