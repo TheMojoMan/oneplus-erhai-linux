@@ -186,7 +186,7 @@ void amdgpu_umc_handle_bad_pages(struct amdgpu_device *adev,
 		if ((amdgpu_bad_page_threshold != 0) &&
 			err_data->err_addr_cnt) {
 			amdgpu_ras_add_bad_pages(adev, err_data->err_addr,
-				err_data->err_addr_cnt, amdgpu_ras_smu_eeprom_supported(adev));
+				err_data->err_addr_cnt, false);
 			amdgpu_ras_save_bad_pages(adev, &err_count);
 
 			amdgpu_dpm_send_hbm_bad_pages_num(adev,
@@ -260,7 +260,6 @@ int amdgpu_umc_pasid_poison_handler(struct amdgpu_device *adev,
 			if (ret == AMDGPU_RAS_SUCCESS && obj) {
 				obj->err_data.ue_count += err_data.ue_count;
 				obj->err_data.ce_count += err_data.ce_count;
-				obj->err_data.de_count += err_data.de_count;
 			}
 
 			amdgpu_ras_error_data_fini(&err_data);

@@ -492,32 +492,6 @@ struct ras_critical_region {
 	uint64_t size;
 };
 
-struct ras_eeprom_table_version {
-	uint32_t minor    : 16;
-	uint32_t major    : 16;
-};
-
-struct ras_eeprom_smu_funcs {
-	int (*get_ras_table_version)(struct amdgpu_device *adev,
-							uint32_t *table_version);
-	int (*get_badpage_count)(struct amdgpu_device *adev, uint32_t *count, uint32_t timeout);
-	int (*get_badpage_mca_addr)(struct amdgpu_device *adev, uint16_t index, uint64_t *mca_addr);
-	int (*set_timestamp)(struct amdgpu_device *adev, uint64_t timestamp);
-	int (*get_timestamp)(struct amdgpu_device *adev,
-							uint16_t index, uint64_t *timestamp);
-	int (*get_badpage_ipid)(struct amdgpu_device *adev, uint16_t index, uint64_t *ipid);
-	int (*erase_ras_table)(struct amdgpu_device *adev, uint32_t *result);
-};
-
-enum ras_smu_feature_flags {
-	RAS_SMU_FEATURE_BIT__RAS_EEPROM = BIT_ULL(0),
-};
-
-struct ras_smu_drv {
-	const struct ras_eeprom_smu_funcs *smu_eeprom_funcs;
-	void (*ras_smu_feature_flags)(struct amdgpu_device *adev, uint64_t *flags);
-};
-
 struct amdgpu_ras {
 	void *ras_mgr;
 	/* ras infrastructure */
@@ -598,7 +572,6 @@ struct amdgpu_ras {
 
 	/* Disable/Enable uniras switch */
 	bool uniras_enabled;
-	const struct ras_smu_drv *ras_smu_drv;
 };
 
 struct ras_fs_data {
@@ -975,9 +948,6 @@ int amdgpu_ras_error_statistic_ce_count(struct ras_err_data *err_data,
 					struct amdgpu_smuio_mcm_config_info *mcm_info,
 					u64 count);
 int amdgpu_ras_error_statistic_ue_count(struct ras_err_data *err_data,
-					struct amdgpu_smuio_mcm_config_info *mcm_info,
-					u64 count);
-int amdgpu_ras_error_statistic_de_count(struct ras_err_data *err_data,
 					struct amdgpu_smuio_mcm_config_info *mcm_info,
 					u64 count);
 void amdgpu_ras_query_boot_status(struct amdgpu_device *adev, u32 num_instances);

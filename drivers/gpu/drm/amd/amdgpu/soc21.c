@@ -33,6 +33,7 @@
 #include "amdgpu_ucode.h"
 #include "amdgpu_psp.h"
 #include "amdgpu_smu.h"
+#include "amdgpu_video_codecs.h"
 #include "atom.h"
 #include "amd_pcie.h"
 
@@ -406,6 +407,7 @@ soc21_asic_reset_method(struct amdgpu_device *adev)
 	case IP_VERSION(14, 0, 4):
 	case IP_VERSION(14, 0, 5):
 	case IP_VERSION(15, 0, 0):
+	case IP_VERSION(15, 0, 9):
 		return AMD_RESET_METHOD_MODE2;
 	default:
 		if (amdgpu_dpm_is_baco_supported(adev))
@@ -849,7 +851,6 @@ static int soc21_common_early_init(struct amdgpu_ip_block *ip_block)
 			AMD_CG_SUPPORT_BIF_LS;
 		adev->pg_flags = AMD_PG_SUPPORT_VCN_DPG |
 			AMD_PG_SUPPORT_VCN |
-			AMD_PG_SUPPORT_JPEG_DPG |
 			AMD_PG_SUPPORT_JPEG |
 			AMD_PG_SUPPORT_GFX_PG;
 		adev->external_rev_id = adev->rev_id + 0xF;
@@ -877,7 +878,6 @@ static int soc21_common_early_init(struct amdgpu_ip_block *ip_block)
 			AMD_CG_SUPPORT_BIF_LS;
 		adev->pg_flags = AMD_PG_SUPPORT_VCN_DPG |
 			AMD_PG_SUPPORT_VCN |
-			AMD_PG_SUPPORT_JPEG_DPG |
 			AMD_PG_SUPPORT_JPEG |
 			AMD_PG_SUPPORT_GFX_PG;
 		adev->external_rev_id = adev->rev_id + 0x40;

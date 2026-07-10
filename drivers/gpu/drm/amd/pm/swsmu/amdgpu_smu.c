@@ -801,6 +801,7 @@ static int smu_set_funcs(struct amdgpu_device *adev)
 		break;
 	case IP_VERSION(15, 0, 0):
 	case IP_VERSION(15, 0, 5):
+	case IP_VERSION(15, 0, 9):
 		smu_v15_0_0_set_ppt_funcs(smu);
 		break;
 	case IP_VERSION(15, 0, 8):
@@ -2816,17 +2817,6 @@ const struct amdgpu_ip_block_version smu_v15_0_ip_block = {
 	.rev = 0,
 	.funcs = &smu_ip_funcs,
 };
-
-const struct ras_smu_drv *smu_get_ras_smu_driver(void *handle)
-{
-	struct smu_context *smu = (struct smu_context *)handle;
-	const struct ras_smu_drv *tmp = NULL;
-	int ret;
-
-	ret = smu_get_ras_smu_drv(smu, &tmp);
-
-	return ret ? NULL : tmp;
-}
 
 static int smu_load_microcode(void *handle)
 {
