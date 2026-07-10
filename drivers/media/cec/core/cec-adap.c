@@ -1317,7 +1317,7 @@ static int cec_config_log_addr(struct cec_adapter *adap,
 {
 	struct cec_log_addrs *las = &adap->log_addrs;
 	struct cec_msg msg = { };
-	const unsigned int max_retries = 2;
+	const unsigned int max_attempts = 3;
 	unsigned int i;
 	int err;
 
@@ -1328,7 +1328,7 @@ static int cec_config_log_addr(struct cec_adapter *adap,
 	msg.len = 1;
 	msg.msg[0] = (log_addr << 4) | log_addr;
 
-	for (i = 0; i < max_retries; i++) {
+	for (i = 0; i < max_attempts; i++) {
 		err = cec_transmit_msg_fh(adap, &msg, NULL, true);
 
 		/*
@@ -1357,19 +1357,19 @@ static int cec_config_log_addr(struct cec_adapter *adap,
 		if (msg.tx_status & CEC_TX_STATUS_NACK)
 			break;
 		/*
-		 * Retry up to max_retries times if the message was neither
+		 * Do up to max_attempts if the message was neither
 		 * OKed or NACKed. This can happen due to e.g. a Lost
 		 * Arbitration condition.
 		 */
 	}
 
 	/*
-	 * If we are unable to get an OK or a NACK after max_retries attempts
+	 * If we are unable to get an OK or a NACK after max_attempts
 	 * (and note that each attempt already consists of four polls), then
 	 * we assume that something is really weird and that it is not a
 	 * good idea to try and claim this logical address.
 	 */
-	if (i == max_retries) {
+	if (i == max_attempts) {
 		dprintk(0, "polling for LA %u failed with tx_status=0x%04x\n",
 			log_addr, msg.tx_status);
 		return 0;
