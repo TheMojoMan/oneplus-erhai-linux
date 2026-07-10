@@ -12575,7 +12575,6 @@ __bpf_kfunc int bpf_xdp_pull_data(struct xdp_md *x, u32 len)
 __bpf_kfunc int bpf_icmp_send(struct __sk_buff *skb_ctx, int type, int code)
 {
 	struct sk_buff *skb = (struct sk_buff *)skb_ctx;
-	struct sk_buff *nskb;
 	struct sock *sk;
 
 	sk = skb_to_full_sk(skb);
@@ -12589,6 +12588,8 @@ __bpf_kfunc int bpf_icmp_send(struct __sk_buff *skb_ctx, int type, int code)
 	switch (skb->protocol) {
 #if IS_ENABLED(CONFIG_INET)
 	case htons(ETH_P_IP): {
+		struct sk_buff *nskb;
+
 		if (type != ICMP_DEST_UNREACH)
 			return -EOPNOTSUPP;
 		if (code < 0 || code > NR_ICMP_UNREACH ||
@@ -12606,7 +12607,9 @@ __bpf_kfunc int bpf_icmp_send(struct __sk_buff *skb_ctx, int type, int code)
 	}
 #endif
 #if IS_ENABLED(CONFIG_IPV6)
-	case htons(ETH_P_IPV6):
+	case htons(ETH_P_IPV6): {
+		struct sk_buff *nskb;
+
 		if (type != ICMPV6_DEST_UNREACH)
 			return -EOPNOTSUPP;
 		if (code < 0 || code > ICMPV6_REJECT_ROUTE)
@@ -12620,6 +12623,7 @@ __bpf_kfunc int bpf_icmp_send(struct __sk_buff *skb_ctx, int type, int code)
 		icmpv6_send(nskb, type, code, 0);
 		consume_skb(nskb);
 		break;
+	}
 #endif
 	default:
 		return -EPROTONOSUPPORT;
