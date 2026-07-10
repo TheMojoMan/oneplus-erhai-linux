@@ -1459,18 +1459,6 @@ void Hal_EfuseParseChnlPlan_8723B(
 	Hal_ChannelPlanToRegulation(padapter, padapter->mlmepriv.ChannelPlan);
 }
 
-void Hal_EfuseParseCustomerID_8723B(
-	struct adapter *padapter, u8 *hwinfo, bool AutoLoadFail
-)
-{
-	struct hal_com_data	*pHalData = GET_HAL_DATA(padapter);
-
-	if (!AutoLoadFail)
-		pHalData->EEPROMCustomerID = hwinfo[EEPROM_CustomID_8723B];
-	else
-		pHalData->EEPROMCustomerID = 0;
-}
-
 void Hal_EfuseParseXtal_8723B(
 	struct adapter *padapter, u8 *hwinfo, bool AutoLoadFail
 )

@@ -215,8 +215,6 @@ void Hal_EfuseParseEEPROMVer_8723B(struct adapter *padapter, u8 *hwinfo,
 				   bool AutoLoadFail);
 void Hal_EfuseParseChnlPlan_8723B(struct adapter *padapter, u8 *hwinfo,
 				  bool AutoLoadFail);
-void Hal_EfuseParseCustomerID_8723B(struct adapter *padapter, u8 *hwinfo,
-				    bool AutoLoadFail);
 void Hal_EfuseParseXtal_8723B(struct adapter *padapter, u8 *hwinfo,
 			      bool AutoLoadFail);
 void Hal_EfuseParseThermalMeter_8723B(struct adapter *padapter, u8 *hwinfo,
