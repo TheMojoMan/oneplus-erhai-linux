@@ -3,6 +3,8 @@
  * Copyright © 2025 Intel Corporation
  */
 
+#include "abi/xe_driver_klvs_abi.h"
+
 #include "xe_bo.h"
 #include "xe_device.h"
 #include "xe_guc_klv_helpers.h"
@@ -351,11 +353,6 @@ ssize_t xe_sriov_packet_write_single(struct xe_device *xe, unsigned int vfid,
 
 	return copied;
 }
-
-#define MIGRATION_KLV_DEVICE_DEVID_KEY	0xf001u
-#define MIGRATION_KLV_DEVICE_DEVID_LEN	1u
-#define MIGRATION_KLV_DEVICE_REVID_KEY	0xf002u
-#define MIGRATION_KLV_DEVICE_REVID_LEN	1u
 
 #define MIGRATION_DESCRIPTOR_DWORDS	(GUC_KLV_LEN_MIN + MIGRATION_KLV_DEVICE_DEVID_LEN + \
 					 GUC_KLV_LEN_MIN + MIGRATION_KLV_DEVICE_REVID_LEN)

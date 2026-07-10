@@ -8,6 +8,7 @@
 #include <drm/drm_print.h>
 
 #include "abi/guc_klvs_abi.h"
+#include "abi/xe_driver_klvs_abi.h"
 #include "xe_guc_klv_helpers.h"
 #include "xe_guc_klv_thresholds_set.h"
 
@@ -17,6 +18,11 @@ static bool is_group_key(u16 key)
 {
 	KUNIT_STATIC_STUB_REDIRECT(is_group_key, key);
 	return false;
+}
+
+static bool is_reserved_key(u16 key)
+{
+	return in_range(key, GUC_KLV_RESERVED_RANGE_START, GUC_KLV_RESERVED_RANGE_LEN);
 }
 
 /**
@@ -80,7 +86,15 @@ const char *xe_guc_klv_key_to_string(u16 key)
 	MAKE_XE_GUC_KLV_THRESHOLDS_SET(define_threshold_key_to_string_case)
 #undef define_threshold_key_to_string_case
 
+	/* driver KLVs */
+	case MIGRATION_KLV_DEVICE_DEVID_KEY:
+		return "migration_devid";
+	case MIGRATION_KLV_DEVICE_REVID_KEY:
+		return "migration_revid";
+
 	default:
+		if (is_reserved_key(key))
+			return "(reserved)";
 		return "(unknown)";
 	}
 }

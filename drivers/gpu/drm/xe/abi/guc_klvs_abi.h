@@ -22,6 +22,7 @@
  *  |   |       |   - `GuC Scheduling Policies KLVs`_                          |
  *  |   |       |   - `GuC VGT Policy KLVs`_                                   |
  *  |   |       |   - `GuC VF Configuration KLVs`_                             |
+ *  |   |       |   - `GuC Reserved KLVs`_                                     |
  *  |   |       |                                                              |
  *  |   +-------+--------------------------------------------------------------+
  *  |   |  15:0 | **LEN** - length of VALUE (in 32bit dwords)                  |
@@ -525,5 +526,21 @@ enum xe_guc_klv_ids {
 	GUC_WA_KLV_REMAP_RANGED_TLB_INV							= 0x900f,
 	GUC_WA_KLV_IGNORE_MMIO_READ_SEM_TOKEN_64					= 0x9010,
 };
+
+/**
+ * DOC: GuC Reserved KLVs
+ *
+ * Range of `GuC KLV`_ keys reserved for internal use by the GuC that will
+ * never be part of the offcial GuC ABI and can be reused by the drivers.
+ *
+ * Currently this range includes 1024 keys starting from:
+ *
+ * _`GUC_KLV_RESERVED_RANGE_START` : 0xF000
+ *
+ * See `Xe Driver KLVs`_ for the KLVs that the Xe driver is currently using.
+ */
+
+#define GUC_KLV_RESERVED_RANGE_START	0xf000u
+#define GUC_KLV_RESERVED_RANGE_LEN	1024u
 
 #endif
