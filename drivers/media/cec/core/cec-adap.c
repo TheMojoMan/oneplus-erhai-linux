@@ -1482,6 +1482,7 @@ static int cec_config_thread_func(void *arg)
 	dprintk(1, "physical address: %x.%x.%x.%x, claim %d logical addresses\n",
 		cec_phys_addr_exp(adap->phys_addr), las->num_log_addrs);
 	las->log_addr_mask = 0;
+	las->flags &= ~CEC_LOG_ADDRS_FL_CONFIG_FAILED;
 
 	if (las->log_addr_type[0] == CEC_LOG_ADDR_TYPE_UNREGISTERED)
 		goto configured;
@@ -1614,6 +1615,8 @@ configured:
 unconfigure:
 	for (i = 0; i < las->num_log_addrs; i++)
 		las->log_addr[i] = CEC_LOG_ADDR_INVALID;
+	if (adap->phys_addr != CEC_PHYS_ADDR_INVALID)
+		las->flags |= CEC_LOG_ADDRS_FL_CONFIG_FAILED;
 	cec_adap_unconfigure(adap);
 	adap->is_configuring = false;
 	adap->must_reconfigure = false;
