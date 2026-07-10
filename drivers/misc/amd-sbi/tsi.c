@@ -42,6 +42,23 @@ static void sbtsi_unregister_hwmon_adev(void *_adev)
 	auxiliary_device_uninit(adev);
 }
 
+static void sbtsi_misc_unregister(void *arg)
+{
+	struct sbtsi_data *data = arg;
+
+	misc_deregister(&data->sbtsi_misc_dev);
+
+	guard(sbtsi)(data);
+	data->detached = true;
+}
+
+static void sbtsi_driver_unref(void *arg)
+{
+	struct sbtsi_data *data = arg;
+
+	kref_put(&data->kref, sbtsi_data_release);
+}
+
 /*
  * Create and publish an auxiliary device. The hwmon driver in
  * drivers/hwmon/sbtsi_temp.c binds to this device.
@@ -84,6 +101,13 @@ static int sbtsi_probe_common(struct device *dev, struct sbtsi_data *data)
 	u8 val;
 	int err;
 
+	mutex_init(&data->lock);
+	kref_init(&data->kref);
+
+	err = devm_add_action_or_reset(dev, sbtsi_driver_unref, data);
+	if (err)
+		return err;
+
 	err = sbtsi_xfer(data, SBTSI_REG_CONFIG, &val, true);
 	if (err)
 		return err;
@@ -92,7 +116,15 @@ static int sbtsi_probe_common(struct device *dev, struct sbtsi_data *data)
 	data->read_order = FIELD_GET(BIT(SBTSI_CONFIG_READ_ORDER_SHIFT), val);
 
 	dev_set_drvdata(dev, data);
-	return sbtsi_create_hwmon_adev(dev, data->dev_addr);
+	err = sbtsi_create_hwmon_adev(dev, data->dev_addr);
+	if (err < 0)
+		return err;
+
+	err = create_misc_tsi_device(data, dev);
+	if (err)
+		return err;
+
+	return devm_add_action_or_reset(dev, sbtsi_misc_unregister, data);
 }
 
 static int sbtsi_i2c_probe(struct i2c_client *client)
@@ -100,7 +132,7 @@ static int sbtsi_i2c_probe(struct i2c_client *client)
 	struct device *dev = &client->dev;
 	struct sbtsi_data *data;
 
-	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
+	data = kzalloc_obj(*data);
 	if (!data)
 		return -ENOMEM;
 
@@ -158,7 +190,7 @@ static int sbtsi_i3c_probe(struct i3c_device *i3cdev)
 	if (I3C_PID_INSTANCE_ID(devinfo.pid) != 0)
 		return -ENXIO;
 
-	i3c_priv = devm_kzalloc(dev, sizeof(*i3c_priv), GFP_KERNEL);
+	i3c_priv = kzalloc_obj(*i3c_priv);
 	if (!i3c_priv)
 		return -ENOMEM;
 

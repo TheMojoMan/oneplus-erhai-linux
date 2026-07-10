@@ -23,4 +23,7 @@ struct sbtsi_i3c_priv {
 	u8 rx __aligned(ARCH_DMA_MINALIGN);
 };
 
+int create_misc_tsi_device(struct sbtsi_data *data, struct device *dev);
+
+void sbtsi_data_release(struct kref *kref);
 #endif /* _LINUX_TSI_CORE_H_ */
