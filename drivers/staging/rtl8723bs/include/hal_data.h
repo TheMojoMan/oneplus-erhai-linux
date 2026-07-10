@@ -165,7 +165,6 @@ struct hal_com_data {
 	u8 EEPROMThermalMeter;
 	u8 EEPROMBluetoothCoexist;
 	u8 EEPROMBluetoothAntNum;
-	u8 bTXPowerDataReadFromEEPORM;
 	u8 bDisableSWChannelPlan; /*  flag of disable software change channel plan */
 
 	bool		EepromOrEfuse;

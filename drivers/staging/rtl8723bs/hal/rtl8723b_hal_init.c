@@ -1182,7 +1182,6 @@ static void Hal_ReadPowerValueFromPROM_8723B(
 	bool AutoLoadFail
 )
 {
-	struct hal_com_data *pHalData = GET_HAL_DATA(Adapter);
 	u32 rfPath, eeAddr = EEPROM_TX_PWR_INX_8723B, group, TxCount = 0;
 
 	memset(pwrInfo24G, 0, sizeof(struct TxPowerInfo24G));
@@ -1213,8 +1212,6 @@ static void Hal_ReadPowerValueFromPROM_8723B(
 
 		return;
 	}
-
-	pHalData->bTXPowerDataReadFromEEPORM = true;		/* YJ, move, 120316 */
 
 	for (rfPath = 0; rfPath < MAX_RF_PATH; rfPath++) {
 		/* 2 2.4G default value */
