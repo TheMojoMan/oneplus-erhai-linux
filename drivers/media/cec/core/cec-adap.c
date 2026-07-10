@@ -80,9 +80,9 @@ void cec_queue_event_fh(struct cec_fh *fh,
 			const struct cec_event *new_ev, u64 ts)
 {
 	static const u16 max_events[CEC_NUM_EVENTS] = {
-		1, 1, 800, 800, 8, 8, 8, 8
+		3, 1, 800, 800, 8, 8, 8, 8
 	};
-	struct cec_event_entry *entry;
+	struct cec_event_entry *new_entry, *entry;
 	unsigned int ev_idx = new_ev->event - 1;
 
 	if (WARN_ON(ev_idx >= ARRAY_SIZE(fh->events)))
@@ -92,36 +92,34 @@ void cec_queue_event_fh(struct cec_fh *fh,
 		ts = ktime_get_ns();
 
 	mutex_lock(&fh->lock);
-	if (ev_idx < CEC_NUM_CORE_EVENTS)
-		entry = &fh->core_events[ev_idx];
-	else
-		entry = kmalloc_obj(*entry);
-	if (entry) {
+	new_entry = kmalloc_obj(*new_entry);
+	if (new_entry) {
 		if (new_ev->event == CEC_EVENT_LOST_MSGS &&
 		    fh->queued_events[ev_idx]) {
+			entry = list_first_entry(&fh->events[ev_idx],
+						 struct cec_event_entry, list);
 			entry->ev.lost_msgs.lost_msgs +=
 				new_ev->lost_msgs.lost_msgs;
+			kfree(new_entry);
 			goto unlock;
 		}
-		entry->ev = *new_ev;
-		entry->ev.ts = ts;
+		new_entry->ev = *new_ev;
+		new_entry->ev.ts = ts;
 
 		if (fh->queued_events[ev_idx] < max_events[ev_idx]) {
 			/* Add new msg at the end of the queue */
-			list_add_tail(&entry->list, &fh->events[ev_idx]);
+			list_add_tail(&new_entry->list, &fh->events[ev_idx]);
 			fh->queued_events[ev_idx]++;
 			fh->total_queued_events++;
 			goto unlock;
 		}
 
-		if (ev_idx >= CEC_NUM_CORE_EVENTS) {
-			list_add_tail(&entry->list, &fh->events[ev_idx]);
-			/* drop the oldest event */
-			entry = list_first_entry(&fh->events[ev_idx],
-						 struct cec_event_entry, list);
-			list_del(&entry->list);
-			kfree(entry);
-		}
+		list_add_tail(&new_entry->list, &fh->events[ev_idx]);
+		/* drop the oldest event */
+		entry = list_first_entry(&fh->events[ev_idx],
+					 struct cec_event_entry, list);
+		list_del(&entry->list);
+		kfree(entry);
 	}
 	/* Mark that events were lost */
 	entry = list_first_entry_or_null(&fh->events[ev_idx],

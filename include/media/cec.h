@@ -85,7 +85,6 @@ struct cec_event_entry {
 	struct cec_event	ev;
 };
 
-#define CEC_NUM_CORE_EVENTS 2
 #define CEC_NUM_EVENTS CEC_EVENT_PIN_5V_HIGH
 
 struct cec_fh {
@@ -101,7 +100,6 @@ struct cec_fh {
 	struct list_head	events[CEC_NUM_EVENTS]; /* queued events */
 	u16			queued_events[CEC_NUM_EVENTS];
 	unsigned int		total_queued_events;
-	struct cec_event_entry	core_events[CEC_NUM_CORE_EVENTS];
 	struct list_head	msgs; /* queued messages */
 	unsigned int		queued_msgs;
 };
