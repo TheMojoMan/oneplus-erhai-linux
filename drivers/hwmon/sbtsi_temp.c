@@ -70,6 +70,7 @@ static int sbtsi_temp_read(struct sbtsi_data *data, u8 reg1, u8 reg2,
 {
 	int ret;
 
+	guard(sbtsi)(data);
 	ret = sbtsi_xfer(data, reg1, val1, true);
 	if (!ret)
 		ret = sbtsi_xfer(data, reg2, val2, true);
@@ -84,6 +85,7 @@ static int sbtsi_temp_write(struct sbtsi_data *data, u8 reg_int, u8 reg_dec,
 {
 	int ret;
 
+	guard(sbtsi)(data);
 	ret = sbtsi_xfer(data, reg_int, &val_int, false);
 	if (!ret)
 		ret = sbtsi_xfer(data, reg_dec, &val_dec, false);
