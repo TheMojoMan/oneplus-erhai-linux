@@ -12,6 +12,7 @@
 #include <linux/regulator/consumer.h>
 
 #include <drm/drm_mipi_dsi.h>
+#include <drm/drm_of.h>
 #include <drm/drm_panel.h>
 #include <drm/drm_probe_helper.h>
 
@@ -165,7 +166,7 @@ static int panel_anbernic_td4310_probe(struct mipi_dsi_device *dsi)
 	if (!ctx->panel_info)
 		return -EINVAL;
 
-	ret = of_drm_get_panel_orientation(dev->of_node, &ctx->orientation);
+	ret = drm_of_get_panel_orientation(dev->of_node, &ctx->orientation);
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "Failed to get panel orientation\n");
 

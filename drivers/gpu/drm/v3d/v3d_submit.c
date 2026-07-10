@@ -4,6 +4,9 @@
  * Copyright (C) 2023 Raspberry Pi
  */
 
+#include <linux/dma-fence-unwrap.h>
+#include <linux/overflow.h>
+
 #include <drm/drm_print.h>
 #include <drm/drm_syncobj.h>
 
@@ -302,8 +305,10 @@ v3d_attach_perfmon_to_jobs(struct v3d_submit *submit, u32 perfmon_id)
 	if (!perfmon_id)
 		return 0;
 
-	if (v3d->global_perfmon)
-		return -EAGAIN;
+	scoped_guard(spinlock_irqsave, &v3d->perfmon_state.lock) {
+		if (v3d->global_perfmon)
+			return -EAGAIN;
+	}
 
 	perfmon = v3d_perfmon_find(v3d_priv, perfmon_id);
 	if (!perfmon)
@@ -313,6 +318,73 @@ v3d_attach_perfmon_to_jobs(struct v3d_submit *submit, u32 perfmon_id)
 		submit->jobs[i]->perfmon = perfmon;
 		if (i != 0)
 			v3d_perfmon_get(perfmon);
+	}
+
+	return 0;
+}
+
+/*
+ * Prepare fences to enforce job serialization when a perfmon is active. A job
+ * that carries a non-global perfmon must wait for every job currently in-flight
+ * across all HW queues to finish, otherwise concurrent unrelated work on the
+ * same core would pollute the performance counters. Symmetrically, while such a
+ * job is still in-flight, all subsequently submitted jobs must wait for it.
+ *
+ * We don't serialize the jobs when using a global perfmon as it's expected to
+ * track concurrent activity from all jobs.
+ */
+static int
+v3d_serialize_for_perfmon(struct v3d_job *job)
+{
+	struct v3d_dev *v3d = job->v3d;
+	struct dma_fence *merged;
+	bool is_global_perfmon;
+	int ret;
+
+	lockdep_assert_held(&v3d->sched_lock);
+
+	scoped_guard(spinlock_irqsave, &v3d->perfmon_state.lock)
+		is_global_perfmon = !!v3d->global_perfmon;
+
+	if (is_global_perfmon)
+		goto publish;
+
+	if (job->perfmon) {
+		for (enum v3d_queue q = 0; q < V3D_MAX_QUEUES; q++) {
+			struct dma_fence *f = v3d->perfmon_state.last_hw_fence[q];
+
+			if (!f || dma_fence_is_signaled(f))
+				continue;
+
+			ret = drm_sched_job_add_dependency(&job->base, dma_fence_get(f));
+			if (ret)
+				return ret;
+		}
+	} else if (v3d->perfmon_state.fence &&
+		   !dma_fence_is_signaled(v3d->perfmon_state.fence)) {
+		ret = drm_sched_job_add_dependency(&job->base,
+						   dma_fence_get(v3d->perfmon_state.fence));
+		if (ret)
+			return ret;
+	}
+
+publish:
+	/*
+	 * Accumulate every in-flight job on this queue into one merged fence.
+	 * A HW queue is fed by several scheduler entities (one per-fd), so jobs
+	 * on it can complete out of order.
+	 */
+	merged = dma_fence_unwrap_merge(v3d->perfmon_state.last_hw_fence[job->queue],
+					job->done_fence);
+	if (!merged)
+		return -ENOMEM;
+
+	dma_fence_put(v3d->perfmon_state.last_hw_fence[job->queue]);
+	v3d->perfmon_state.last_hw_fence[job->queue] = merged;
+
+	if (job->perfmon && !is_global_perfmon) {
+		dma_fence_put(v3d->perfmon_state.fence);
+		v3d->perfmon_state.fence = dma_fence_get(job->done_fence);
 	}
 
 	return 0;
@@ -390,6 +462,12 @@ v3d_submit_jobs(struct v3d_submit *submit, struct drm_syncobj *sync_out,
 	for (int i = 1; i < submit->job_count; i++) {
 		ret = drm_sched_job_add_dependency(&submit->jobs[i]->base,
 						   dma_fence_get(submit->jobs[i - 1]->done_fence));
+		if (ret)
+			goto err;
+	}
+
+	for (int i = 0; i < submit->job_count; i++) {
+		ret = v3d_serialize_for_perfmon(submit->jobs[i]);
 		if (ret)
 			goto err;
 	}
@@ -1300,6 +1378,126 @@ static const unsigned int cpu_job_bo_handle_count[] = {
 	[V3D_CPU_JOB_TYPE_COPY_PERFORMANCE_QUERY] = 1,
 };
 
+/* Reject offset + (count - 1) * stride + write_size if it leaves the BO. */
+static int
+v3d_check_copy_extent(struct drm_device *dev, size_t bo_size,
+		      u32 offset, u32 stride, u32 count, u64 write_size)
+{
+	u64 last;
+
+	if (!count)
+		return 0;
+
+	/*
+	 * The executors walk a u8 * cursor, so the furthest written byte is
+	 * offset + (count - 1) * stride + write_size, matching the pointer
+	 * arithmetic in v3d_copy_query_results()/v3d_copy_performance_query().
+	 * (count - 1) * stride is a u32 * u32 product that is exact in u64,
+	 * and offset + write_size stays far below the u64 range, so a single
+	 * overflow check guards the total.
+	 */
+	last = write_size + offset;
+	if (check_add_overflow((u64)(count - 1) * stride, last, &last) ||
+	    last > bo_size) {
+		drm_dbg(dev, "CPU job copy buffer exceeds the destination BO.\n");
+		return -EINVAL;
+	}
+
+	return 0;
+}
+
+/* Reject a query CPU job whose writes would land outside their BO. */
+static int
+v3d_cpu_job_bounds_check(struct v3d_cpu_job *job)
+{
+	struct drm_device *dev = &job->base.v3d->drm;
+	struct v3d_timestamp_query_info *tquery = &job->timestamp_query;
+	struct v3d_copy_query_results_info *copy = &job->copy;
+	u32 elem = copy->do_64bit ? sizeof(u64) : sizeof(u32);
+	struct v3d_bo *dst, *src;
+	u64 slots, write_size;
+	u32 i;
+
+	switch (job->job_type) {
+	case V3D_CPU_JOB_TYPE_TIMESTAMP_QUERY:
+	case V3D_CPU_JOB_TYPE_RESET_TIMESTAMP_QUERY:
+		/* Each query writes one u64 timestamp slot into bo[0]. */
+		dst = to_v3d_bo(job->base.bo[0]);
+
+		for (i = 0; i < tquery->count; i++) {
+			if ((u64)tquery->queries[i].offset + sizeof(u64) >
+			    dst->base.base.size)
+				goto err_range;
+		}
+		return 0;
+	case V3D_CPU_JOB_TYPE_COPY_TIMESTAMP_QUERY:
+		/* Copies one u64 per query from bo[1] into bo[0]. */
+		dst = to_v3d_bo(job->base.bo[0]);
+		src = to_v3d_bo(job->base.bo[1]);
+
+		for (i = 0; i < tquery->count; i++) {
+			if ((u64)tquery->queries[i].offset + sizeof(u64) >
+			    src->base.base.size)
+				goto err_range;
+		}
+
+		write_size = (copy->availability_bit ? 2 : 1) * elem;
+		return v3d_check_copy_extent(dev, dst->base.base.size,
+					     copy->offset, copy->stride,
+					     tquery->count, write_size);
+	case V3D_CPU_JOB_TYPE_COPY_PERFORMANCE_QUERY:
+		/*
+		 * Each query writes nperfmons * DRM_V3D_MAX_PERF_COUNTERS
+		 * counter slots into bo[0], plus an availability slot at
+		 * index ncounters. nperfmons and ncounters are user values,
+		 * so the slot count is computed overflow-safe.
+		 */
+		dst = to_v3d_bo(job->base.bo[0]);
+
+		slots = (u64)job->performance_query.nperfmons *
+			DRM_V3D_MAX_PERF_COUNTERS;
+		if (copy->availability_bit)
+			slots = max(slots,
+				    (u64)job->performance_query.ncounters + 1);
+
+		write_size = slots * elem;
+		return v3d_check_copy_extent(dev, dst->base.base.size,
+					     copy->offset, copy->stride,
+					     job->performance_query.count,
+					     write_size);
+	case V3D_CPU_JOB_TYPE_INDIRECT_CSD: {
+		struct v3d_indirect_csd_info *indirect_csd = &job->indirect_csd;
+
+		/* 3 is the three dimensions (x, y, z) of the workgroup counts. */
+		src = to_v3d_bo(job->base.bo[0]);
+		if ((u64)indirect_csd->offset + 3 * sizeof(u32) >
+		    src->base.base.size)
+			goto err_range;
+
+		dst = to_v3d_bo(indirect_csd->indirect);
+		for (i = 0; i < 3; i++) {
+			u32 uidx = indirect_csd->wg_uniform_offsets[i];
+
+			/*
+			 * 0xffffffff means "skip this rewrite", so the exec
+			 * path never writes that index and it needs no check.
+			 */
+			if (uidx != 0xffffffff &&
+			    (u64)uidx * sizeof(u32) + sizeof(u32) >
+			    dst->base.base.size)
+				goto err_range;
+		}
+		return 0;
+	}
+	default:
+		return 0;
+	}
+
+err_range:
+	drm_dbg(dev, "CPU job query offset exceeds the BO.\n");
+	return -EINVAL;
+}
+
 /**
  * v3d_submit_cpu_ioctl() - Submits a CPU job to the V3D.
  * @dev: DRM device
@@ -1360,6 +1558,10 @@ v3d_submit_cpu_ioctl(struct drm_device *dev, void *data,
 	 */
 	if (args->bo_handle_count) {
 		ret = v3d_lookup_bos(&submit, args->bo_handles, args->bo_handle_count);
+		if (ret)
+			goto fail;
+
+		ret = v3d_cpu_job_bounds_check(cpu_job);
 		if (ret)
 			goto fail;
 	}
