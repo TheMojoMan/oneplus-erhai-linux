@@ -14,11 +14,13 @@
 /**
  * struct sbtsi_data - driver private data for an AMD SB-TSI device
  * @client:	underlying I2C client
+ * @dev_addr:	I2C device address, used as the auxiliary device instance id
  * @ext_range_mode:	sensor uses extended temperature range
  * @read_order:	if set, decimal part must be read before integer part
  */
 struct sbtsi_data {
 	struct i2c_client *client;
+	u8 dev_addr;
 	bool ext_range_mode;
 	bool read_order;
 };

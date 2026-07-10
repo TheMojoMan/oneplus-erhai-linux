@@ -79,31 +79,41 @@ static int sbtsi_create_hwmon_adev(struct device *dev, u8 dev_addr)
 	return devm_add_action_or_reset(dev, sbtsi_unregister_hwmon_adev, adev);
 }
 
+static int sbtsi_probe_common(struct device *dev, struct sbtsi_data *data)
+{
+	u8 val;
+	int err;
+
+	err = sbtsi_xfer(data, SBTSI_REG_CONFIG, &val, true);
+	if (err)
+		return err;
+
+	data->ext_range_mode = FIELD_GET(BIT(SBTSI_CONFIG_EXT_RANGE_SHIFT), val);
+	data->read_order = FIELD_GET(BIT(SBTSI_CONFIG_READ_ORDER_SHIFT), val);
+
+	dev_set_drvdata(dev, data);
+	return sbtsi_create_hwmon_adev(dev, data->dev_addr);
+}
+
 static int sbtsi_i2c_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
 	struct sbtsi_data *data;
-	int err;
 
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
 
 	data->client = client;
-	err = i2c_smbus_read_byte_data(data->client, SBTSI_REG_CONFIG);
-	if (err < 0)
-		return err;
-	data->ext_range_mode = FIELD_GET(BIT(SBTSI_CONFIG_EXT_RANGE_SHIFT), err);
-	data->read_order = FIELD_GET(BIT(SBTSI_CONFIG_READ_ORDER_SHIFT), err);
 
-	dev_set_drvdata(dev, data);
 	/* In a multi-socket system, devices that are otherwise identical do not
 	 * share the same static address; each instance resides at a unique I2C
 	 * client address on the same or different bus. Use the I2C client
 	 * address as the auxiliary device instance ID to ensure each socket
 	 * receives a distinct auxiliary device name.
 	 */
-	return sbtsi_create_hwmon_adev(dev, client->addr);
+	data->dev_addr = client->addr;
+	return sbtsi_probe_common(dev, data);
 }
 
 static const struct i2c_device_id sbtsi_id[] = {
