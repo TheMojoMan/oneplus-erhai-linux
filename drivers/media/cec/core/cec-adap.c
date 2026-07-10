@@ -103,8 +103,31 @@ void cec_queue_event_fh(struct cec_fh *fh,
 			kfree(new_entry);
 			goto unlock;
 		}
+
 		new_entry->ev = *new_ev;
 		new_entry->ev.ts = ts;
+
+		/*
+		 * If the physical address becomes invalid (HPD went low),
+		 * then just flush all pending STATE_CHANGE events since
+		 * those are all obsoleted.
+		 *
+		 * This ensures you will not see stale STATE_CHANGE events.
+		 */
+		if (new_ev->event == CEC_EVENT_STATE_CHANGE &&
+		    new_ev->state_change.phys_addr == CEC_PHYS_ADDR_INVALID &&
+		    fh->queued_events[ev_idx]) {
+			/* drop all events */
+			while (!list_empty(&fh->events[ev_idx])) {
+				entry = list_first_entry(&fh->events[ev_idx],
+						struct cec_event_entry, list);
+				list_del(&entry->list);
+				kfree(entry);
+				fh->total_queued_events--;
+				fh->queued_events[ev_idx]--;
+			}
+			new_entry->ev.flags |= CEC_EVENT_FL_DROPPED_EVENTS;
+		}
 
 		if (fh->queued_events[ev_idx] < max_events[ev_idx]) {
 			/* Add new msg at the end of the queue */
