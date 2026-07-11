@@ -455,8 +455,6 @@ static void evsel__init(struct evsel *evsel,
 	evsel->scale	   = 1.0;
 	evsel->max_events  = ULONG_MAX;
 	evsel->evlist	   = NULL;
-	evsel->bpf_obj	   = NULL;
-	evsel->bpf_fd	   = -1;
 	INIT_LIST_HEAD(&evsel->config_terms);
 	INIT_LIST_HEAD(&evsel->bpf_counter_list);
 	INIT_LIST_HEAD(&evsel->bpf_filters);
@@ -539,10 +537,6 @@ struct evsel *evsel__clone(struct evsel *orig)
 	BUG_ON(orig->counts);
 	BUG_ON(orig->priv);
 	BUG_ON(orig->per_pkg_mask);
-
-	/* cannot handle BPF objects for now */
-	if (orig->bpf_obj)
-		return NULL;
 
 	evsel = evsel__new(&orig->core.attr);
 	if (evsel == NULL)
@@ -3078,21 +3072,6 @@ retry_open:
 
 			/* Debug message used by test scripts */
 			pr_debug2_peo(" = %d\n", fd);
-
-			if (evsel->bpf_fd >= 0) {
-				int evt_fd = fd;
-				int bpf_fd = evsel->bpf_fd;
-
-				err = ioctl(evt_fd,
-					    PERF_EVENT_IOC_SET_BPF,
-					    bpf_fd);
-				if (err && errno != EEXIST) {
-					pr_err("failed to attach bpf fd %d: %m\n",
-					       bpf_fd);
-					err = -EINVAL;
-					goto out_close;
-				}
-			}
 
 			set_rlimit = NO_CHANGE;
 
