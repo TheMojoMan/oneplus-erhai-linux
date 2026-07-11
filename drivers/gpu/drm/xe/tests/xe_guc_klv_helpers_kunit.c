@@ -10,6 +10,11 @@
 #define TEST_GROUP_KEY	(GUC_KLV_RESERVED_RANGE_START + 0x3f0)
 #define TEST_PAD	0xdeadbeef
 
+static bool fake_is_group_key(u16 key)
+{
+	return is_reserved_key(key) && key >= TEST_GROUP_KEY;
+}
+
 static void test_count(struct kunit *test)
 {
 	u32 value = 0x12345678;
@@ -368,6 +373,41 @@ static void test_encode_object_basic(struct kunit *test)
 						     obj_echo_encoder));
 }
 
+static void __drm_printfn_kunit(struct drm_printer *p, struct va_format *vaf)
+{
+	struct kunit *test = p->arg;
+
+	kunit_info(test, "%pV", vaf);
+}
+
+static struct drm_printer drm_kunit_printer(void)
+{
+	struct drm_printer p = {
+		.printfn = __drm_printfn_kunit,
+		.arg = kunit_get_current_test(),
+	};
+	return p;
+}
+
+static void test_print(struct kunit *test)
+{
+	struct drm_printer p = drm_kunit_printer();
+	u32 zeros[] = { 0, 0, 0, /* padding */ };
+	u32 klvs[] = {
+		PREP_GUC_KLV(GUC_KLV_OPT_IN_FEATURE_EXT_CAT_ERR_TYPE_KEY, 0),
+		PREP_GUC_KLV(GUC_KLV_VF_CFG_NUM_CONTEXTS_KEY, 1), 1234,
+		PREP_GUC_KLV(GUC_KLV_VF_CFG_GGTT_SIZE_KEY, 2), 0x4000, 0x0123,
+		PREP_GUC_KLV(TEST_KEY, 3), 1, 2, 3,
+		PREP_GUC_KLV(TEST_GROUP_KEY, 5),
+		PREP_GUC_KLV(TEST_KEY + 1, 1), 1,
+		PREP_GUC_KLV(TEST_KEY + 2, 2), 1, 2,
+	};
+
+	kunit_activate_static_stub(test, is_group_key, fake_is_group_key);
+	xe_guc_klv_print(zeros, ARRAY_SIZE(zeros), &p);
+	xe_guc_klv_print(klvs, ARRAY_SIZE(klvs), &p);
+}
+
 static struct kunit_case guc_klv_helpers_test_cases[] = {
 	KUNIT_CASE(test_count),
 	KUNIT_CASE(test_encode_u32),
@@ -377,6 +417,7 @@ static struct kunit_case guc_klv_helpers_test_cases[] = {
 	KUNIT_CASE(test_encode_object_klv),
 	KUNIT_CASE(test_encode_object_nested),
 	KUNIT_CASE(test_encode_object_basic),
+	KUNIT_CASE(test_print),
 	{}
 };
 
