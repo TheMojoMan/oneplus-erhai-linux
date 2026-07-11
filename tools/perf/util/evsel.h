@@ -74,6 +74,10 @@ struct evsel {
 		const char		*unit;
 		struct cgroup		*cgrp;
 		const char		*metric_id;
+
+		/* The PMU the event is from. Used for missing_features, PMU name, etc. */
+		struct perf_pmu		*pmu;
+
 		/*
 		 * This point to the first evsel with the same name, intended to store the
 		 * aggregated counts in aggregation mode.
@@ -94,6 +98,8 @@ struct evsel {
 		bool			skippable;
 		bool			retire_lat;
 		bool			dont_regroup;
+		bool			default_metricgroup; /* A member of the Default metricgroup */
+		bool			default_show_events; /* If a default group member, show the event */
 		struct list_head	config_terms;
 		u64			alternate_hw_config;
 	};
@@ -123,8 +129,6 @@ struct evsel {
 	bool			cmdline_group_boundary;
 	bool			reset_group;
 	bool			needs_auxtrace_mmap;
-	bool			default_metricgroup; /* A member of the Default metricgroup */
-	bool			default_show_events; /* If a default group member, show the event */
 	bool			needs_uniquify;
 	bool			fallenback_eacces;
 	bool			fallenback_eopnotsupp;
@@ -179,9 +183,6 @@ struct evsel {
 	};
 	unsigned long		open_flags;
 	int			precise_ip_original;
-
-	/* The PMU the event is from. Used for missing_features, PMU name, etc. */
-	struct perf_pmu		*pmu;
 
 	/* For tool events */
 	/* Beginning time subtracted when the counter is read. */
