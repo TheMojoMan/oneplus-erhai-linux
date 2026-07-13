@@ -114,8 +114,12 @@ config GENERIC_ENTRY
 	select GENERIC_IRQ_ENTRY
 	select GENERIC_SYSCALL
 
+config ARCH_SUPPORTS_SYSCALL_USER_DISPATCH
+	bool
+
 config SYSCALL_USER_DISPATCH
 	bool "Syscall User Dispatch"
+	depends on ARCH_SUPPORTS_SYSCALL_USER_DISPATCH
 	depends on GENERIC_ENTRY
 	default y
 	help
