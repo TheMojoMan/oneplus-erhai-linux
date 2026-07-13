@@ -2290,6 +2290,44 @@ retry:
 	return ret < 0 ? ret : 0;
 }
 
+static int guc_exec_queue_suspend_wait_blocking(struct xe_exec_queue *q)
+{
+	struct xe_guc *guc = exec_queue_to_guc(q);
+	struct xe_device *xe = guc_to_xe(guc);
+	int ret;
+
+	/*
+	 * Uninterruptible variant of guc_exec_queue_suspend_wait() for callers
+	 * that must complete the wait on behalf of a queue possibly owned by a
+	 * different process (e.g. cleanup/undo paths). An interruptible wait
+	 * could return -ERESTARTSYS if the calling task is signalled, leaving
+	 * that queue suspended forever (cross-process DoS).
+	 *
+	 * A timeout is still a real per-queue fault, so it bans and cleans up
+	 * like suspend_wait(). VF recovery is deliberately not handled (no
+	 * -EAGAIN) since a blocking caller cannot retry.
+	 */
+	q = xe_exec_queue_multi_queue_primary(q);
+
+#define WAIT_COND \
+	(!READ_ONCE(q->guc->suspend_pending) ||	exec_queue_killed(q) || \
+	 xe_guc_read_stopped(guc))
+
+	if (IS_SRIOV_VF(xe))
+		ret = wait_event_timeout(guc->ct.wq, WAIT_COND, HZ * 5);
+	else
+		ret = wait_event_timeout(q->guc->suspend_wait, WAIT_COND, HZ * 5);
+
+#undef WAIT_COND
+
+	if (!ret) {
+		guc_exec_queue_suspend_timeout_ban(q);
+		return -ETIME;
+	}
+
+	return 0;
+}
+
 static void guc_exec_queue_resume(struct xe_exec_queue *q)
 {
 	struct xe_gpu_scheduler *sched = &q->guc->sched;
@@ -2329,6 +2367,7 @@ static const struct xe_exec_queue_ops guc_exec_queue_ops = {
 	.set_multi_queue_priority = guc_exec_queue_set_multi_queue_priority,
 	.suspend = guc_exec_queue_suspend,
 	.suspend_wait = guc_exec_queue_suspend_wait,
+	.suspend_wait_blocking = guc_exec_queue_suspend_wait_blocking,
 	.resume = guc_exec_queue_resume,
 	.reset_status = guc_exec_queue_reset_status,
 };

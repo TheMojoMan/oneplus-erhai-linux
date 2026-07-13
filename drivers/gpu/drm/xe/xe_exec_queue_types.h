@@ -323,6 +323,15 @@ struct xe_exec_queue_ops {
 	 */
 	int (*suspend_wait)(struct xe_exec_queue *q);
 	/**
+	 * @suspend_wait_blocking: Like @suspend_wait, but waits uninterruptibly
+	 * (does not abort on the calling task's signals). For cleanup/undo paths
+	 * that must complete a suspend on behalf of a queue that may belong to a
+	 * different process than the caller: a signal to the caller must not
+	 * abandon the wait, which would leave the other process's queue
+	 * suspended forever (cross-process DoS). A timeout bans like suspend_wait.
+	 */
+	int (*suspend_wait_blocking)(struct xe_exec_queue *q);
+	/**
 	 * @resume: Resume exec queue execution, exec queue must be in a suspended
 	 * state and dma fence returned from most recent suspend call must be
 	 * signalled when this function is called.
