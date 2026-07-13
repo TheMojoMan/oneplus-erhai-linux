@@ -213,7 +213,7 @@ static void ax_spi_fill_tx_fifo(struct ax_spi *xspi)
 }
 
 /**
- * ax_spi_get_rx_byte - Gets a byte from the RX FIFO buffer
+ * ax_spi_get_rx_byte_for_irq - Gets a byte from the RX FIFO buffer
  * @xspi: Controller private data (struct ax_spi *)
  *
  * This function handles the logic of extracting bytes from the 32-bit RX FIFO.
@@ -246,9 +246,13 @@ static u8 ax_spi_get_rx_byte_for_irq(struct ax_spi *xspi)
 }
 
 /**
+ * ax_spi_process_rx_and_finalize - Process RX bytes and check for completion
+ * @ctlr:	Pointer to spi_controller structure
+ *
  * Helper function to process received bytes and check for transfer completion.
  * This avoids code duplication and centralizes the completion logic.
- * Returns true if the transfer was finalized.
+ *
+ * Return: true if the transfer was finalized.
  */
 static bool ax_spi_process_rx_and_finalize(struct spi_controller *ctlr)
 {
