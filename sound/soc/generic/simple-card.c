@@ -673,7 +673,7 @@ static int simple_parse_of(struct simple_util_priv *priv)
 	int ret = -EINVAL;
 
 	if (!dev)
-		goto end;
+		return simple_ret(priv, ret);
 
 	ret = -ENOMEM;
 	struct link_info *li __free(kfree) = kzalloc_obj(*li);
