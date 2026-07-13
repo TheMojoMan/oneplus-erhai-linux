@@ -6509,7 +6509,7 @@ static int intel_modeset_tile_group(struct intel_atomic_state *state,
 	return ret;
 }
 
-static int intel_modeset_affected_transcoders(struct intel_atomic_state *state, u8 transcoders)
+static int intel_modeset_affected_transcoders(struct intel_atomic_state *state, u16 transcoders)
 {
 	struct intel_display *display = to_intel_display(state);
 	struct intel_crtc *crtc;
@@ -6557,7 +6557,7 @@ static int intel_modeset_synced_crtcs(struct intel_atomic_state *state,
 		drm_atomic_get_old_connector_state(&state->base, &connector->base);
 	const struct intel_crtc_state *old_crtc_state;
 	struct intel_crtc *crtc;
-	u8 transcoders;
+	u16 transcoders;
 
 	crtc = to_intel_crtc(old_conn_state->crtc);
 	if (!crtc)

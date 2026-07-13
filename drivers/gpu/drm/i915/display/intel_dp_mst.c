@@ -815,7 +815,7 @@ intel_dp_mst_transcoder_mask(struct intel_atomic_state *state,
 	struct intel_display *display = to_intel_display(state);
 	const struct intel_digital_connector_state *conn_state;
 	struct intel_connector *connector;
-	u8 transcoders = 0;
+	u16 transcoders = 0;
 	int i;
 
 	if (DISPLAY_VER(display) < 12)
