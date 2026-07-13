@@ -1428,9 +1428,6 @@ extern int ata_port_freeze(struct ata_port *ap);
 extern void ata_eh_freeze_port(struct ata_port *ap);
 extern void ata_eh_thaw_port(struct ata_port *ap);
 
-extern void ata_eh_qc_complete(struct ata_queued_cmd *qc);
-extern void ata_eh_qc_retry(struct ata_queued_cmd *qc);
-
 extern void ata_std_error_handler(struct ata_port *ap)
 	__must_hold(&ap->host->eh_mutex);
 extern void ata_std_sched_eh(struct ata_port *ap);
