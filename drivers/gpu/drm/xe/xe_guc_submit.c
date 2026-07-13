@@ -2202,11 +2202,52 @@ static int guc_exec_queue_suspend(struct xe_exec_queue *q)
 	return 0;
 }
 
+static void guc_exec_queue_suspend_timeout_ban(struct xe_exec_queue *q)
+{
+	struct xe_guc *guc = exec_queue_to_guc(q);
+
+	xe_gt_warn(guc_to_gt(guc),
+		   "Suspend fence, guc_id=%d, failed to respond, banning queue",
+		   q->guc->id);
+	/*
+	 * The GuC failed to respond to the suspend within the timeout. This is
+	 * not recoverable for this context, so ban it and tear it down via
+	 * cleanup rather than leave it suspended forever. __suspend_fence_signal
+	 * clears suspend_pending and wakes any waiter.
+	 *
+	 * @q is the primary here; it owns the group's GuC context, so a failure
+	 * to suspend it wedges the whole group. Ban and tear down the entire
+	 * group in the multi-queue case.
+	 */
+	if (xe_exec_queue_is_multi_queue(q)) {
+		set_exec_queue_group_banned(q);
+		__suspend_fence_signal(q);
+		xe_guc_exec_queue_group_trigger_cleanup(q);
+	} else {
+		set_exec_queue_banned(q);
+		__suspend_fence_signal(q);
+		xe_guc_exec_queue_trigger_cleanup(q);
+	}
+}
+
 static int guc_exec_queue_suspend_wait(struct xe_exec_queue *q)
 {
 	struct xe_guc *guc = exec_queue_to_guc(q);
 	struct xe_device *xe = guc_to_xe(guc);
 	int ret;
+
+	/*
+	 * In multi-queue mode the primary owns the GuC scheduling context for
+	 * the whole group, so wait on the primary's suspend to complete. All
+	 * group members share the same GuC/device, so guc, xe and timeout above
+	 * are computed from @q directly.
+	 *
+	 * A secondary's suspend is short-circuited (no GuC round-trip) and, as
+	 * its SUSPEND message precedes the primary's on the shared FIFO
+	 * submit_wq, completes before the primary's. So waiting on the primary
+	 * is sufficient.
+	 */
+	q = xe_exec_queue_multi_queue_primary(q);
 
 	/*
 	 * Likely don't need to check exec_queue_killed() as we clear
@@ -2230,10 +2271,7 @@ retry:
 		return -EAGAIN;
 
 	if (!ret) {
-		xe_gt_warn(guc_to_gt(guc),
-			   "Suspend fence, guc_id=%d, failed to respond",
-			   q->guc->id);
-		/* XXX: Trigger GT reset? */
+		guc_exec_queue_suspend_timeout_ban(q);
 		return -ETIME;
 	} else if (IS_SRIOV_VF(xe) && !WAIT_COND) {
 		/* Corner case on RESFIX DONE where vf_recovery() changes */
@@ -2242,6 +2280,13 @@ retry:
 
 #undef WAIT_COND
 
+	/*
+	 * ret < 0 (-ERESTARTSYS): the interruptible wait was aborted by a
+	 * signal. The queue is not banned - the failure is in the waiter, not
+	 * the queue. The suspend is not confirmed complete, so suspend_pending
+	 * may still be set; callers must not resume() on this error without
+	 * re-confirming the suspend.
+	 */
 	return ret < 0 ? ret : 0;
 }
 
