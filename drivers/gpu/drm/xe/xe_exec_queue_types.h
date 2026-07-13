@@ -62,6 +62,12 @@ struct xe_exec_queue_group {
 	struct list_head list;
 	/** @list_lock: Secondary queue list lock */
 	struct mutex list_lock;
+	/**
+	 * @suspend_lock: Makes a secondary's suspend/resume and its forwarding
+	 * to the primary atomic. Nested outside of the queue's message lock
+	 * (@xe_guc_exec_queue.sched.msg_lock).
+	 */
+	spinlock_t suspend_lock;
 	/** @sync_pending: CGP_SYNC_DONE g2h response pending */
 	bool sync_pending;
 	/** @banned: Group banned */

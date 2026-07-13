@@ -1704,10 +1704,35 @@ handle_vf_resume:
 	return DRM_GPU_SCHED_STAT_NO_HANG;
 }
 
+static void guc_exec_queue_multi_queue_drop_suspend(struct xe_exec_queue *q);
+static int guc_exec_queue_suspend_wait_blocking(struct xe_exec_queue *q);
+
 static void guc_exec_queue_fini(struct xe_exec_queue *q)
 {
 	struct xe_guc_exec_queue *ge = q->guc;
 	struct xe_guc *guc = exec_queue_to_guc(q);
+
+	/*
+	 * A secondary can leave the group while still preempt suspended (e.g.
+	 * xe_vm_remove_compute_exec_queue() forces its preempt fence to signal,
+	 * which suspends it). It holds one forwarded suspend reference on the
+	 * primary, so drop it and resume the primary if it was the last member
+	 * that had it suspended. Primaries forward to nobody, so they don't need
+	 * this.
+	 *
+	 * First make sure the primary's forwarded suspend has completed. If the
+	 * secondary was killed/reset before its preempt fence worker ran, that
+	 * worker skips suspend_wait() (see preempt_fence_work_func()), leaving
+	 * the primary's suspend possibly in flight. drop_suspend() runs under a
+	 * spinlock and cannot wait, so drain it here with the uninterruptible
+	 * blocking wait; otherwise resuming the primary in drop_suspend() could
+	 * trip the !suspend_pending assert.
+	 */
+	if (xe_exec_queue_is_multi_queue_secondary(q)) {
+		if (READ_ONCE(q->guc->suspend_count))
+			guc_exec_queue_suspend_wait_blocking(q);
+		guc_exec_queue_multi_queue_drop_suspend(q);
+	}
 
 	if (xe_exec_queue_is_multi_queue_secondary(q)) {
 		struct xe_exec_queue_group *group = q->multi_queue.group;
@@ -2186,17 +2211,22 @@ static int guc_exec_queue_set_multi_queue_priority(struct xe_exec_queue *q,
 	return 0;
 }
 
-static int guc_exec_queue_suspend(struct xe_exec_queue *q)
+/*
+ * Core suspend: take a suspend reference on @q and, on the first reference,
+ * disable its GuC context so the GPU is actually preempted. Caller must have
+ * ensured @q is not killed/banned/wedged. Returns true if this was the first
+ * suspend reference (the 0->1 transition).
+ */
+static bool __guc_exec_queue_suspend(struct xe_exec_queue *q)
 {
 	struct xe_guc_exec_queue *ge = q->guc;
 	struct xe_gpu_scheduler *sched = &ge->sched;
 	struct xe_sched_msg *msg = ge->static_msgs + STATIC_MSG_SUSPEND;
-
-	if (exec_queue_killed_or_banned_or_wedged(q))
-		return -EINVAL;
+	bool first;
 
 	xe_sched_msg_lock(sched);
-	if (++ge->suspend_count == 1) {
+	first = (++ge->suspend_count == 1);
+	if (first) {
 		bool added = guc_exec_queue_try_add_msg(q, msg, SUSPEND);
 
 		/* slot must be free at 0->1 */
@@ -2204,6 +2234,80 @@ static int guc_exec_queue_suspend(struct xe_exec_queue *q)
 		ge->suspend_pending = true;
 	}
 	xe_sched_msg_unlock(sched);
+
+	return first;
+}
+
+/*
+ * Core resume: drop a suspend reference on @q and, on the last reference,
+ * re-enable its GuC context. Returns true if this dropped the last suspend
+ * reference (the 1->0 transition).
+ */
+static bool __guc_exec_queue_resume(struct xe_exec_queue *q)
+{
+	struct xe_guc_exec_queue *ge = q->guc;
+	struct xe_gpu_scheduler *sched = &ge->sched;
+	struct xe_sched_msg *msg = ge->static_msgs + STATIC_MSG_RESUME;
+	struct xe_guc *guc = exec_queue_to_guc(q);
+	bool last;
+
+	xe_sched_msg_lock(sched);
+	xe_gt_assert(guc_to_gt(guc), !ge->suspend_pending);
+	xe_gt_assert(guc_to_gt(guc), ge->suspend_count > 0);
+	last = (--ge->suspend_count == 0);
+	if (last) {
+		bool added = guc_exec_queue_try_add_msg(q, msg, RESUME);
+
+		/* slot must be free at 1->0 */
+		xe_gt_assert(guc_to_gt(guc), added);
+	}
+	xe_sched_msg_unlock(sched);
+
+	return last;
+}
+
+static int guc_exec_queue_suspend(struct xe_exec_queue *q)
+{
+	if (exec_queue_killed_or_banned_or_wedged(q))
+		return -EINVAL;
+
+	/*
+	 * Non-multi-queue queues and multi-queue primaries suspend themselves
+	 * directly: their own msg_lock makes the suspend_count 0->1 transition
+	 * and the suspend_pending update atomic, so no group level serialization
+	 * is needed.
+	 */
+	if (!xe_exec_queue_is_multi_queue_secondary(q)) {
+		__guc_exec_queue_suspend(q);
+		return 0;
+	}
+
+	/*
+	 * A secondary's suspend is meaningless once the primary - which owns the
+	 * group's GuC context - is gone, so fail it too. This keeps the
+	 * secondary's effective state consistent with guc_exec_queue_reset_status(),
+	 * which already reports the primary's killed/banned/wedged state for
+	 * secondaries. A primary killed *after* this check is still handled at
+	 * message-processing time, where the SUSPEND is a no-op for a killed
+	 * context; this only covers an already-dead primary.
+	 */
+	if (exec_queue_killed_or_banned_or_wedged(xe_exec_queue_multi_queue_primary(q)))
+		return -EINVAL;
+
+	/*
+	 * A secondary doesn't interface with GuC: suspend it like any other
+	 * queue (its own suspend_count drives its internally handled scheduler
+	 * state) and, only on its own 0->1 transition, forward the suspend to the
+	 * primary so the GPU is actually preempted. Hold @suspend_lock so that
+	 * observing the secondary's transition and forwarding it to the primary
+	 * happen atomically; this keeps the primary's refcount paired with member
+	 * transitions even if the same secondary is suspended and resumed
+	 * concurrently across rebind cycles.
+	 */
+	scoped_guard(spinlock, &q->multi_queue.group->suspend_lock) {
+		if (__guc_exec_queue_suspend(q))
+			__guc_exec_queue_suspend(xe_exec_queue_multi_queue_primary(q));
+	}
 
 	return 0;
 }
@@ -2336,21 +2440,59 @@ static int guc_exec_queue_suspend_wait_blocking(struct xe_exec_queue *q)
 
 static void guc_exec_queue_resume(struct xe_exec_queue *q)
 {
-	struct xe_guc_exec_queue *ge = q->guc;
-	struct xe_gpu_scheduler *sched = &ge->sched;
-	struct xe_sched_msg *msg = ge->static_msgs + STATIC_MSG_RESUME;
-	struct xe_guc *guc = exec_queue_to_guc(q);
-
-	xe_sched_msg_lock(sched);
-	xe_gt_assert(guc_to_gt(guc), !ge->suspend_pending);
-	xe_gt_assert(guc_to_gt(guc), ge->suspend_count > 0);
-	if (--ge->suspend_count == 0) {
-		bool added = guc_exec_queue_try_add_msg(q, msg, RESUME);
-
-		/* slot must be free at 1->0 */
-		xe_gt_assert(guc_to_gt(guc), added);
+	/*
+	 * Non-multi-queue queues and multi-queue primaries resume themselves
+	 * directly; their own msg_lock is sufficient.
+	 */
+	if (!xe_exec_queue_is_multi_queue_secondary(q)) {
+		__guc_exec_queue_resume(q);
+		return;
 	}
-	xe_sched_msg_unlock(sched);
+
+	/*
+	 * Mirror of guc_exec_queue_suspend(): resume the secondary like any
+	 * other queue and, only on its own 1->0 transition, forward the resume
+	 * to the primary so the primary's GuC context is re-enabled once the
+	 * last member that suspended it resumes. @suspend_lock keeps the
+	 * secondary transition and the primary forward atomic.
+	 */
+	scoped_guard(spinlock, &q->multi_queue.group->suspend_lock) {
+		if (__guc_exec_queue_resume(q))
+			__guc_exec_queue_resume(xe_exec_queue_multi_queue_primary(q));
+	}
+}
+
+/*
+ * Drop a leaving secondary's forwarded suspend reference on the primary and
+ * resume the primary if this was the last member that had it suspended.
+ * See guc_exec_queue_fini().
+ */
+static void guc_exec_queue_multi_queue_drop_suspend(struct xe_exec_queue *q)
+{
+	scoped_guard(spinlock, &q->multi_queue.group->suspend_lock) {
+		struct xe_exec_queue *primary = xe_exec_queue_multi_queue_primary(q);
+
+		/*
+		 * A suspended secondary holds exactly one suspend reference on the
+		 * primary (forwarded on its 0->1 transition). If it leaves while
+		 * still suspended, release that reference so the primary is not
+		 * kept disabled forever.
+		 */
+		if (!READ_ONCE(q->guc->suspend_count))
+			break;
+
+		if (exec_queue_killed_or_banned_or_wedged(primary))
+			break;
+
+		/*
+		 * No suspend_wait() here (and we can't - suspend_lock is a
+		 * spinlock). guc_exec_queue_fini() has already drained the
+		 * primary's forwarded suspend with the blocking wait, so its
+		 * suspend has completed (suspend_pending cleared) by the time we
+		 * resume it here. __guc_exec_queue_resume() asserts this.
+		 */
+		__guc_exec_queue_resume(primary);
+	}
 }
 
 static bool guc_exec_queue_reset_status(struct xe_exec_queue *q)
