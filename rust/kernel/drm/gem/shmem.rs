@@ -27,9 +27,10 @@ use crate::{
         to_result, //
     },
     io::{
-        Io,
-        IoCapable,
-        IoKnownSize, //
+        IoBase,
+        Region,
+        SysMem,
+        SysMemBackend, //
     },
     prelude::*,
     scatterlist,
@@ -456,6 +457,27 @@ where
     }
 }
 
+impl<'a, D, R, const SIZE: usize> IoBase<'a> for &'a VMap<D, R, SIZE>
+where
+    D: DriverObject,
+    R: Deref<Target = Object<D>>,
+{
+    type Backend = SysMemBackend;
+    type Target = Region<SIZE>;
+
+    #[inline]
+    fn as_view(self) -> SysMem<'a, Region<SIZE>> {
+        let ptr = Region::ptr_from_raw_parts_mut(self.addr.cast(), self.owner.size());
+
+        // SAFETY: Per type invariants of `VMap`:
+        // - `addr .. addr + owner.size()` is a valid kernel accessible memory region.
+        // - `addr` is page-aligned, which satisfies `Region`'s 4-byte alignment requirement.
+        // - The memory remains valid until this `VMap` is dropped; since `self` is `&'a VMap`,
+        //   the borrow prevents the `VMap` from being dropped for the lifetime `'a`.
+        unsafe { SysMem::new(ptr) }
+    }
+}
+
 impl<D, R, const SIZE: usize> Drop for VMap<D, R, SIZE>
 where
     D: DriverObject,
@@ -493,66 +515,6 @@ where
     R: Deref<Target = Object<D>> + Sync,
 {
 }
-
-impl<D, R, const SIZE: usize> Io for VMap<D, R, SIZE>
-where
-    D: DriverObject,
-    R: Deref<Target = Object<D>>,
-{
-    #[inline]
-    fn addr(&self) -> usize {
-        self.addr as usize
-    }
-
-    #[inline]
-    fn maxsize(&self) -> usize {
-        self.owner.size()
-    }
-}
-
-impl<D, R, const SIZE: usize> IoKnownSize for VMap<D, R, SIZE>
-where
-    D: DriverObject,
-    R: Deref<Target = Object<D>>,
-{
-    const MIN_SIZE: usize = SIZE;
-}
-
-macro_rules! impl_vmap_io_capable {
-    ($ty:ty) => {
-        impl<D, R, const SIZE: usize> IoCapable<$ty> for VMap<D, R, SIZE>
-        where
-            D: DriverObject,
-            R: Deref<Target = Object<D>>,
-        {
-            #[inline]
-            unsafe fn io_read(&self, address: usize) -> $ty {
-                let ptr = address as *mut $ty;
-
-                // SAFETY: The safety contract of `io_read` guarantees that address is a valid
-                // address within the bounds of `Self` of at least the size of $ty, and is properly
-                // aligned.
-                unsafe { ptr::read_volatile(ptr) }
-            }
-
-            #[inline]
-            unsafe fn io_write(&self, value: $ty, address: usize) {
-                let ptr = address as *mut $ty;
-
-                // SAFETY: The safety contract of `io_write` guarantees that address is a valid
-                // address within the bounds of `Self` of at least the size of $ty, and is properly
-                // aligned.
-                unsafe { ptr::write_volatile(ptr, value) }
-            }
-        }
-    };
-}
-
-impl_vmap_io_capable!(u8);
-impl_vmap_io_capable!(u16);
-impl_vmap_io_capable!(u32);
-#[cfg(CONFIG_64BIT)]
-impl_vmap_io_capable!(u64);
 
 /// A reference to a GEM object that is known to have a mapped [`SGTable`].
 ///
@@ -621,6 +583,7 @@ mod tests {
             UnregisteredDevice, //
         },
         faux,
+        io::Io,
         page::PAGE_SIZE, //
     };
 
@@ -699,8 +662,8 @@ mod tests {
         // Verify the owner matches
         assert!(ptr::eq(vmap.owner(), obj.deref()));
 
-        // Verify the max size matches the actual object size
-        assert_eq!(vmap.maxsize(), PAGE_SIZE);
+        // Verify the size matches the actual object size
+        assert_eq!(vmap.size(), PAGE_SIZE);
 
         // Make sure creating a vmap that's too large fails
         assert!(obj.vmap::<{ PAGE_SIZE + 200 }>().is_err());
