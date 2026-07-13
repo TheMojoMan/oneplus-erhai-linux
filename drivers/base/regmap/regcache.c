@@ -465,6 +465,7 @@ out:
 
 		selector_ret = _regmap_write(map, this->selector_reg, i);
 		if (selector_ret != 0) {
+			map->cache_dirty = true;
 			dev_err(map->dev, "Failed to write %x = %x: %d\n",
 				this->selector_reg, i, selector_ret);
 			break;
