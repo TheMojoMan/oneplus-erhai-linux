@@ -84,9 +84,10 @@ struct dw_edma_chan {
 
 struct dw_edma_irq {
 	struct msi_msg                  msi;
-	u32				wr_mask;
-	u32				rd_mask;
 	struct dw_edma			*dw;
+
+	DECLARE_BITMAP(wr_mask, HDMA_MAX_WR_CH);
+	DECLARE_BITMAP(rd_mask, HDMA_MAX_RD_CH);
 };
 
 struct dw_edma {
