@@ -1061,7 +1061,6 @@
 		 <&pcie_ref_clk>;
 	clock-names = "pcie", "pcie_bus", "pcie_phy", "pcie_aux",
 		      "ref", "extref";
-	supports-clkreq;
 	status = "okay";
 };
 
