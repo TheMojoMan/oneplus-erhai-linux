@@ -270,7 +270,9 @@ void scx_sub_disable(struct scx_sched *sch)
 		SCX_CALL_OP(sch, exit, NULL, sch->exit_info);
 	if (sch->sub_kset)
 		kobject_del(&sch->sub_kset->kobj);
-	kobject_del(&sch->kobj);
+	/* not added if enable failed before scx_sched_sysfs_add() */
+	if (sch->kobj.state_in_sysfs)
+		kobject_del(&sch->kobj);
 }
 
 /* verify that a scheduler can be attached to @cgrp and return the parent */
@@ -360,6 +362,10 @@ void scx_sub_enable_workfn(struct kthread_work *work)
 	}
 
 	ret = scx_link_sched(sch);
+	if (ret)
+		goto err_disable;
+
+	ret = scx_sched_sysfs_add(sch);
 	if (ret)
 		goto err_disable;
 
