@@ -821,7 +821,8 @@ static int xe_info_init_early(struct xe_device *xe,
 
 	xe->info.probe_display = IS_ENABLED(CONFIG_DRM_XE_DISPLAY) &&
 				 xe_modparam.probe_display &&
-				 desc->has_display;
+				 desc->has_display &&
+				 !xe_device_is_admin_only(xe);
 
 	xe_assert(xe, desc->max_gt_per_tile > 0);
 	xe_assert(xe, desc->max_gt_per_tile <= XE_MAX_GT_PER_TILE);
