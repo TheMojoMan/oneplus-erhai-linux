@@ -4963,6 +4963,7 @@ SCX_ATTR(events);
 #ifdef CONFIG_EXT_SUB_SCHED
 static const char *scx_cap_names[__SCX_NR_CAPS] = {
 	[__SCX_CAP_ENQ_IMMED]	= "enq_immed",
+	[__SCX_CAP_ENQ]		= "enq",
 };
 
 static ssize_t scx_attr_caps_show(struct kobject *kobj,

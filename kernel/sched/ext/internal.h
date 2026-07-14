@@ -1224,8 +1224,8 @@ struct scx_sched_pcpu {
 	/*
 	 * pshard->caps[cap_bit] is the set of cids the sched holds that one
 	 * cap on. ecaps is its transpose: the set of SCX_CAP_* bits the sched
-	 * holds on this cpu, collected so that the hot-path check is a single
-	 * read.
+	 * effectively holds on this cpu, with implied caps folded in, so that
+	 * the hot-path check is a single read.
 	 *
 	 * While pshard->caps[] under pshard->lock is the target configuration,
 	 * ecaps is the effective copy owned by the cpu. It is written under the
@@ -1287,20 +1287,28 @@ struct scx_sched_pnode {
  * the allocation pattern.
  *
  * ENQ_IMMED  insert an IMMED task onto the cid's local DSQ
+ *
+ * ENQ        insert any task onto the cid's local DSQ (implies ENQ_IMMED)
+ *
+ * Implied caps apply to the holder's own use of a cid, not to delegation.
+ * scx_bpf_sub_grant() delegates literally-held caps, so a cap held only through
+ * implication is usable but cannot be re-delegated to a child.
  */
 enum scx_cap_flags {
 	__SCX_CAP_ENQ_IMMED		= 0,
+	__SCX_CAP_ENQ			= 1,
 
 	__SCX_NR_CAPS,
 	__SCX_CAP_ALL			= BIT_U64(__SCX_NR_CAPS) - 1,
 
 	SCX_CAP_ENQ_IMMED		= BIT_U64(__SCX_CAP_ENQ_IMMED),
+	SCX_CAP_ENQ			= BIT_U64(__SCX_CAP_ENQ),
 
 	/* alias for minimal cap to make any use of a cpu */
 	SCX_CAP_BASE			= SCX_CAP_ENQ_IMMED,
 
 	/* caps whose loss strands queued tasks, see scx_process_sync_ecaps() */
-	SCX_CAPS_REENQ_ON_LOSS		= SCX_CAP_ENQ_IMMED,
+	SCX_CAPS_REENQ_ON_LOSS		= SCX_CAP_ENQ_IMMED | SCX_CAP_ENQ,
 };
 
 #ifdef CONFIG_EXT_SUB_SCHED
