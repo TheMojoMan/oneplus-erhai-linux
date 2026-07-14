@@ -757,6 +757,25 @@ struct sched_ext_ops {
 	 */
 	void (*sub_detach)(struct scx_sub_detach_args *args);
 
+	/**
+	 * @sub_caps_updated: Caps on this sub-sched's shard changed
+	 * @cmask: cids whose caps changed (cmask->base identifies the shard)
+	 * @caps: SCX_CAP_* that changed
+	 *
+	 * Invoked after grant or revoke modifies caps on a shard. There can be
+	 * only one in-flight invocation per shard. @cmask and @caps coalesce
+	 * all changes since the last delivery. Direction (set vs cleared) isn't
+	 * encoded. Query current state with scx_bpf_sub_caps().
+	 *
+	 * Delivered asynchronously after the change is recorded, and may run
+	 * before it takes effect on any given cpu. Use it to track which caps
+	 * the sub-sched holds and propagate to its own children, not to decide
+	 * if a task can run on a cpu now.
+	 *
+	 * May call scx_bpf_sub_grant() / scx_bpf_sub_revoke() on children.
+	 */
+	void (*sub_caps_updated)(const struct scx_cmask *cmask, u64 caps);
+
 	/*
 	 * All online ops must come before ops.cpu_online().
 	 */
@@ -977,6 +996,7 @@ struct sched_ext_ops_cid {
 #endif	/* CONFIG_EXT_GROUP_SCHED */
 	s32 (*sub_attach)(struct scx_sub_attach_args *args);
 	void (*sub_detach)(struct scx_sub_detach_args *args);
+	void (*sub_caps_updated)(const struct scx_cmask *cmask, u64 caps);
 	void (*cid_online)(s32 cid);
 	void (*cid_offline)(s32 cid);
 	s32 (*init_cids)(void);
@@ -1224,9 +1244,51 @@ enum scx_cap_flags {
 	     __caps && ((cap_bit) = __ffs64(__caps), true);		\
 	     __caps &= __caps - 1)
 
+/*
+ * Sub-cap update notifier.
+ *
+ * ops_cid.sub_caps_updated() notifies sub-scheds when their cap state changes
+ * so they can refresh internal state without polling scx_bpf_sub_caps() per
+ * enqueue.
+ *
+ * Three constraints shape the design:
+ *
+ *   1. Static memory. Deliveries use a fixed-size buffer, both for runtime
+ *      efficiency and so notifications can't be lost under memory pressure.
+ *
+ *   2. High-frequency updates. Grant/revoke can mutate caps in bursts, and the
+ *      notifier path must absorb that without amplifying it.
+ *
+ *   3. Recursive grant/revoke from the callback. A child receiving a
+ *      notification can call grant/revoke on its own children, which can
+ *      cascade recursively down its subtree.
+ *
+ * (1) and (2) lead to coalescing into a fixed payload. Each delivery carries a
+ * single (cmask, caps) pair covering every change since the previous one.
+ * Direction (set vs cleared) isn't encoded as it doesn't fit in the fixed-size
+ * summary. The callback queries scx_bpf_sub_caps() for current state. Only one
+ * delivery is in flight per shard. Further changes fold into the same buffer
+ * and ship as the next callback, so a shard's callbacks fire in order.
+ *
+ * (3) leads to deferred delivery. Events accumulate during grant/revoke and are
+ * delivered after the shard lock is released.
+ */
+struct scx_caps_updated {
+	raw_spinlock_t		lock;
+	u64			caps;
+	struct scx_cmask	*cmask_arena_out;
+	struct list_head	node_in_flight;
+	/* Kernel-side accumulator. Access as &cu->cmask. */
+	TRAILING_OVERLAP(struct scx_cmask, cmask, bits,
+			 u64 _bits[SCX_CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS)];
+	);
+};
+
 struct scx_pshard {
 	raw_spinlock_t		lock;		/* serializes caps */
 	struct scx_sched	*sch;		/* backpointer */
+	struct scx_caps_updated	caps_updated;
+
 	/*
 	 * Per-cap cmask, inline via TRAILING_OVERLAP so cmask.bits[] overlaps
 	 * the trailing _bits[] storage. Access as &caps[i].cmask.
@@ -1234,6 +1296,15 @@ struct scx_pshard {
 	TRAILING_OVERLAP(struct scx_cmask, cmask, bits,
 			 u64 _bits[SCX_CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS)];
 	) caps[__SCX_NR_CAPS];
+
+	/*
+	 * Shard geometry captured at alloc. cmask_arena_out's own header is
+	 * bpf-writable and the live shard range can change before the
+	 * rcu-deferred free, so re-init and size cmask_arena_out from these
+	 * trusted copies instead.
+	 */
+	u32			base;
+	u32			nr_cids;
 };
 #endif
 

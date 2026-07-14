@@ -21,6 +21,7 @@ void scx_set_task_sched(struct task_struct *p, struct scx_sched *sch);
 struct cgroup *sch_cgroup(struct scx_sched *sch);
 void set_cgroup_sched(struct cgroup *cgrp, struct scx_sched *sch);
 void scx_pstack_recursion_on_dispatch(struct bpf_prog *prog);
+void scx_pstack_recursion_on_caps_updated(struct bpf_prog *prog);
 void drain_descendants(struct scx_sched *sch);
 void scx_sub_disable(struct scx_sched *sch);
 void scx_sub_enable_workfn(struct kthread_work *work);

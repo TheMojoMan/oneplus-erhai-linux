@@ -106,6 +106,15 @@ void set_cgroup_sched(struct cgroup *cgrp, struct scx_sched *sch)
 
 static void free_pshard(struct scx_pshard *pshard)
 {
+	struct scx_caps_updated *cu;
+
+	if (!pshard)
+		return;
+	cu = &pshard->caps_updated;
+	if (cu->cmask_arena_out)
+		scx_arena_free(pshard->sch, cu->cmask_arena_out,
+			       struct_size_t(struct scx_cmask, bits,
+					     SCX_CMASK_NR_WORDS(pshard->nr_cids)));
 	kfree(pshard);
 }
 
@@ -123,7 +132,10 @@ void scx_free_pshards(struct scx_sched *sch)
 static struct scx_pshard *alloc_pshard(struct scx_sched *sch, s32 shard_idx, s32 node)
 {
 	const struct scx_cid_shard *shard = &scx_cid_shard_ranges[shard_idx];
+	size_t cmask_size = struct_size_t(struct scx_cmask, bits,
+					  SCX_CMASK_NR_WORDS(shard->nr_cids));
 	struct scx_pshard *pshard;
+	struct scx_caps_updated *cu;
 	s32 i;
 
 	pshard = kzalloc_node(sizeof(*pshard), GFP_KERNEL, node);
@@ -132,9 +144,24 @@ static struct scx_pshard *alloc_pshard(struct scx_sched *sch, s32 shard_idx, s32
 
 	raw_spin_lock_init(&pshard->lock);
 	pshard->sch = sch;
+	pshard->base = shard->base_cid;
+	pshard->nr_cids = shard->nr_cids;
 
 	for (i = 0; i < __SCX_NR_CAPS; i++)
 		scx_cmask_init(&pshard->caps[i].cmask, shard->base_cid, shard->nr_cids);
+
+	cu = &pshard->caps_updated;
+	raw_spin_lock_init(&cu->lock);
+	INIT_LIST_HEAD(&cu->node_in_flight);
+	__scx_cmask_init(&cu->cmask, shard->base_cid, shard->nr_cids, SCX_CID_SHARD_MAX_CPUS);
+
+	cu->cmask_arena_out = scx_arena_alloc(sch, cmask_size);
+	if (!cu->cmask_arena_out) {
+		free_pshard(pshard);
+		return NULL;
+	}
+
+	scx_cmask_init(cu->cmask_arena_out, shard->base_cid, shard->nr_cids);
 
 	return pshard;
 }
@@ -186,6 +213,88 @@ void scx_init_root_caps(struct scx_sched *sch)
 		for (i = 0; i < __SCX_NR_CAPS; i++)
 			scx_cmask_fill(&ps->caps[i].cmask);
 	}
+}
+
+/* record a caps change, see struct scx_caps_updated */
+static void caps_updated_record(struct scx_pshard *ps, const struct scx_cmask *cids, u64 caps,
+				struct list_head *to_deliver)
+{
+	struct scx_caps_updated *cu = &ps->caps_updated;
+
+	guard(raw_spinlock)(&cu->lock);
+	scx_cmask_or(&cu->cmask, cids);
+	cu->caps |= caps;
+	if (list_empty(&cu->node_in_flight))
+		list_add_tail(&cu->node_in_flight, to_deliver);
+}
+
+/* deliver queued caps_updated callbacks, see struct scx_caps_updated */
+static void caps_updated_deliver(struct list_head *to_deliver)
+{
+	struct scx_caps_updated *cu, *tmp;
+
+	list_for_each_entry_safe(cu, tmp, to_deliver, node_in_flight) {
+		struct scx_pshard *ps = container_of(cu, struct scx_pshard, caps_updated);
+		struct scx_sched *sch = ps->sch;
+
+		while (true) {
+			u64 caps = 0;
+
+			/*
+			 * During enable, has_op is set after ops.sub_attach(),
+			 * so !has_op means the op is absent or the sched isn't
+			 * live yet - e.g. caps grant from ops.sub_attach().
+			 * Either way don't consume - leave for
+			 * scx_sub_seed_caps() to deliver once live.
+			 */
+			scoped_guard (raw_spinlock, &cu->lock) {
+				if (cu->caps && SCX_HAS_OP(sch, sub_caps_updated) &&
+				    likely(!READ_ONCE(sch->aborting))) {
+					struct scx_cmask_ref ref;
+
+					caps = cu->caps;
+					scx_cmask_ref_init_kern(sch, cu->cmask_arena_out,
+								ps->base, ps->nr_cids, &ref);
+					scx_cmask_ref_copy(&ref, &cu->cmask);
+					scx_cmask_clear(&cu->cmask);
+					cu->caps = 0;
+				} else {
+					list_del_init(&cu->node_in_flight);
+				}
+			}
+			if (!caps)
+				break;
+
+			/* caps != 0 only when deliverable (has_op, above) */
+			SCX_CALL_OP(sch, sub_caps_updated, NULL,
+				    scx_kaddr_to_arena(sch, cu->cmask_arena_out),
+				    caps);
+		}
+	}
+}
+
+/*
+ * Deliver caps owed to @sch that couldn't be delivered earlier (e.g. a grant
+ * taken during its sub_attach(), before has_op was set). Called once @sch is
+ * enabled.
+ */
+static void scx_sub_seed_caps(struct scx_sched *sch)
+{
+	LIST_HEAD(to_deliver);
+	s32 si;
+
+	guard(irqsave)();
+
+	for (si = 0; si < sch->nr_pshards; si++) {
+		struct scx_pshard *ps = sch->pshard[si];
+		struct scx_caps_updated *cu = &ps->caps_updated;
+
+		scoped_guard (raw_spinlock, &cu->lock) {
+			if (cu->caps && list_empty(&cu->node_in_flight))
+				list_add_tail(&cu->node_in_flight, &to_deliver);
+		}
+	}
+	caps_updated_deliver(&to_deliver);
 }
 
 static DECLARE_WAIT_QUEUE_HEAD(scx_unlink_waitq);
@@ -671,6 +780,9 @@ void scx_sub_enable_workfn(struct kthread_work *work)
 
 	scx_bypass(sch, false);
 
+	/* @sch is enabled; deliver any caps owed since its sub_attach() */
+	scx_sub_seed_caps(sch);
+
 	pr_info("sched_ext: BPF sub-scheduler \"%s\" enabled\n", sch->ops.name);
 	kobject_uevent(&sch->kobj, KOBJ_ADD);
 	ret = 0;
@@ -757,7 +869,7 @@ static s32 __init scx_cgroup_lifetime_notifier_init(void)
 }
 core_initcall(scx_cgroup_lifetime_notifier_init);
 
-void scx_pstack_recursion_on_dispatch(struct bpf_prog *prog)
+static void scx_pstack_recursion(struct bpf_prog *prog, const char *op)
 {
 	struct scx_sched *sch;
 
@@ -766,7 +878,17 @@ void scx_pstack_recursion_on_dispatch(struct bpf_prog *prog)
 	if (unlikely(!sch))
 		return;
 
-	scx_error(sch, "dispatch recursion detected");
+	scx_error(sch, "%s recursion detected", op);
+}
+
+void scx_pstack_recursion_on_dispatch(struct bpf_prog *prog)
+{
+	scx_pstack_recursion(prog, "dispatch");
+}
+
+void scx_pstack_recursion_on_caps_updated(struct bpf_prog *prog)
+{
+	scx_pstack_recursion(prog, "sub_caps_updated");
 }
 
 __bpf_kfunc_start_defs();
@@ -869,6 +991,7 @@ __bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
 	struct scx_cmask_ref ref, denied_ref;
 	struct scx_sched *parent, *child;
 	bool any_denied = false;
+	LIST_HEAD(to_deliver);
 	s32 si, ret;
 
 	guard(irqsave)();
@@ -896,6 +1019,7 @@ __bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
 		SCX_CMASK_DEFINE_SHARD(slice, 0, SCX_CID_SHARD_MAX_CPUS);
 		struct scx_pshard *pps = parent->pshard[si];
 		struct scx_pshard *cps = child->pshard[si];
+		u64 granted_caps = 0;
 		u32 cap_bit;
 
 		scx_cmask_ref_shard(&ref, si, slice);
@@ -903,6 +1027,9 @@ __bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
 			continue;
 
 		SCX_CMASK_DEFINE_SHARD(granted_cids, slice->base, slice->nr_cids);
+		SCX_CMASK_DEFINE_SHARD(changed_cids, slice->base, slice->nr_cids);
+		SCX_CMASK_DEFINE_SHARD(delta, slice->base, slice->nr_cids);
+
 		scx_cmask_copy(granted_cids, slice);
 
 		scoped_guard (raw_spinlock, &pps->lock) {
@@ -915,9 +1042,26 @@ __bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
 			scx_for_each_cap_bit(cap_bit, caps)
 				scx_cmask_and(granted_cids, &pps->caps[cap_bit].cmask);
 
-			/* fold granted_cids into the child per requested cap */
-			scx_for_each_cap_bit(cap_bit, caps)
-				scx_cmask_or(&cps->caps[cap_bit].cmask, granted_cids);
+			/*
+			 * For each requested cap, fold the newly-set cids into
+			 * the child and accumulate the delta.
+			 */
+			scx_for_each_cap_bit(cap_bit, caps) {
+				struct scx_cmask *ccm = &cps->caps[cap_bit].cmask;
+
+				scx_cmask_copy(delta, granted_cids);
+				scx_cmask_andnot(delta, ccm);
+				if (scx_cmask_empty(delta))
+					continue;
+
+				scx_cmask_or(ccm, delta);
+				scx_cmask_or(changed_cids, delta);
+				granted_caps |= BIT_U64(cap_bit);
+			}
+
+			if (granted_caps)
+				caps_updated_record(cps, changed_cids, granted_caps,
+						    &to_deliver);
 		}
 
 		/* record cids that didn't make it through into @denied_out */
@@ -932,6 +1076,9 @@ __bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
 			}
 		}
 	}
+
+	caps_updated_deliver(&to_deliver);
+
 	return any_denied ? -EPERM : 0;
 }
 
@@ -953,6 +1100,7 @@ __bpf_kfunc void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps,
 {
 	struct scx_cmask_ref ref;
 	struct scx_sched *parent, *child, *pos;
+	LIST_HEAD(to_deliver);
 	s32 si, ret;
 
 	guard(irqsave)();
@@ -983,18 +1131,32 @@ __bpf_kfunc void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps,
 		pos = scx_next_descendant_pre(NULL, child);
 		while (pos) {
 			struct scx_pshard *ps = pos->pshard[si];
+			SCX_CMASK_DEFINE_SHARD(changed_cids, slice->base, slice->nr_cids);
+			SCX_CMASK_DEFINE_SHARD(delta, slice->base, slice->nr_cids);
 			u64 revoked_caps = 0;
 			u32 cap_bit;
 
 			scoped_guard (raw_spinlock_nested, &ps->lock) {
+				/*
+				 * For each cap, clear lost cids and accumulate
+				 * the per-cap diff for notification.
+				 */
 				scx_for_each_cap_bit(cap_bit, caps) {
 					struct scx_cmask *cm = &ps->caps[cap_bit].cmask;
 
-					if (!scx_cmask_intersects(cm, slice))
+					scx_cmask_copy(delta, cm);
+					scx_cmask_and(delta, slice);
+					if (scx_cmask_empty(delta))
 						continue;
-					scx_cmask_andnot(cm, slice);
+
+					scx_cmask_andnot(cm, delta);
+					scx_cmask_or(changed_cids, delta);
 					revoked_caps |= BIT_U64(cap_bit);
 				}
+
+				if (revoked_caps)
+					caps_updated_record(ps, changed_cids, revoked_caps,
+							    &to_deliver);
 			}
 
 			if (revoked_caps)
@@ -1003,6 +1165,8 @@ __bpf_kfunc void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps,
 				pos = scx_skip_subtree_pre(pos, child);
 		}
 	}
+
+	caps_updated_deliver(&to_deliver);
 }
 
 /**
