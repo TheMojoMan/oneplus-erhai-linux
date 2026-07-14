@@ -1183,6 +1183,12 @@ struct scx_sched_pnode {
 	struct scx_dispatch_q	global_dsq;
 };
 
+#ifdef CONFIG_EXT_SUB_SCHED
+struct scx_pshard {
+	int			_dummy;		/* until the first real field lands */
+};
+#endif
+
 struct scx_sched {
 	/*
 	 * cpu-form and cid-form ops share field offsets up to .priv (verified
@@ -1230,6 +1236,9 @@ struct scx_sched {
 	 */
 	struct rhashtable	dsq_hash;
 	struct scx_sched_pnode	**pnode;
+#ifdef CONFIG_EXT_SUB_SCHED
+	struct scx_pshard	**pshard;	/* indexed by shard_idx */
+#endif
 	struct scx_sched_pcpu __percpu *pcpu;
 
 	u64			slice_dfl;
@@ -1244,6 +1253,15 @@ struct scx_sched {
 	bool			dump_disabled;	/* protected by scx_dump_lock */
 	u32			dsp_max_batch;
 	s32			level;
+
+#ifdef CONFIG_EXT_SUB_SCHED
+	/*
+	 * pshard[] size captured at enable for the async RCU free path -
+	 * scx_nr_cid_shards may be rewritten by a later scx_cid_init() before
+	 * free runs. While sch is active, use the global.
+	 */
+	u32			nr_pshards;
+#endif
 
 	/*
 	 * Updates to the following warned bitfields can race causing RMW issues

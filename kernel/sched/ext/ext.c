@@ -4681,6 +4681,8 @@ static void scx_sched_free_rcu_work(struct work_struct *work)
 		free_pnode(sch->pnode[node]);
 	kfree(sch->pnode);
 
+	scx_free_pshards(sch);
+
 	rhashtable_walk_enter(&sch->dsq_hash, &rht_iter);
 	do {
 		rhashtable_walk_start(&rht_iter);
@@ -6758,6 +6760,12 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 	}
 
 	ret = scx_set_cmask_scratch_alloc(sch);
+	if (ret) {
+		cpus_read_unlock();
+		goto err_disable;
+	}
+
+	ret = scx_alloc_pshards(sch);
 	if (ret) {
 		cpus_read_unlock();
 		goto err_disable;

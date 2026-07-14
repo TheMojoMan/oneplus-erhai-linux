@@ -82,6 +82,60 @@ void set_cgroup_sched(struct cgroup *cgrp, struct scx_sched *sch)
 		rcu_assign_pointer(pos->scx_sched, sch);
 }
 
+static void free_pshard(struct scx_pshard *pshard)
+{
+	kfree(pshard);
+}
+
+void scx_free_pshards(struct scx_sched *sch)
+{
+	s32 si;
+
+	if (!sch->pshard)
+		return;
+	for (si = 0; si < sch->nr_pshards; si++)
+		free_pshard(sch->pshard[si]);
+	kfree(sch->pshard);
+}
+
+static struct scx_pshard *alloc_pshard(struct scx_sched *sch, s32 shard_idx, s32 node)
+{
+	return kzalloc_node(sizeof(struct scx_pshard), GFP_KERNEL, node);
+}
+
+s32 scx_alloc_pshards(struct scx_sched *sch)
+{
+	struct scx_pshard **pshard;
+	s32 si;
+
+	if (!sch->is_cid_type || !sch->arena_pool)
+		return 0;
+
+	pshard = kzalloc_objs(pshard[0], scx_nr_cid_shards, GFP_KERNEL);
+	if (!pshard)
+		return -ENOMEM;
+
+	for (si = 0; si < scx_nr_cid_shards; si++) {
+		pshard[si] = alloc_pshard(sch, si, scx_shard_node[si]);
+		if (!pshard[si]) {
+			while (--si >= 0)
+				free_pshard(pshard[si]);
+			kfree(pshard);
+			return -ENOMEM;
+		}
+	}
+
+	sch->nr_pshards = scx_nr_cid_shards;
+	/*
+	 * Publish only after every entry is built so a reader observing
+	 * @sch->pshard never sees a partially-filled array. Pair the store
+	 * with a barrier and READ_ONCE() on the read side.
+	 */
+	smp_wmb();
+	WRITE_ONCE(sch->pshard, pshard);
+	return 0;
+}
+
 static DECLARE_WAIT_QUEUE_HEAD(scx_unlink_waitq);
 
 void drain_descendants(struct scx_sched *sch)
