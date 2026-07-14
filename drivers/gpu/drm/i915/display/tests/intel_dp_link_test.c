@@ -1101,7 +1101,7 @@ static void intel_dp_link_test_fallback_for_edp(struct kunit *test)
 }
 
 static bool test_fallback_from_target(struct test_config_table *expected_table,
-				      enum intel_output_type output_type, int max_rate,
+				      enum intel_output_type output_type,
 				      const struct intel_dp_link_config *expected_target_config,
 				      const struct intel_dp_link_config *expected_fallback_config)
 {
@@ -1123,8 +1123,7 @@ static bool test_fallback_from_target(struct test_config_table *expected_table,
 	/* Get the max connector config, optionally filtered to the max_rate limit. */
 	lc_ops->iter_start(&iter, link_caps, fallback_order, INTEL_DP_LINK_CAPS_FILTER_ALL);
 	for_each_dp_link_config(&iter, &iter_config)
-		if (max_rate == 0 || iter_config.rate <= max_rate)
-			break;
+		break;
 	lc_ops->iter_end(&iter);
 
 	KUNIT_EXPECT_TRUE(test, link_configs_match(&iter_config,
@@ -1236,7 +1235,6 @@ static bool get_fallback_config(const struct test_config_table *expected_table,
 
 static bool get_target_config(const struct test_config_table *expected_table,
 			      enum intel_output_type output_type,
-			      int max_rate,
 			      struct intel_dp_link_config *target)
 {
 	struct kunit *test = expected_table->test;
@@ -1248,20 +1246,17 @@ static bool get_target_config(const struct test_config_table *expected_table,
 		const struct intel_dp_link_config *config =
 			&config_set->entries[i];
 
-		if (config->rate <= max_rate) {
-			assert_config_is_supported(expected_table, config);
-			*target = *config;
+		assert_config_is_supported(expected_table, config);
+		*target = *config;
 
-			return true;
-		}
+		return true;
 	}
 
 	return false;
 }
 
 static void test_fallback_seq(struct kunit *test,
-			      enum intel_output_type output_type,
-			      bool uhbr)
+			      enum intel_output_type output_type)
 {
 	struct test_ctx *ctx = test->priv;
 	struct intel_dp_link_caps *link_caps = ctx->dev.dig_port.dp.link.caps;
@@ -1273,12 +1268,6 @@ static void test_fallback_seq(struct kunit *test,
 	struct intel_dp_link_config target_config;
 	int fallback_count = 0;
 	bool target_found;
-	int max_rate;
-
-	if (uhbr)
-		max_rate = expected_table.rates.entries[expected_table.rates.size - 1];
-	else
-		max_rate = 810000;
 
 	dig_port->base.type = output_type;
 	ctx->dev.dig_port.dp.use_max_params = false;
@@ -1287,7 +1276,7 @@ static void test_fallback_seq(struct kunit *test,
 
 	/* Get the initial target config. */
 	target_found = get_target_config(&expected_table, output_type,
-					 max_rate, &target_config);
+					 &target_config);
 	KUNIT_ASSERT_TRUE(test, target_found);
 
 	for (;;) {
@@ -1296,15 +1285,9 @@ static void test_fallback_seq(struct kunit *test,
 					 &target_config, &fallback_config))
 			fallback_config = INTEL_DP_LINK_CONFIG_NULL;
 
-		if (!test_fallback_from_target(&expected_table, output_type, max_rate,
+		if (!test_fallback_from_target(&expected_table, output_type,
 					       &target_config, &fallback_config))
 			break;
-
-		/*
-		 * The fallback changed the max rate allowed for the next
-		 * target.
-		 */
-		max_rate = fallback_config.rate;
 
 		/* Simply select the fallback config as the next target. */
 		target_config = fallback_config;
@@ -1314,14 +1297,9 @@ static void test_fallback_seq(struct kunit *test,
 	}
 }
 
-static void intel_dp_link_test_fallback_for_sst_max_non_uhbr(struct kunit *test)
+static void intel_dp_link_test_fallback_for_sst(struct kunit *test)
 {
-	test_fallback_seq(test, INTEL_OUTPUT_DP, false);
-}
-
-static void intel_dp_link_test_fallback_for_sst_max_uhbr(struct kunit *test)
-{
-	test_fallback_seq(test, INTEL_OUTPUT_DP, true);
+	test_fallback_seq(test, INTEL_OUTPUT_DP);
 }
 
 static void intel_dp_link_test_fallback_for_mst(struct kunit *test)
@@ -1330,7 +1308,7 @@ static void intel_dp_link_test_fallback_for_mst(struct kunit *test)
 
 	ctx->dev.connector.mst.dp = &ctx->dev.dig_port.dp;
 
-	test_fallback_seq(test, INTEL_OUTPUT_DP_MST, true);
+	test_fallback_seq(test, INTEL_OUTPUT_DP_MST);
 }
 
 static struct kunit_case intel_dp_link_test_cases[] = {
@@ -1352,8 +1330,7 @@ static struct kunit_case intel_dp_link_test_cases[] = {
 	KUNIT_CASE(intel_dp_link_caps_test_update_params_expand_disable_random),
 
 	KUNIT_CASE(intel_dp_link_test_fallback_for_edp),
-	KUNIT_CASE(intel_dp_link_test_fallback_for_sst_max_non_uhbr),
-	KUNIT_CASE(intel_dp_link_test_fallback_for_sst_max_uhbr),
+	KUNIT_CASE(intel_dp_link_test_fallback_for_sst),
 	KUNIT_CASE(intel_dp_link_test_fallback_for_mst),
 
 	{}
