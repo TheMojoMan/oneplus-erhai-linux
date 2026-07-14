@@ -107,6 +107,7 @@
 #include "netlabel.h"
 #include "audit.h"
 #include "avc_ss.h"
+#include "ima.h"
 
 #define SELINUX_INODE_INIT_XATTRS 1
 
@@ -7855,6 +7856,8 @@ static __init int selinux_init(void)
 	ebitmap_cache_init();
 
 	hashtab_cache_init();
+
+	selinux_ima_config_len_init();
 
 	security_add_hooks(selinux_hooks, ARRAY_SIZE(selinux_hooks),
 			   &selinux_lsmid);

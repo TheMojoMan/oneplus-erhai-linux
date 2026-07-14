@@ -13,6 +13,27 @@
 #include "security.h"
 #include "ima.h"
 
+static int selinux_ima_config_len __ro_after_init;
+
+/*
+ * selinux_ima_config_len_init - Compute the configuration settings string length
+ *
+ * The string is fixed text plus one digit per setting, so its length
+ * is known at boot.
+ */
+void __init selinux_ima_config_len_init(void)
+{
+	int buf_len, suffix_len, i;
+
+	buf_len = strlen("initialized=0;enforcing=0;checkreqprot=0;") + 1;
+	suffix_len = strlen("=0;");
+
+	for (i = 0; i < __POLICYDB_CAP_MAX; i++)
+		buf_len += strlen(selinux_policycap_names[i]) + suffix_len;
+
+	selinux_ima_config_len = buf_len;
+}
+
 /*
  * selinux_ima_collect_state - Read selinux configuration settings
  *
@@ -23,19 +44,13 @@ static char *selinux_ima_collect_state(void)
 {
 	struct seq_buf s;
 	char *buf;
-	int buf_len, suffix_len, i;
+	int i;
 
-	buf_len = strlen("initialized=0;enforcing=0;checkreqprot=0;") + 1;
-	suffix_len = strlen("=0;");
-
-	for (i = 0; i < __POLICYDB_CAP_MAX; i++)
-		buf_len += strlen(selinux_policycap_names[i]) + suffix_len;
-
-	buf = kzalloc(buf_len, GFP_KERNEL);
+	buf = kzalloc(selinux_ima_config_len, GFP_KERNEL);
 	if (!buf)
 		return NULL;
 
-	seq_buf_init(&s, buf, buf_len);
+	seq_buf_init(&s, buf, selinux_ima_config_len);
 
 	seq_buf_printf(&s, "initialized=%d;enforcing=%d;checkreqprot=%d;",
 		       selinux_initialized(), enforcing_enabled(),
