@@ -5542,6 +5542,38 @@ void scx_disable_bypass_dsp(struct scx_sched *sch)
 }
 
 /**
+ * unbypass_renotify_idle - Arm an idle re-notify for a sched leaving bypass
+ * @rq: rq of the cpu leaving bypass
+ * @pos: scheduler that just left bypass on @rq's cpu
+ * @pcpu: @pos's per-cpu state for @rq's cpu
+ *
+ * A sched leaving bypass is owed the ops.update_idle() calls suppressed while
+ * bypassing. A cpu that goes idle during the bypass window and stays idle won't
+ * produce a notification. Arm a re-notify that scx_bypass()'s resched flushes
+ * on the next idle pick.
+ *
+ * An acute case is ops.sub_attach(). If the parent grants the child cids while
+ * attaching, when attach is complete and bypass is lifted, the child may hold
+ * idle cids it never saw go idle.
+ *
+ * The root is no exception as bypass suppresses its notifications the same way.
+ * However, the root uses a separate per-rq flag so its re-notify keeps working
+ * even when !CONFIG_EXT_SUB_SCHED.
+ */
+static void unbypass_renotify_idle(struct rq *rq, struct scx_sched *pos,
+				   struct scx_sched_pcpu *pcpu)
+{
+	if (pos == scx_root) {
+		rq->scx.flags |= SCX_RQ_ROOT_IDLE_RENOTIFY;
+		return;
+	}
+#ifdef CONFIG_EXT_SUB_SCHED
+	pcpu->idle_renotify = true;
+	rq->scx.flags |= SCX_RQ_SUB_IDLE_RENOTIFY;
+#endif
+}
+
+/**
  * scx_bypass - [Un]bypass scx_ops and guarantee forward progress
  * @sch: sched to bypass
  * @bypass: true for bypass, false for unbypass
@@ -5624,11 +5656,15 @@ void scx_bypass(struct scx_sched *sch, bool bypass)
 
 		scx_for_each_descendant_pre(pos, sch) {
 			struct scx_sched_pcpu *pcpu = per_cpu_ptr(pos->pcpu, cpu);
+			bool was_bypassing = pcpu->flags & SCX_SCHED_PCPU_BYPASSING;
 
-			if (pos->bypass_depth)
+			if (pos->bypass_depth) {
 				pcpu->flags |= SCX_SCHED_PCPU_BYPASSING;
-			else
+			} else {
 				pcpu->flags &= ~SCX_SCHED_PCPU_BYPASSING;
+				if (was_bypassing)
+					unbypass_renotify_idle(rq, pos, pcpu);
+			}
 		}
 
 		raw_spin_unlock(&scx_sched_lock);

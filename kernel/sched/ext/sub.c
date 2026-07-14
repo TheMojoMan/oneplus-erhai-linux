@@ -483,6 +483,10 @@ static void discard_queued_syncs(struct rq *rq)
  * pshard->caps[] is the target configuration. pcpu->ecaps is the effective
  * transposed copy owned by the cid's cpu and written only here under @rq's
  * lock.
+ *
+ * A sched that newly gains baseline access here is owed an update_idle() so it
+ * learns the cid's idle state. Such a gain arms the per-rq
+ * %SCX_RQ_SUB_IDLE_RENOTIFY gate so the next idle pick delivers it.
  */
 void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 {
@@ -518,7 +522,7 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 		struct scx_sched_pcpu *pcpu =
 			container_of(pos, struct scx_sched_pcpu, ecaps_to_sync_node);
 		struct scx_pshard *ps = pcpu->sch->pshard[shard];
-		u64 old, ecaps, lost;
+		u64 old, ecaps, lost, gained;
 
 		init_llist_node(pos);
 
@@ -530,6 +534,7 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 		WRITE_ONCE(pcpu->ecaps, ecaps);
 
 		lost = old & ~ecaps;
+		gained = ecaps & ~old;
 		lost_all |= lost;
 
 		/* tell the sched its effective caps on this cid changed */
@@ -546,6 +551,18 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 			rq->scx.sub_dispatch_prev = NULL;
 			scx_flush_dispatch_buf(pcpu->sch, rq);
 			pcpu->reported_ecaps = ecaps;
+		}
+
+		/*
+		 * Gaining baseline access owes an update_idle() so the sched
+		 * learns the cpu's idle state. Arm the per-rq gate so the next
+		 * idle pick flushes it. Losing access drops any pending notify.
+		 */
+		if (gained & SCX_CAP_BASE) {
+			pcpu->idle_renotify = true;
+			rq->scx.flags |= SCX_RQ_SUB_IDLE_RENOTIFY;
+		} else if (lost & SCX_CAP_BASE) {
+			pcpu->idle_renotify = false;
 		}
 	}
 
@@ -1441,6 +1458,11 @@ __bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
 
 				caps_updated_record(cps, changed_cids, granted_caps,
 						    &to_deliver);
+				/*
+				 * The sync arms an update_idle() re-notify if
+				 * the cid gains baseline access, so the holder
+				 * learns of an already-idle cid.
+				 */
 				scx_cmask_for_each_cid(cid, changed_cids)
 					queue_sync_ecaps(child, cid);
 			}

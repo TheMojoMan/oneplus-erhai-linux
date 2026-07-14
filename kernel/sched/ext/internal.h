@@ -1244,6 +1244,8 @@ struct scx_sched_pcpu {
 	 */
 	u64			ecaps;
 	struct llist_node	ecaps_to_sync_node;
+	/* owed a forced update_idle() re-notify on this cpu */
+	bool			idle_renotify;
 	/* effective caps as of the last sub_ecaps_updated() delivery */
 	u64			reported_ecaps;
 #endif
