@@ -15,7 +15,6 @@
 #include <string.h>
 
 #include <dirent.h>
-#include "util/term.h"
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/zalloc.h>
