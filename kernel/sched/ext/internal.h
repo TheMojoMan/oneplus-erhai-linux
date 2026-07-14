@@ -1155,6 +1155,13 @@ struct scx_event_stats {
 	 * it can't be rejected. The violation is counted here.
 	 */
 	s64		SCX_EV_SUB_FORCED_ADMIT;
+
+	/*
+	 * The number of times a preempting kick was refused because the
+	 * sub-sched lacked SCX_CAP_PREEMPT for a task outside its subtree. The
+	 * kick degrades to a plain reschedule.
+	 */
+	s64		SCX_EV_SUB_PREEMPT_DENIED;
 };
 
 #define SCX_EVENTS_LIST(SCX_EVENT)					\
@@ -1173,7 +1180,8 @@ struct scx_event_stats {
 	SCX_EVENT(SCX_EV_BYPASS_ACTIVATE);				\
 	SCX_EVENT(SCX_EV_INSERT_NOT_OWNED);				\
 	SCX_EVENT(SCX_EV_SUB_BYPASS_DISPATCH);				\
-	SCX_EVENT(SCX_EV_SUB_FORCED_ADMIT)
+	SCX_EVENT(SCX_EV_SUB_FORCED_ADMIT);				\
+	SCX_EVENT(SCX_EV_SUB_PREEMPT_DENIED)
 
 struct scx_sched;
 
@@ -1287,22 +1295,33 @@ struct scx_sched_pnode {
  * the allocation pattern.
  *
  * ENQ_IMMED  insert an IMMED task onto the cid's local DSQ
+ *            - kick the cid's cpu (except SCX_KICK_PREEMPT)
  *
  * ENQ        insert any task onto the cid's local DSQ (implies ENQ_IMMED)
  *
+ * PREEMPT    preempt any task running on the cid regardless of the owning
+ *            sched (implies ENQ). Preempting a task in the sched's own subtree
+ *            doesn't require any cap.
+ *            - SCX_ENQ_PREEMPT inserts
+ *            - SCX_KICK_PREEMPT kicks
+ *
  * Implied caps apply to the holder's own use of a cid, not to delegation.
  * scx_bpf_sub_grant() delegates literally-held caps, so a cap held only through
- * implication is usable but cannot be re-delegated to a child.
+ * implication is usable but cannot be re-delegated to a child. When granting a
+ * cap, it usually makes sense to delegate its implied caps explicitly alongside
+ * it.
  */
 enum scx_cap_flags {
 	__SCX_CAP_ENQ_IMMED		= 0,
 	__SCX_CAP_ENQ			= 1,
+	__SCX_CAP_PREEMPT		= 2,
 
 	__SCX_NR_CAPS,
 	__SCX_CAP_ALL			= BIT_U64(__SCX_NR_CAPS) - 1,
 
 	SCX_CAP_ENQ_IMMED		= BIT_U64(__SCX_CAP_ENQ_IMMED),
 	SCX_CAP_ENQ			= BIT_U64(__SCX_CAP_ENQ),
+	SCX_CAP_PREEMPT			= BIT_U64(__SCX_CAP_PREEMPT),
 
 	/* alias for minimal cap to make any use of a cpu */
 	SCX_CAP_BASE			= SCX_CAP_ENQ_IMMED,
@@ -1914,6 +1933,7 @@ struct scx_sched *scx_alloc_and_add_sched(struct scx_enable_cmd *cmd,
 					  struct scx_sched *parent);
 int scx_validate_ops(struct scx_sched *sch, const struct sched_ext_ops *ops);
 int scx_sched_sysfs_add(struct scx_sched *sch);
+bool scx_is_descendant(struct scx_sched *sch, struct scx_sched *ancestor);
 
 extern raw_spinlock_t scx_sched_lock;
 extern struct mutex scx_enable_mutex;

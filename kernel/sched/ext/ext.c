@@ -294,7 +294,7 @@ static bool u32_before(u32 a, u32 b)
  *
  * Test whether @sch is a descendant of @ancestor.
  */
-static bool scx_is_descendant(struct scx_sched *sch, struct scx_sched *ancestor)
+bool scx_is_descendant(struct scx_sched *sch, struct scx_sched *ancestor)
 {
 	if (sch->level < ancestor->level)
 		return false;
@@ -4964,6 +4964,7 @@ SCX_ATTR(events);
 static const char *scx_cap_names[__SCX_NR_CAPS] = {
 	[__SCX_CAP_ENQ_IMMED]	= "enq_immed",
 	[__SCX_CAP_ENQ]		= "enq",
+	[__SCX_CAP_PREEMPT]	= "preempt",
 };
 
 static ssize_t scx_attr_caps_show(struct kobject *kobj,
@@ -7898,13 +7899,22 @@ static bool kick_one_cpu(s32 cpu, struct scx_sched_pcpu *pcpu, struct rq *this_r
 	 * During CPU hotplug, a CPU may depend on kicking itself to make
 	 * forward progress. Allow kicking self regardless of online state. If
 	 * @cpu is running a higher class task, we have no control over @cpu.
-	 * Skip kicking.
+	 * Skip kicking. A sub-sched lacking baseline access on @cid has no
+	 * business forcing a reschedule there - skip. This is the authoritative
+	 * cap check: ecaps is read here under @rq's lock.
 	 */
 	if ((cpu_online(cpu) || cpu == cpu_of(this_rq)) &&
-	    !sched_class_above(cur_class, &ext_sched_class)) {
+	    !sched_class_above(cur_class, &ext_sched_class) &&
+	    !scx_missing_caps(pcpu->sch, cpu, SCX_CAP_BASE)) {
 		if (cpumask_test_cpu(cpu, pcpu->cpus_to_preempt)) {
-			if (cur_class == &ext_sched_class)
-				set_task_slice(rq->curr, 0);
+			if (cur_class == &ext_sched_class) {
+				if (likely(!scx_missing_caps(pcpu->sch, cpu,
+							     scx_caps_for_preempt(pcpu->sch, rq))))
+					set_task_slice(rq->curr, 0);
+				else
+					__scx_add_event(pcpu->sch,
+							SCX_EV_SUB_PREEMPT_DENIED, 1);
+			}
 			cpumask_clear_cpu(cpu, pcpu->cpus_to_preempt);
 		}
 
@@ -7928,15 +7938,18 @@ static bool kick_one_cpu(s32 cpu, struct scx_sched_pcpu *pcpu, struct rq *this_r
 	return should_wait;
 }
 
-static void kick_one_cpu_if_idle(s32 cpu, struct rq *this_rq)
+static void kick_one_cpu_if_idle(s32 cpu, struct scx_sched_pcpu *pcpu,
+				 struct rq *this_rq)
 {
 	struct rq *rq = cpu_rq(cpu);
 	unsigned long flags;
 
 	raw_spin_rq_lock_irqsave(rq, flags);
 
+	/* idle kicks need baseline access too, see kick_one_cpu() */
 	if (!can_skip_idle_kick(rq) &&
-	    (cpu_online(cpu) || cpu == cpu_of(this_rq)))
+	    (cpu_online(cpu) || cpu == cpu_of(this_rq)) &&
+	    !scx_missing_caps(pcpu->sch, cpu, SCX_CAP_BASE))
 		resched_curr(rq);
 
 	raw_spin_rq_unlock_irqrestore(rq, flags);
@@ -7973,7 +7986,7 @@ static void kick_cpus_irq_workfn(struct irq_work *irq_work)
 		}
 
 		for_each_cpu(cpu, pcpu->cpus_to_kick_if_idle) {
-			kick_one_cpu_if_idle(cpu, this_rq);
+			kick_one_cpu_if_idle(cpu, pcpu, this_rq);
 			cpumask_clear_cpu(cpu, pcpu->cpus_to_kick_if_idle);
 		}
 	}
@@ -9010,7 +9023,10 @@ __bpf_kfunc void scx_bpf_kick_cpu(s32 cpu, u64 flags, const struct bpf_prog_aux 
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
  * cid-addressed equivalent of scx_bpf_kick_cpu(). An invalid @cid aborts the
- * scheduler via scx_cid_to_cpu().
+ * scheduler via scx_cid_to_cpu(). Caps are enforced on the delivery path: a
+ * kick is dropped if the caller lacks baseline access on @cid, and a
+ * %SCX_KICK_PREEMPT degrades to a plain reschedule if the caller lacks
+ * %SCX_CAP_PREEMPT for a task outside its subtree.
  */
 __bpf_kfunc void scx_bpf_kick_cid(s32 cid, u64 flags, const struct bpf_prog_aux *aux)
 {

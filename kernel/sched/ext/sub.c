@@ -221,10 +221,13 @@ void scx_init_root_caps(struct scx_sched *sch)
  * @sch: enqueuing sub-sched
  * @rq: rq whose local DSQ @p targets
  * @p: task being inserted
- * @enq_flags: in/out; %SCX_ENQ_IMMED is cleared when diverting to reject
+ * @enq_flags: in/out, unhonored flags are cleared
  *
  * Return @rq's local DSQ if @sch holds the required caps on @rq's cid,
  * otherwise @rq's reject DSQ after recording the reenq reason on @p.
+ *
+ * %SCX_ENQ_IMMED and %SCX_ENQ_PREEMPT are cleared when diverting to reject.
+ * %SCX_ENQ_PREEMPT is also cleared on a fallback migration-disabled admission.
  *
  * Bypass doesn't need special-casing as a bypassing sched's tasks are enqueued
  * to and run by its nearest non-bypassing ancestor. If root is bypassing, it
@@ -234,7 +237,12 @@ struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq 
 					       struct task_struct *p, u64 *enq_flags)
 {
 	s32 cid = __scx_cpu_to_cid(cpu_of(rq));
-	u64 missing = scx_missing_caps(sch, cpu_of(rq), scx_caps_for_enq(*enq_flags));
+	u64 needed = scx_caps_for_enq(*enq_flags);
+	u64 missing;
+
+	if (*enq_flags & SCX_ENQ_PREEMPT)
+		needed |= scx_caps_for_preempt(sch, rq);
+	missing = scx_missing_caps(sch, cpu_of(rq), needed);
 
 	/* requirements met */
 	if (likely(!missing))
@@ -244,10 +252,12 @@ struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq 
 	 * The task must run on this CPU regardless of caps: the rq is draining
 	 * offline (BPF scheduler bypassed), the task is migration-disabled, or a
 	 * migration is pending. Admit despite the missing caps and count it.
+	 * Refuse preemptions.
 	 */
 	if (unlikely(!scx_rq_online(rq) || is_migration_disabled(p) ||
 		     p->migration_pending)) {
 		__scx_add_event(sch, SCX_EV_SUB_FORCED_ADMIT, 1);
+		*enq_flags &= ~SCX_ENQ_PREEMPT;
 		return &rq->scx.local_dsq;
 	}
 
@@ -257,9 +267,10 @@ struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq 
 	/*
 	 * Only local DSQ can honor IMMED and dsq_inc_nr() WARNs on IMMED into
 	 * others. Strip both the enq flag and the sticky task flag - the
-	 * latter can carry in from an earlier admitted IMMED insert.
+	 * latter can carry in from an earlier admitted IMMED insert. Strip
+	 * PREEMPT too.
 	 */
-	*enq_flags &= ~SCX_ENQ_IMMED;
+	*enq_flags &= ~(SCX_ENQ_IMMED | SCX_ENQ_PREEMPT);
 	p->scx.flags &= ~SCX_TASK_IMMED;
 
 	return &rq->scx.reject_dsq;
