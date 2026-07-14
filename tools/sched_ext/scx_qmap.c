@@ -4,6 +4,9 @@
  * Copyright (c) 2022 Tejun Heo <tj@kernel.org>
  * Copyright (c) 2022 David Vernet <dvernet@meta.com>
  */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -12,19 +15,44 @@
 #include <libgen.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <string.h>
+#include <time.h>
 #include <bpf/bpf.h>
 #include <scx/common.h>
 #include "scx_qmap.h"
 #include "scx_qmap.bpf.skel.h"
 
+/* kernfs file-handle type for open_by_handle_at(), from linux/exportfs.h */
+#ifndef FILEID_KERNFS
+#define FILEID_KERNFS	0xfe
+#endif
+
 const char help_fmt[] =
 "A simple five-level FIFO queue sched_ext scheduler.\n"
 "\n"
-"See the top-level comment in .bpf.c for more details.\n"
+"It also demonstrates hierarchical sub-scheduling: a scheduler can hand some\n"
+"of its cpus to a child cgroup that runs its own scheduler. Run one qmap as\n"
+"the parent, then run another qmap on a child cgroup with -c to attach it\n"
+"beneath the parent.\n"
+"\n"
+"The policy below is deliberately simplistic and the resulting behavior can\n"
+"look odd. qmap is a demo: it exists to exercise every sub-scheduling\n"
+"primitive the kernel offers with as little code as possible, not to schedule\n"
+"well.\n"
+"\n"
+"A parent divides the full cpus it holds among itself and its children in\n"
+"proportion to cpu.weight. The cpus left over by rounding are time-shared,\n"
+"handed to each participant in turn every -R ms. A cpu a scheduler only\n"
+"holds a time-share of is never handed further down, and a parent left with\n"
+"no full cpu of its own shuts its children down.\n"
+"\n"
+"See the top-of-file comment in .bpf.c for the design.\n"
 "\n"
 "Usage: %s [-s SLICE_US] [-e COUNT] [-t COUNT] [-T COUNT] [-l COUNT] [-b COUNT]\n"
 "       [-N COUNT] [-P] [-M] [-H] [-c CG_PATH] [-d PID] [-D LEN] [-S] [-p] [-I]\n"
-"       [-F COUNT] [-v]\n"
+"       [-F COUNT] [-i SEC] [-R MS] [-v]\n"
 "\n"
 "  -s SLICE_US   Override slice duration\n"
 "  -e COUNT      Trigger scx_bpf_error() after COUNT enqueues\n"
@@ -44,6 +72,8 @@ const char help_fmt[] =
 "  -I            Turn on SCX_OPS_ALWAYS_ENQ_IMMED\n"
 "  -F COUNT      IMMED stress: force every COUNT'th enqueue to a busy local DSQ (use with -I)\n"
 "  -C MODE       cid-override test (shuffle|bad-dup|bad-range|bad-mono)\n"
+"  -i SEC        Stats and weight-refresh interval, seconds (default 5)\n"
+"  -R MS         Round-robin period for time-shared cpus, ms (default 200)\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
@@ -62,6 +92,214 @@ static void sigint_handler(int dummy)
 	exit_req = 1;
 }
 
+/*
+ * Open a cgroup directory directly from its id. In cgroup2 the cgroup id is the
+ * kernfs node id, so a FILEID_KERNFS handle built from the id resolves to the
+ * directory via open_by_handle_at() against the cgroup mount.
+ */
+static int open_cgroup_by_id(u64 cgid)
+{
+	static int mnt_fd = -1;
+	struct {
+		struct file_handle fh;
+		u64 id;
+	} h;
+
+	if (mnt_fd < 0) {
+		mnt_fd = open("/sys/fs/cgroup", O_RDONLY | O_DIRECTORY);
+		if (mnt_fd < 0)
+			return -1;
+	}
+	h.fh.handle_bytes = sizeof(h.id);
+	h.fh.handle_type = FILEID_KERNFS;
+	h.id = cgid;
+	return open_by_handle_at(mnt_fd, &h.fh, O_RDONLY | O_DIRECTORY);
+}
+
+/* read a cgroup's cpu.weight (1-10000) by id, 0 if unavailable */
+static u32 read_cgroup_weight(u64 cgid)
+{
+	char buf[32];
+	int dfd, wfd;
+	u32 w = 0;
+	ssize_t n;
+
+	dfd = open_cgroup_by_id(cgid);
+	if (dfd < 0)
+		return 0;
+	wfd = openat(dfd, "cpu.weight", O_RDONLY);
+	close(dfd);
+	if (wfd < 0)
+		return 0;
+	n = read(wfd, buf, sizeof(buf) - 1);
+	close(wfd);
+	if (n > 0) {
+		buf[n] = '\0';
+		w = strtoul(buf, NULL, 10);
+	}
+	return w;
+}
+
+/* read each direct child's cpu.weight into the arena, true if any changed */
+static bool feed_weights(struct qmap_arena *qa)
+{
+	bool changed = false;
+	int i;
+
+	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
+		u64 cgid = qa->sub_sched_ctxs[i].cgroup_id;
+		u32 w;
+
+		if (!cgid)
+			continue;
+		/* racy against slot reuse but weight is advisory and self-corrects */
+		w = read_cgroup_weight(cgid);
+		if (w && w != qa->sub_sched_ctxs[i].weight) {
+			qa->sub_sched_ctxs[i].weight = w;
+			changed = true;
+		}
+	}
+	return changed;
+}
+
+static void invoke_repartition(struct scx_qmap *skel)
+{
+	LIBBPF_OPTS(bpf_test_run_opts, opts);
+
+	bpf_prog_test_run_opts(bpf_program__fd(skel->progs.repartition), &opts);
+}
+
+static void invoke_flush_alloc(struct scx_qmap *skel)
+{
+	LIBBPF_OPTS(bpf_test_run_opts, opts);
+
+	bpf_prog_test_run_opts(bpf_program__fd(skel->progs.flush_alloc), &opts);
+}
+
+/* previous counter snapshots for the per-interval hier stats */
+struct hier_prev {
+	u64 alloc_ns[MAX_SUB_SCHEDS];
+	u64 self_alloc_ns;
+	u64 alloc_window_ns;
+	u64 nr_dsps[MAX_SUB_SCHEDS];
+	u64 nr_reenq_cap;
+	u64 nr_reenq_immed;
+};
+
+/* current wall-clock time as "HH:MM:SS" for the startup and interval headers */
+static const char *tstamp(char *buf, size_t sz)
+{
+	time_t now = time(NULL);
+
+	strftime(buf, sz, "%H:%M:%S", localtime(&now));
+	return buf;
+}
+
+/* format the cids whose cid_owner[] matches @owner as "0-3,8", "-" if none */
+static void format_cid_ranges(struct qmap_arena *qa, s32 owner, char *buf, size_t sz)
+{
+	u32 nr = qa->nr_cids, cid;
+	size_t off = 0;
+	s32 start = -1;
+
+	buf[0] = '\0';
+	for (cid = 0; cid <= nr; cid++) {
+		bool match = cid < nr && qa->part.cid_owner[cid] == owner;
+		int n;
+
+		if (match) {
+			if (start < 0)
+				start = cid;
+			continue;
+		}
+		if (start < 0)
+			continue;
+
+		if (start == (s32)cid - 1)
+			n = snprintf(buf + off, sz - off, "%s%d",
+				     off ? "," : "", start);
+		else
+			n = snprintf(buf + off, sz - off, "%s%d-%d",
+				     off ? "," : "", start, cid - 1);
+		if (n < 0 || (size_t)n >= sz - off) {
+			strcpy(&buf[sz - 4], "...");
+			return;
+		}
+		off += n;
+		start = -1;
+	}
+	if (!off)
+		strcpy(buf, "-");
+}
+
+/* partition summary + one row per sched: weight, cpus, dispatch rate, cids */
+static void print_hier(struct qmap_arena *qa, struct hier_prev *prev, u64 own_cgid)
+{
+	char ranges[128], who[16];
+	const char *rr = "-";
+	double secs;
+	u32 i;
+
+	/*
+	 * account_alloc() bumps alloc_window_ns together with the per-owner
+	 * counters, so dividing by the same window yields exact cid counts.
+	 */
+	secs = (qa->alloc_window_ns - prev->alloc_window_ns) / 1e9;
+	prev->alloc_window_ns = qa->alloc_window_ns;
+
+	/* resolve the live shared-pool holder */
+	if (qa->part.nr_shared && qa->part.nr_rr) {
+		u64 cgid = qa->part.rr_slots[qa->part.rr_pos];
+
+		rr = "self";
+		if (cgid) {
+			rr = "?";
+			for (i = 0; i < MAX_SUB_SCHEDS; i++) {
+				if (qa->sub_sched_ctxs[i].cgroup_id == cgid) {
+					snprintf(who, sizeof(who), "sub%u", i);
+					rr = who;
+					break;
+				}
+			}
+		}
+	}
+
+	format_cid_ranges(qa, CID_SHARED, ranges, sizeof(ranges));
+	printf("hier   : nsub=%llu excl=%u shared=%s rr=%s reenq cap/immed +%llu/+%llu\n",
+	       (unsigned long long)qa->nr_sub_scheds, qa->part.nr_excl, ranges, rr,
+	       (unsigned long long)(qa->nr_reenq_cap - prev->nr_reenq_cap),
+	       (unsigned long long)(qa->nr_reenq_immed - prev->nr_reenq_immed));
+	prev->nr_reenq_cap = qa->nr_reenq_cap;
+	prev->nr_reenq_immed = qa->nr_reenq_immed;
+
+	printf("hier   : %-4s %10s %4s %6s %8s  %s\n",
+	       "", "cgroup", "w", "alloc", "disp/s", "cids");
+
+	format_cid_ranges(qa, CID_SELF, ranges, sizeof(ranges));
+	printf("hier   : %-4s %10llu %4u %6.2f %8s  %s\n", "self",
+	       (unsigned long long)own_cgid, qa->self_weight,
+	       secs > 0 ? (qa->self_alloc_ns - prev->self_alloc_ns) / (secs * 1e9) : 0.0,
+	       "-", ranges);
+	prev->self_alloc_ns = qa->self_alloc_ns;
+
+	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
+		struct sub_sched_ctx *sc = &qa->sub_sched_ctxs[i];
+
+		if (!sc->cgroup_id)
+			continue;
+
+		snprintf(who, sizeof(who), "sub%u", i);
+		format_cid_ranges(qa, i, ranges, sizeof(ranges));
+		printf("hier   : %-4s %10llu %4u %6.2f %8.1f  %s\n", who,
+		       (unsigned long long)sc->cgroup_id, sc->weight,
+		       secs > 0 ? (qa->alloc_ns[i] - prev->alloc_ns[i]) / (secs * 1e9) : 0.0,
+		       secs > 0 ? (sc->nr_dsps - prev->nr_dsps[i]) / secs : 0.0,
+		       ranges);
+		prev->alloc_ns[i] = qa->alloc_ns[i];
+		prev->nr_dsps[i] = sc->nr_dsps;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	struct scx_qmap *skel;
@@ -69,7 +307,11 @@ int main(int argc, char **argv)
 	struct qmap_arena *qa;
 	u32 test_error_cnt = 0;
 	u64 ecode;
-	int opt;
+	int opt, stats_intv = 5, i, round_robin_ms = 200;
+	struct hier_prev hprev = {};
+	const char *sub_cg_path = NULL;
+	char tbuf[32];
+	u64 own_cgid = 0;
 
 	libbpf_set_print(libbpf_print_fn);
 	signal(SIGINT, sigint_handler);
@@ -89,7 +331,7 @@ restart:
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 	skel->rodata->max_tasks = 16384;
 
-	while ((opt = getopt(argc, argv, "s:e:t:T:l:b:N:PMHc:d:D:SpIF:C:vh")) != -1) {
+	while ((opt = getopt(argc, argv, "s:e:t:T:l:b:N:PMHc:d:D:SpIF:C:i:R:vh")) != -1) {
 		switch (opt) {
 		case 's':
 			skel->rodata->slice_ns = strtoull(optarg, NULL, 0) * 1000;
@@ -129,6 +371,8 @@ restart:
 			}
 			skel->struct_ops.qmap_ops->sub_cgroup_id = st.st_ino;
 			skel->rodata->sub_cgroup_id = st.st_ino;
+			own_cgid = st.st_ino;
+			sub_cg_path = optarg;
 			break;
 		}
 		case 'd':
@@ -211,6 +455,16 @@ restart:
 			}
 			break;
 		}
+		case 'i':
+			stats_intv = atoi(optarg);
+			if (stats_intv < 1)
+				stats_intv = 1;
+			break;
+		case 'R':
+			round_robin_ms = atoi(optarg);
+			if (round_robin_ms < 10)
+				round_robin_ms = 10;
+			break;
 		case 'v':
 			verbose = true;
 			break;
@@ -220,16 +474,30 @@ restart:
 		}
 	}
 
+	skel->rodata->round_robin_ns = (u64)round_robin_ms * 1000000;
+
 	SCX_OPS_LOAD(skel, qmap_ops, scx_qmap, uei);
 	link = SCX_OPS_ATTACH(skel, qmap_ops, scx_qmap);
 
 	qa = &skel->arena->qa;
 	qa->test_error_cnt = test_error_cnt;
 
+	if (sub_cg_path)
+		printf("%s scx_qmap started: sub-scheduler on %s, stats every %ds\n",
+		       tstamp(tbuf, sizeof(tbuf)), sub_cg_path, stats_intv);
+	else
+		printf("%s scx_qmap started: root scheduler, stats every %ds\n",
+		       tstamp(tbuf, sizeof(tbuf)), stats_intv);
+	fflush(stdout);
+
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		long nr_enqueued = qa->nr_enqueued;
 		long nr_dispatched = qa->nr_dispatched;
+		u32 self_weight;
+		bool repart;
 
+		printf("---- %s ----\n",
+		       tstamp(tbuf, sizeof(tbuf)));
 		printf("stats  : enq=%lu dsp=%lu delta=%ld reenq/cid0=%llu/%llu deq=%llu core=%llu enq_ddsp=%llu\n",
 		       nr_enqueued, nr_dispatched, nr_enqueued - nr_dispatched,
 		       (unsigned long long)qa->nr_reenqueued,
@@ -250,8 +518,27 @@ restart:
 			       qa->cpuperf_target_min,
 			       qa->cpuperf_target_avg,
 			       qa->cpuperf_target_max);
+
+		self_weight = own_cgid ? read_cgroup_weight(own_cgid) : 100;
+		if (!self_weight)
+			self_weight = 100;
+
+		repart = feed_weights(qa);
+
+		if (self_weight != qa->self_weight) {
+			qa->self_weight = self_weight;
+			repart = true;
+		}
+
+		if (repart)
+			invoke_repartition(skel);
+
+		invoke_flush_alloc(skel);
+		print_hier(qa, &hprev, own_cgid);
 		fflush(stdout);
-		sleep(1);
+
+		for (i = 0; i < stats_intv && !exit_req && !UEI_EXITED(skel, uei); i++)
+			sleep(1);
 	}
 
 	bpf_link__destroy(link);
