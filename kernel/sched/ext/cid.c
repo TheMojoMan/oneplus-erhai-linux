@@ -641,6 +641,12 @@ enum cmask_op2 {
 	/* predicates - short-circuit when the per-word result is true */
 	CMASK_OP2_SUBSET,
 	CMASK_OP2_INTERSECTS,
+	/*
+	 * @a is a BPF-arena cmask. Words on @a use READ_ONCE/WRITE_ONCE since
+	 * BPF may read/write concurrently. See scx_cmask_ref_or() / _copy().
+	 */
+	CMASK_OP2_REF_OR,
+	CMASK_OP2_REF_COPY,
 };
 
 static __always_inline bool cmask_op2_is_pred(const enum cmask_op2 op)
@@ -669,6 +675,12 @@ static __always_inline bool cmask_word_op2(u64 *av, const u64 *bp, u64 mask,
 		return (READ_ONCE(*bp) & ~READ_ONCE(*av)) & mask;
 	case CMASK_OP2_INTERSECTS:
 		return (READ_ONCE(*av) & READ_ONCE(*bp)) & mask;
+	case CMASK_OP2_REF_OR:
+		WRITE_ONCE(*av, READ_ONCE(*av) | (READ_ONCE(*bp) & mask));
+		return false;
+	case CMASK_OP2_REF_COPY:
+		WRITE_ONCE(*av, (READ_ONCE(*av) & ~mask) | (READ_ONCE(*bp) & mask));
+		return false;
 	}
 	unreachable();
 }
@@ -898,6 +910,127 @@ static const struct btf_kfunc_id_set scx_kfunc_set_cid = {
 	.owner	= THIS_MODULE,
 	.set	= &scx_kfunc_ids_cid,
 };
+
+/**
+ * scx_cmask_ref_init - Bind a scx_cmask_ref to a BPF-arena cmask
+ * @sch: scheduler whose arena hosts @src
+ * @src: BPF-supplied cmask pointer
+ * @ref: output ref
+ *
+ * Snapshot @src's @base, @nr_cids and @alloc_words. The snapshot is necessary
+ * because BPF may mutate the live header asynchronously.
+ *
+ * Return 0 on success, -EINVAL if the range is out of bounds or @alloc_words
+ * doesn't cover it.
+ */
+int scx_cmask_ref_init(struct scx_sched *sch, const struct scx_cmask *src,
+		       struct scx_cmask_ref *ref)
+{
+	struct scx_cmask *kern_src = scx_arena_to_kaddr(sch, src);
+	u32 base, nr_cids, alloc_words, npossible = num_possible_cpus();
+
+	base = READ_ONCE(kern_src->base);
+	nr_cids = READ_ONCE(kern_src->nr_cids);
+	alloc_words = READ_ONCE(kern_src->alloc_words);
+
+	if (unlikely(base >= npossible || nr_cids > npossible - base ||
+		     SCX_CMASK_NR_WORDS(nr_cids) > alloc_words))
+		return -EINVAL;
+
+	ref->sch = sch;
+	ref->src = kern_src;
+	ref->base = base;
+	ref->nr_cids = nr_cids;
+
+	ref->shard_first = scx_cid_to_shard[base];
+	if (likely(nr_cids))
+		ref->shard_end = scx_cid_to_shard[base + nr_cids - 1] + 1;
+	else
+		ref->shard_end = ref->shard_first;
+
+	return 0;
+}
+
+/**
+ * scx_cmask_ref_shard - Read one shard from @ref into @out
+ * @ref: validated ref
+ * @shard_idx: target shard, in [@ref->shard_first, @ref->shard_end)
+ * @out: output cmask whose @out->alloc_words must hold the shard
+ *
+ * Set @out to the intersection of @ref's range with @shard_idx's cid range,
+ * with bits[] read from @ref->src via READ_ONCE. Empty intersection sets
+ * @out->nr_cids to 0. scx_error()s on @ref's sched if @out can't hold the
+ * shard.
+ */
+void scx_cmask_ref_shard(const struct scx_cmask_ref *ref, s32 shard_idx,
+			 struct scx_cmask *out)
+{
+	const struct scx_cid_shard *shard = &scx_cid_shard_ranges[shard_idx];
+	u32 shard_base = shard->base_cid;
+	u32 shard_end = shard_base + shard->nr_cids;
+	u32 isect_base, isect_end, nr_words, src_off, wi;
+	u64 head_mask, tail_mask;
+
+	isect_base = max(ref->base, shard_base);
+	isect_end = min(ref->base + ref->nr_cids, shard_end);
+
+	if (isect_base >= isect_end) {
+		out->base = shard_base;
+		out->nr_cids = 0;
+		return;
+	}
+
+	nr_words = ((isect_end - 1) / 64) - (isect_base / 64) + 1;
+	if (nr_words > out->alloc_words) {
+		scx_error(ref->sch, "scx_cmask_ref_shard: out alloc_words=%u < %u for shard %d",
+			  out->alloc_words, nr_words, shard_idx);
+		out->base = shard_base;
+		out->nr_cids = 0;
+		return;
+	}
+
+	out->base = isect_base;
+	out->nr_cids = isect_end - isect_base;
+	src_off = (isect_base / 64) - (ref->base / 64);
+
+	for (wi = 0; wi < nr_words; wi++)
+		out->bits[wi] = READ_ONCE(ref->src->bits[src_off + wi]);
+
+	head_mask = GENMASK_U64(63, isect_base & 63);
+	out->bits[0] &= head_mask;
+	tail_mask = GENMASK_U64((isect_end - 1) & 63, 0);
+	out->bits[nr_words - 1] &= tail_mask;
+}
+
+/**
+ * scx_cmask_ref_or - OR @src into the arena cmask referenced by @ref
+ * @ref: validated ref
+ * @src: stable kernel cmask
+ *
+ * Bits inside the intersection of @ref's snapshotted range with @src's range
+ * are OR'd into @ref->src and bits outside are left unchanged. Stores on
+ * @ref->src use WRITE_ONCE since BPF may read/write concurrently.
+ */
+void scx_cmask_ref_or(const struct scx_cmask_ref *ref, const struct scx_cmask *src)
+{
+	cmask_walk_op2(ref->src->bits, ref->base, ref->nr_cids,
+		       src->bits, src->base, src->nr_cids, CMASK_OP2_REF_OR);
+}
+
+/**
+ * scx_cmask_ref_copy - Copy @src into the arena cmask referenced by @ref
+ * @ref: validated ref
+ * @src: stable kernel cmask
+ *
+ * Bits inside the intersection of @ref's snapshotted range with @src's range
+ * take @src's values and bits outside are left unchanged. Stores on @ref->src
+ * use WRITE_ONCE since BPF may read/write concurrently.
+ */
+void scx_cmask_ref_copy(const struct scx_cmask_ref *ref, const struct scx_cmask *src)
+{
+	cmask_walk_op2(ref->src->bits, ref->base, ref->nr_cids,
+		       src->bits, src->base, src->nr_cids, CMASK_OP2_REF_COPY);
+}
 
 int scx_cid_kfunc_init(void)
 {

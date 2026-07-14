@@ -116,7 +116,7 @@ struct scx_cmask {
 	u32 base;
 	u32 nr_cids;
 	u32 alloc_words;
-	u64 bits[] __counted_by(alloc_words);
+	u64 bits[];
 };
 
 /*
@@ -171,5 +171,42 @@ struct scx_cmask {
  */
 #define SCX_CMASK_DEFINE_SHARD(NAME, BASE, NR_CIDS)				\
 	__SCX_CMASK_DEFINE(NAME, BASE, NR_CIDS, SCX_CID_SHARD_MAX_CPUS)
+
+/*
+ * scx_cmask_ref: validated reference to a BPF-arena cmask.
+ *
+ * scx_cmask_ref_init() normalizes the pointer into the arena and snapshots
+ * @base/@nr_cids. The snapshot is what downstream code uses for sizing - the
+ * live header can be mutated concurrently by BPF.
+ *
+ * scx_cmask_ref_shard() reads one shard into a cmask. scx_cmask_ref_or() and
+ * scx_cmask_ref_copy() write back into the referenced arena cmask, bounded by
+ * the snapshot.
+ *
+ * Typical input use:
+ *
+ *	struct scx_cmask_ref ref;
+ *	SCX_CMASK_DEFINE(shard, 0, SCX_CID_SHARD_MAX_CPUS);
+ *	s32 idx, ret;
+ *
+ *	ret = scx_cmask_ref_init(sch, src, &ref);
+ *	if (ret < 0)
+ *		return ret;
+ *
+ *	for (idx = ref.shard_first; idx < ref.shard_end; idx++) {
+ *		scx_cmask_ref_shard(&ref, idx, shard);
+ *		if (!shard->nr_cids)
+ *			continue;
+ *		... use idx and shard ...
+ *	}
+ */
+struct scx_cmask_ref {
+	struct scx_sched	*sch;
+	struct scx_cmask	*src;
+	u32			base;
+	u32			nr_cids;
+	s32			shard_first;
+	s32			shard_end;
+};
 
 #endif /* _KERNEL_SCHED_EXT_TYPES_H */
