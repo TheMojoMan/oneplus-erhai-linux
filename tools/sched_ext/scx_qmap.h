@@ -60,6 +60,12 @@ struct qmap_fifo {
 	s32 idx;
 };
 
+/* -J fault-injection modes. Selects inject_mode in struct qmap_arena. */
+enum qmap_inject {
+	QMAP_INJ_OFF		= 0,
+	QMAP_INJ_WRONG_CID	= 1,	/* dispatch to a cid we don't hold */
+};
+
 /*
  * scx_cmask's are embedded in struct qmap_arena with inline backing storage.
  * The bpf side uses &field.mask with the normal cmask_* helpers. Userspace
@@ -167,6 +173,8 @@ struct qmap_arena {
 	/* bpf -> userspace: stats */
 	u64 nr_reenq_cap;		/* SCX_TASK_REENQ_CAP bounces */
 	u64 nr_reenq_immed;		/* SCX_TASK_REENQ_IMMED bounces */
+	u64 nr_inject_attempts;		/* fault-injection: dispatches to an unheld cid */
+	u32 inject_mode;		/* fault-injection mode (QMAP_INJ_*) */
 };
 
 #endif /* __SCX_QMAP_H */
