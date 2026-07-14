@@ -106,6 +106,9 @@ enum pd_ext_msg_type {
 #define PD_HEADER_LE(type, pwr, data, rev, id, cnt) \
 	cpu_to_le16(PD_HEADER((type), (pwr), (data), (rev), (id), (cnt), (0)))
 
+#define PD_HEADER_EXT_LE(type, pwr, data, rev, id, cnt) \
+	cpu_to_le16(PD_HEADER((type), (pwr), (data), (rev), (id), (cnt), (1)))
+
 static inline unsigned int pd_header_cnt(u16 header)
 {
 	return (header >> PD_HEADER_CNT_SHIFT) & PD_HEADER_CNT_MASK;
@@ -218,6 +221,25 @@ static inline u8 count_chunked_data_objs(u32 size)
 	size += offsetof(struct pd_chunked_ext_message_data, data);
 	return ((size / 4) + (size % 4 ? 1 : 0));
 }
+
+/**
+ * batt_cap_ext_msg - Battery capability extended PD message
+ * @vid: Battery Vendor ID (assigned by USB-IF)
+ * @pid: Battery Product ID (assigned by battery or device vendor)
+ * @batt_design_cap: Battery design capacity in 0.1Wh
+ * @batt_last_chg_cap: Battery last full charge capacity in 0.1Wh
+ * @batt_type: Battery Type. bit0 when set indicates invalid battery reference.
+ *             Rest of the bits are reserved.
+ */
+struct batt_cap_ext_msg {
+	__le16 vid;
+	__le16 pid;
+	__le16 batt_design_cap;
+	__le16 batt_last_chg_cap;
+	u8 batt_type;
+} __packed;
+
+#define BATT_CAP_BATT_TYPE_INVALID_REF BIT(0)
 
 /* Sink Caps Extended Data Block Version */
 #define SKEDB_VER_1_0				1

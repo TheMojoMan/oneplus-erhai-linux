@@ -234,7 +234,8 @@ enum pd_msg_request {
 	PD_MSG_DATA_SOURCE_CAP,
 	PD_MSG_DATA_REV,
 	PD_MSG_EXT_SINK_CAP_EXT,
-	PD_MSG_DATA_BATT_STATUS
+	PD_MSG_DATA_BATT_STATUS,
+	PD_MSG_EXT_BATT_CAP,
 };
 
 enum adev_actions {
@@ -1559,6 +1560,14 @@ static int tcpm_pd_send_sink_cap_ext(struct tcpm_port *port)
 	return tcpm_pd_transmit(port, TCPC_TX_SOP, &msg);
 }
 
+static u16 tcpm_charge_to_energy(int charge, int voltage)
+{
+	u64 energy = div_u64((u64)charge * voltage, 1000000);
+
+	/* Battery telemetry is reported in increments of 0.1Wh */
+	return (u16)UW_TO_W(energy * 10);
+}
+
 static int tcpm_pd_send_batt_status(struct tcpm_port *port)
 {
 	u16 present_charge = BATTERY_PROPERTY_UNKNOWN;
@@ -1569,7 +1578,6 @@ static int tcpm_pd_send_batt_status(struct tcpm_port *port)
 	u8 charging_status = 0;
 	struct pd_message msg;
 	int ret, charge_now;
-	u64 energy_now;
 	u32 bsdo;
 
 	tcpm_get_fixed_batt(port);
@@ -1595,16 +1603,9 @@ static int tcpm_pd_send_batt_status(struct tcpm_port *port)
 		ret = power_supply_get_property(batt,
 						POWER_SUPPLY_PROP_VOLTAGE_AVG,
 						&val);
-		if (!ret) {
-			energy_now = div_u64((u64)charge_now * val.intval,
-					     1000000);
-
-			/*
-			 * Battery Present Charge is reported in
-			 * increments of 0.1WH.
-			 */
-			present_charge = (u16)UW_TO_W(energy_now * 10);
-		}
+		if (!ret)
+			present_charge = tcpm_charge_to_energy(charge_now,
+							       val.intval);
 	}
 
 	ret = power_supply_get_property(batt, POWER_SUPPLY_PROP_STATUS, &val);
@@ -1636,6 +1637,71 @@ send_status:
 				  port->negotiated_rev,
 				  port->message_id,
 				  1);
+
+	return tcpm_pd_transmit(port, TCPC_TX_SOP, &msg);
+}
+
+static int tcpm_pd_send_batt_cap(struct tcpm_port *port)
+{
+	u16 design_cap = BATTERY_PROPERTY_UNKNOWN;
+	u16 charge_cap = BATTERY_PROPERTY_UNKNOWN;
+	u32 batt_id = port->batt_request_id;
+	union power_supply_propval val;
+	struct batt_cap_ext_msg bcdb;
+	struct power_supply *batt;
+	bool invalid_ref = true;
+	struct pd_message msg;
+	u8 data_obj_cnt;
+	int ret, vol;
+
+	tcpm_get_fixed_batt(port);
+	memset(&msg, 0, sizeof(msg));
+
+	if (batt_id >= port->fixed_batt_cnt || batt_id >= MAX_NUM_FIXED_BATT)
+		goto send_cap;
+
+	invalid_ref = false;
+	batt = port->fixed_batt[batt_id];
+	ret = power_supply_get_property(batt, POWER_SUPPLY_PROP_VOLTAGE_AVG,
+					&val);
+	if (!ret) {
+		vol = val.intval;
+		ret = power_supply_get_property(batt,
+						POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+						&val);
+		if (!ret)
+			design_cap = tcpm_charge_to_energy(val.intval, vol);
+
+		ret = power_supply_get_property(batt,
+						POWER_SUPPLY_PROP_CHARGE_FULL,
+						&val);
+		if (!ret)
+			charge_cap = tcpm_charge_to_energy(val.intval, vol);
+	}
+
+send_cap:
+
+	/*
+	 * As per the USB PD Rev3.1 v1.8 spec, if a battery VID (assigned by the
+	 * USB-IF) does not exist or an invalid battery reference is made by the
+	 * requestor, then set the VID field to 0xffff. If the VID field is
+	 * 0xffff, set the PID field to 0.
+	 */
+	bcdb.vid = BATTERY_PROPERTY_UNKNOWN;
+	bcdb.pid = 0;
+	bcdb.batt_design_cap = cpu_to_le16(design_cap);
+	bcdb.batt_last_chg_cap = cpu_to_le16(charge_cap);
+	bcdb.batt_type = invalid_ref ? BATT_CAP_BATT_TYPE_INVALID_REF : 0;
+	memcpy(msg.ext_msg.data, &bcdb, sizeof(bcdb));
+	msg.ext_msg.header = PD_EXT_HDR_LE(sizeof(bcdb),
+					   0, /* Denotes if request chunk */
+					   0, /* Chunk number */
+					   1  /* Chunked */);
+
+	data_obj_cnt = count_chunked_data_objs(sizeof(bcdb));
+	msg.header = PD_HEADER_EXT_LE(PD_EXT_BATT_CAP, port->pwr_role,
+				      port->data_role, port->negotiated_rev,
+				      port->message_id, data_obj_cnt);
 
 	return tcpm_pd_transmit(port, TCPC_TX_SOP, &msg);
 }
@@ -4047,8 +4113,16 @@ static void tcpm_pd_ext_msg_request(struct tcpm_port *port,
 			tcpm_set_state(port, SOFT_RESET_SEND, 0);
 		}
 		break;
-	case PD_EXT_SOURCE_CAP_EXT:
 	case PD_EXT_GET_BATT_CAP:
+		if (data_size >= 1) {
+			port->batt_request_id = ext_msg->data[0];
+			tcpm_pd_handle_msg(port, PD_MSG_EXT_BATT_CAP,
+					   GETTING_BATTERY_CAPABILITIES);
+		} else {
+			tcpm_set_state(port, SOFT_RESET_SEND, 0);
+		}
+		break;
+	case PD_EXT_SOURCE_CAP_EXT:
 	case PD_EXT_BATT_CAP:
 	case PD_EXT_GET_MANUFACTURER_INFO:
 	case PD_EXT_MANUFACTURER_INFO:
@@ -4264,6 +4338,14 @@ static bool tcpm_send_queued_message(struct tcpm_port *port)
 			if (ret)
 				tcpm_log(port,
 					 "Failed to send battery status ret=%d",
+					 ret);
+			tcpm_ams_finish(port);
+			break;
+		case PD_MSG_EXT_BATT_CAP:
+			ret = tcpm_pd_send_batt_cap(port);
+			if (ret)
+				tcpm_log(port,
+					 "Failed to send battery cap ret=%d",
 					 ret);
 			tcpm_ams_finish(port);
 			break;
