@@ -112,6 +112,9 @@ static inline u64 scx_missing_caps(struct scx_sched *sch, s32 cpu, u64 needed)
 /* map @enq_flags to the SCX_CAP_* bit required for the local-DSQ insert */
 static inline u64 scx_caps_for_enq(u64 enq_flags)
 {
+	/* a restored task must be put into the local DSQ regardless of caps */
+	if (enq_flags & SCX_ENQ_IGNORE_CAPS)
+		return 0;
 	return 0;
 }
 

@@ -1878,10 +1878,13 @@ static void enqueue_task_scx(struct rq *rq, struct task_struct *p, int core_enq_
 	 * Restoring a running task will be immediately followed by
 	 * set_next_task_scx() which expects the task to not be on the BPF
 	 * scheduler as tasks can only start running through local DSQs. Force
-	 * direct-dispatch into the local DSQ by setting the sticky_cpu.
+	 * direct-dispatch into the local DSQ by setting the sticky_cpu. Mark
+	 * IGNORE_CAPS to force entry into the local DSQ.
 	 */
-	if (unlikely(enq_flags & ENQUEUE_RESTORE) && task_current(rq, p))
+	if (unlikely(enq_flags & ENQUEUE_RESTORE) && task_current(rq, p)) {
 		sticky_cpu = cpu_of(rq);
+		enq_flags |= SCX_ENQ_IGNORE_CAPS;
+	}
 
 	if (p->scx.flags & SCX_TASK_QUEUED) {
 		WARN_ON_ONCE(!task_runnable(p));
