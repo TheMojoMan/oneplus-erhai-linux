@@ -846,6 +846,18 @@ struct sched_ext_ops {
 	u64 hotplug_seq;
 
 	/**
+	 * @cid_shard_size: Target number of CIDs per shard
+	 *
+	 * Shards are contiguous CID ranges used as operation and locking
+	 * domains for sub-scheduling. Each LLC is divided into ceil(nr_cpus /
+	 * @cid_shard_size) shards, then cores are distributed across them
+	 * evenly. If one core has more logical CPUs than @cid_shard_size, its
+	 * shard will become larger than @cid_shard_size. Values above
+	 * SCX_CID_SHARD_MAX_CPUS are capped. 0 means use the default (24).
+	 */
+	u32 cid_shard_size;
+
+	/**
 	 * @cgroup_id: When >1, attach the scheduler as a sub-scheduler on the
 	 * specified cgroup.
 	 */
@@ -977,6 +989,7 @@ struct sched_ext_ops_cid {
 	u32 timeout_ms;
 	u32 exit_dump_len;
 	u64 hotplug_seq;
+	u32 cid_shard_size;
 	u64 sub_cgroup_id;
 	char name[SCX_OPS_NAME_LEN];
 

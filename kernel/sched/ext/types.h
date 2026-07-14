@@ -47,11 +47,16 @@ enum scx_consts {
 };
 
 /*
- * Per-cid topology info. For each topology level (core, LLC, node), records
- * the first cid in the unit and its global index. Global indices are
- * consecutive integers assigned in cid-walk order, so e.g. core_idx ranges
- * over [0, nr_cores_at_init) with no gaps. No-topo cids have all fields set
- * to -1.
+ * Per-cid topology info. For each topology level (core, LLC, node) and shard,
+ * records the first cid in the unit and its global index. Global indices are
+ * consecutive integers assigned in cid-walk order, so e.g. core_idx ranges over
+ * [0, nr_cores_at_init) with no gaps. No-topo cids have core/LLC/node fields
+ * set to -1 but always have valid shard assignments.
+ *
+ * Shards are contiguous CID ranges used as scalable locking/work domains for
+ * sub-scheduler operations. By default each LLC becomes one shard, split into
+ * smaller shards if the LLC exceeds the target size. No-topo cids are packed
+ * into their own max-sized shards.
  *
  * @core_cid: first cid of this cid's core (smt-sibling group)
  * @core_idx: global index of that core, in [0, nr_cores_at_init)
@@ -59,6 +64,8 @@ enum scx_consts {
  * @llc_idx: global index of that LLC, in [0, nr_llcs_at_init)
  * @node_cid: first cid of this cid's NUMA node
  * @node_idx: global index of that node, in [0, nr_nodes_at_init)
+ * @shard_cid: first cid of this cid's shard
+ * @shard_idx: global index of that shard, in [0, scx_nr_cid_shards)
  */
 struct scx_cid_topo {
 	s32 core_cid;
@@ -67,6 +74,24 @@ struct scx_cid_topo {
 	s32 llc_idx;
 	s32 node_cid;
 	s32 node_idx;
+	s32 shard_cid;
+	s32 shard_idx;
+};
+
+enum scx_cid_consts {
+	SCX_CID_SHARD_SIZE_DFL		= 24,
+	SCX_CID_SHARD_MAX_CPUS		= 512,
+};
+
+/*
+ * Per-shard metadata for O(1) shard->cid-range lookup.
+ *
+ * @base_cid: first cid of the shard
+ * @nr_cids: number of cids in the shard
+ */
+struct scx_cid_shard {
+	s32			base_cid;
+	s32			nr_cids;
 };
 
 /*

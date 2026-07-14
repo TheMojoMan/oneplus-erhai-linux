@@ -18,13 +18,17 @@
  * use scx_bpf_cid_override() to change the mapping. The mapping stays stable
  * until the root is disabled.
  */
+u32 scx_nr_cid_shards;
 s16 *scx_cid_to_cpu_tbl;
 s16 *scx_cpu_to_cid_tbl;
+s32 *scx_cid_to_shard;
+s32 *scx_shard_node;
+struct scx_cid_shard *scx_cid_shard_ranges;
 struct scx_cid_topo *scx_cid_topo;
 
 #define SCX_CID_TOPO_NEG	(struct scx_cid_topo) {				\
 	.core_cid = -1, .core_idx = -1, .llc_cid = -1, .llc_idx = -1,		\
-	.node_cid = -1, .node_idx = -1,						\
+	.node_cid = -1, .node_idx = -1, .shard_cid = -1, .shard_idx = -1,	\
 }
 
 /*
@@ -43,11 +47,40 @@ static const struct cpumask *cpu_llc_mask(int cpu, struct cpumask *fallbacks)
 	return &ci->info_list[ci->num_leaves - 1].shared_cpu_map;
 }
 
+/*
+ * Compute per-LLC shard layout. Each shard holds at most @shard_size cids, and
+ * in any case no more than SCX_CID_SHARD_MAX_CPUS. Cores are spread as evenly
+ * as possible across shards so cpu count is balanced: the first *@nr_large_p
+ * shards get (*@cores_per_shard_p + 1) cores, the rest get *@cores_per_shard_p.
+ */
+static void calc_shard_layout(const struct cpumask *llc_cpus, u32 shard_size,
+			      u32 *cores_per_shard_p, u32 *nr_large_p)
+{
+	u32 nr_cores = 0, nr_cpus = 0, nr_shards;
+	int cpu;
+
+	for_each_cpu(cpu, llc_cpus) {
+		nr_cpus++;
+		if (cpumask_first(topology_sibling_cpumask(cpu)) == cpu)
+			nr_cores++;
+	}
+
+	nr_shards = max_t(u32, 1, DIV_ROUND_UP(nr_cpus, shard_size));
+	nr_shards = max_t(u32, nr_shards,
+			  DIV_ROUND_UP(nr_cpus, SCX_CID_SHARD_MAX_CPUS));
+
+	*cores_per_shard_p = nr_cores / nr_shards;
+	*nr_large_p = nr_cores % nr_shards;
+}
+
 /* Allocate the cid tables once on first enable; never freed. */
 static s32 scx_cid_arrays_alloc(void)
 {
 	u32 npossible = num_possible_cpus();
 	s16 *cid_to_cpu, *cpu_to_cid;
+	s32 *cid_to_shard;
+	s32 *shard_node;
+	struct scx_cid_shard *cid_shard_ranges;
 	struct scx_cid_topo *cid_topo;
 
 	if (scx_cid_to_cpu_tbl)
@@ -55,17 +88,27 @@ static s32 scx_cid_arrays_alloc(void)
 
 	cid_to_cpu = kzalloc_objs(*scx_cid_to_cpu_tbl, npossible, GFP_KERNEL);
 	cpu_to_cid = kzalloc_objs(*scx_cpu_to_cid_tbl, nr_cpu_ids, GFP_KERNEL);
+	cid_to_shard = kzalloc_objs(*scx_cid_to_shard, npossible, GFP_KERNEL);
+	shard_node = kmalloc_objs(*scx_shard_node, npossible, GFP_KERNEL);
+	cid_shard_ranges = kzalloc_objs(*scx_cid_shard_ranges, npossible, GFP_KERNEL);
 	cid_topo = kmalloc_objs(*scx_cid_topo, npossible, GFP_KERNEL);
 
-	if (!cid_to_cpu || !cpu_to_cid || !cid_topo) {
+	if (!cid_to_cpu || !cpu_to_cid || !cid_to_shard || !shard_node ||
+	    !cid_shard_ranges || !cid_topo) {
 		kfree(cid_to_cpu);
 		kfree(cpu_to_cid);
+		kfree(cid_to_shard);
+		kfree(shard_node);
+		kfree(cid_shard_ranges);
 		kfree(cid_topo);
 		return -ENOMEM;
 	}
 
 	WRITE_ONCE(scx_cid_to_cpu_tbl, cid_to_cpu);
 	WRITE_ONCE(scx_cpu_to_cid_tbl, cpu_to_cid);
+	WRITE_ONCE(scx_cid_to_shard, cid_to_shard);
+	WRITE_ONCE(scx_shard_node, shard_node);
+	WRITE_ONCE(scx_cid_shard_ranges, cid_shard_ranges);
 	WRITE_ONCE(scx_cid_topo, cid_topo);
 	return 0;
 }
@@ -90,16 +133,28 @@ s32 scx_cid_init(struct scx_sched *sch)
 	cpumask_var_t online_no_topo __free(free_cpumask_var) = CPUMASK_VAR_NULL;
 	u32 next_cid = 0;
 	s32 next_node_idx = 0, next_llc_idx = 0, next_core_idx = 0;
-	s32 cpu, ret;
+	s32 next_shard_idx = 0;
+	u32 shard_size, max_cids;
+	u32 notopo_in_shard;
+	s32 notopo_shard_cid, notopo_shard_idx;
+	s32 cpu, cid, si, ret;
 
 	/* CMASK_MAX_WORDS in cid.bpf.h covers NR_CPUS up to 8192 */
 	BUILD_BUG_ON(NR_CPUS > 8192);
 
 	lockdep_assert_cpus_held();
 
+	shard_size = sch->ops.cid_shard_size ?: SCX_CID_SHARD_SIZE_DFL;
+	max_cids = min_t(u32, shard_size, SCX_CID_SHARD_MAX_CPUS);
+
 	ret = scx_cid_arrays_alloc();
 	if (ret)
 		return ret;
+
+	/* clear shard ranges and reset shard_node for repopulate */
+	memset(scx_cid_shard_ranges, 0, num_possible_cpus() * sizeof(*scx_cid_shard_ranges));
+	for (si = 0; si < num_possible_cpus(); si++)
+		scx_shard_node[si] = NUMA_NO_NODE;
 
 	if (!zalloc_cpumask_var(&to_walk, GFP_KERNEL) ||
 	    !zalloc_cpumask_var(&node_scratch, GFP_KERNEL) ||
@@ -142,11 +197,19 @@ s32 scx_cid_init(struct scx_sched *sch)
 			const struct cpumask *llc_mask = cpu_llc_mask(ncpu, llc_fallback);
 			s32 llc_cid = next_cid;
 			s32 llc_idx = next_llc_idx++;
+			u32 cores_per_shard, nr_large;
+			u32 shard_local = 0, cores_in_shard = 0, cids_in_shard = 0;
+			s32 shard_cid, shard_idx;
 
 			/* llc_scratch = node_scratch & this llc */
 			cpumask_and(llc_scratch, node_scratch, llc_mask);
 			if (WARN_ON_ONCE(!cpumask_test_cpu(ncpu, llc_scratch)))
 				return -EINVAL;
+
+			calc_shard_layout(llc_scratch, shard_size, &cores_per_shard, &nr_large);
+			shard_cid = next_cid;
+			shard_idx = next_shard_idx++;
+			scx_shard_node[shard_idx] = nid;
 
 			while (!cpumask_empty(llc_scratch)) {
 				s32 lcpu = cpumask_first(llc_scratch);
@@ -154,17 +217,40 @@ s32 scx_cid_init(struct scx_sched *sch)
 				s32 core_cid = next_cid;
 				s32 core_idx = next_core_idx++;
 				s32 ccpu;
+				u32 max_cores, cids_in_core;
 
 				/* core_scratch = llc_scratch & this core */
 				cpumask_and(core_scratch, llc_scratch, sib);
 				if (WARN_ON_ONCE(!cpumask_test_cpu(lcpu, core_scratch)))
 					return -EINVAL;
 
+				/*
+				 * Advance to a new shard when either core or
+				 * cid count reaches max. The latter bounds
+				 * shard sizes under uneven SMT. Never start an
+				 * empty shard.
+				 */
+				cids_in_core = cpumask_weight(core_scratch);
+				max_cores = cores_per_shard + (shard_local < nr_large ? 1 : 0);
+				if (cores_in_shard &&
+				    (cores_in_shard >= max_cores ||
+				     cids_in_shard + cids_in_core > max_cids)) {
+					shard_local++;
+					cores_in_shard = 0;
+					cids_in_shard = 0;
+					shard_cid = next_cid;
+					shard_idx = next_shard_idx++;
+					scx_shard_node[shard_idx] = nid;
+				}
+				cores_in_shard++;
+				cids_in_shard += cids_in_core;
+
 				for_each_cpu(ccpu, core_scratch) {
 					s32 cid = next_cid++;
 
 					scx_cid_to_cpu_tbl[cid] = ccpu;
 					scx_cpu_to_cid_tbl[ccpu] = cid;
+					scx_cid_to_shard[cid] = shard_idx;
 					scx_cid_topo[cid] = (struct scx_cid_topo){
 						.core_cid = core_cid,
 						.core_idx = core_idx,
@@ -172,6 +258,8 @@ s32 scx_cid_init(struct scx_sched *sch)
 						.llc_idx = llc_idx,
 						.node_cid = node_cid,
 						.node_idx = node_idx,
+						.shard_cid = shard_cid,
+						.shard_idx = shard_idx,
 					};
 
 					cpumask_clear_cpu(ccpu, llc_scratch);
@@ -184,12 +272,17 @@ s32 scx_cid_init(struct scx_sched *sch)
 
 	/*
 	 * No-topo section: any possible cpu without a cid - normally just the
-	 * not-online ones. Collect any currently-online cpus that land here in
-	 * @online_no_topo so we can warn about them at the end.
+	 * not-online ones. Pack into shards of up to min(@shard_size,
+	 * SCX_CID_SHARD_MAX_CPUS) cids so that every cid has a valid shard
+	 * assignment and the hard cap holds even with a large @shard_size.
+	 * Collect any currently-online cpus that land here in @online_no_topo
+	 * so we can warn about them at the end.
 	 */
-	for_each_cpu(cpu, cpu_possible_mask) {
-		s32 cid;
+	notopo_in_shard = min_t(u32, shard_size, SCX_CID_SHARD_MAX_CPUS);
+	notopo_shard_cid = -1;
+	notopo_shard_idx = -1;
 
+	for_each_cpu(cpu, cpu_possible_mask) {
 		if (__scx_cpu_to_cid(cpu) != -1)
 			continue;
 		if (cpu_online(cpu))
@@ -198,7 +291,18 @@ s32 scx_cid_init(struct scx_sched *sch)
 		cid = next_cid++;
 		scx_cid_to_cpu_tbl[cid] = cpu;
 		scx_cpu_to_cid_tbl[cpu] = cid;
+
+		if (notopo_in_shard >= min_t(u32, shard_size, SCX_CID_SHARD_MAX_CPUS)) {
+			notopo_shard_cid = cid;
+			notopo_shard_idx = next_shard_idx++;
+			notopo_in_shard = 0;
+		}
+		notopo_in_shard++;
+
+		scx_cid_to_shard[cid] = notopo_shard_idx;
 		scx_cid_topo[cid] = SCX_CID_TOPO_NEG;
+		scx_cid_topo[cid].shard_cid = notopo_shard_cid;
+		scx_cid_topo[cid].shard_idx = notopo_shard_idx;
 	}
 
 	if (!cpumask_empty(llc_fallback))
@@ -208,6 +312,20 @@ s32 scx_cid_init(struct scx_sched *sch)
 		pr_warn("scx_cid: online cpus with no usable topology: %*pbl\n",
 			cpumask_pr_args(online_no_topo));
 
+	/*
+	 * Fill cid_shard_ranges[] from cid_to_shard[]. Shards are contiguous
+	 * cid ranges by construction: base_cid is the first cid landing in a
+	 * shard, nr_cids is the count.
+	 */
+	for (cid = 0; cid < next_cid; cid++) {
+		s32 sidx = scx_cid_to_shard[cid];
+
+		if (scx_cid_shard_ranges[sidx].nr_cids == 0)
+			scx_cid_shard_ranges[sidx].base_cid = cid;
+		scx_cid_shard_ranges[sidx].nr_cids++;
+	}
+
+	scx_nr_cid_shards = next_shard_idx;
 	return 0;
 }
 

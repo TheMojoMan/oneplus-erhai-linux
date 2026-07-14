@@ -48,8 +48,12 @@ struct scx_sched;
  * See the comment above the table definitions in cid.c for the
  * memory-ordering and visibility contract.
  */
+extern u32 scx_nr_cid_shards;
 extern s16 *scx_cid_to_cpu_tbl;
 extern s16 *scx_cpu_to_cid_tbl;
+extern s32 *scx_cid_to_shard;
+extern s32 *scx_shard_node;
+extern struct scx_cid_shard *scx_cid_shard_ranges;
 extern struct scx_cid_topo *scx_cid_topo;
 extern struct btf_id_set8 scx_kfunc_ids_init_cids;
 
