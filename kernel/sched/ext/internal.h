@@ -780,8 +780,17 @@ struct sched_ext_ops {
 	void (*cpu_offline)(s32 cpu);
 
 	/*
-	 * All CPU hotplug ops must come before ops.init().
+	 * All CPU hotplug ops must come before ops.init_cids().
 	 */
+
+	/**
+	 * @init_cids: Finalize the cid layout (cid-form only)
+	 *
+	 * Runs after the default cid layout is built, before ops.init(). A
+	 * cid-form scheduler may call scx_bpf_cid_override() here for a custom
+	 * layout. Ignored for cpu-form schedulers.
+	 */
+	s32 (*init_cids)(void);
 
 	/**
 	 * @init: Initialize the BPF scheduler
@@ -958,6 +967,7 @@ struct sched_ext_ops_cid {
 	void (*sub_detach)(struct scx_sub_detach_args *args);
 	void (*cid_online)(s32 cid);
 	void (*cid_offline)(s32 cid);
+	s32 (*init_cids)(void);
 	s32 (*init)(void);
 	void (*exit)(struct scx_exit_info *info);
 
@@ -982,8 +992,8 @@ enum scx_opi {
 	SCX_OPI_NORMAL_BEGIN		= 0,
 	SCX_OPI_NORMAL_END		= SCX_OP_IDX(cpu_online),
 	SCX_OPI_CPU_HOTPLUG_BEGIN	= SCX_OP_IDX(cpu_online),
-	SCX_OPI_CPU_HOTPLUG_END		= SCX_OP_IDX(init),
-	SCX_OPI_END			= SCX_OP_IDX(init),
+	SCX_OPI_CPU_HOTPLUG_END		= SCX_OP_IDX(init_cids),
+	SCX_OPI_END			= SCX_OP_IDX(init_cids),
 };
 
 /*

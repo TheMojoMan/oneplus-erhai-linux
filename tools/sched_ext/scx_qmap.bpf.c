@@ -54,13 +54,9 @@ const volatile u32 max_tasks;
 
 /*
  * Optional cid-override test harness. When cid_override_mode is non-zero,
- * qmap_init() calls scx_bpf_cid_override() with the caller-supplied
- * cpu_to_cid array to exercise the kfunc's acceptance and error paths.
- *
- *   0 = disabled
- *   1 = valid reverse mapping
- *   2 = invalid: duplicate cid assignment
- *   3 = invalid: out-of-range cid
+ * qmap_init_cids() calls scx_bpf_cid_override() with the caller-supplied
+ * cpu_to_cid array to exercise the kfunc's acceptance and error paths. See enum
+ * qmap_cid_override for the modes.
  */
 const volatile u32 cid_override_mode;
 /*
@@ -1067,6 +1063,29 @@ static int lowpri_timerfn(void *map, int *key, struct bpf_timer *timer)
 	return 0;
 }
 
+/*
+ * Custom cid layout for the cid-override test. On invalid input the kfunc
+ * scx_error()s and aborts the scheduler.
+ */
+s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init_cids)
+{
+	u32 nr_cpu_ids = scx_bpf_nr_cpu_ids();
+
+	if (!cid_override_mode)
+		return 0;
+
+	/* bound the count so the verifier accepts cpu_to_cid's mem/len pair */
+	if (nr_cpu_ids > SCX_QMAP_MAX_CPUS) {
+		scx_bpf_error("nr_cpu_ids=%u exceeds SCX_QMAP_MAX_CPUS=%d",
+			      nr_cpu_ids, SCX_QMAP_MAX_CPUS);
+		return -EINVAL;
+	}
+
+	scx_bpf_cid_override((const s32 *)cid_override_cpu_to_cid,
+			     nr_cpu_ids * sizeof(s32));
+	return 0;
+}
+
 s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init)
 {
 	u8 __arena *slab;
@@ -1087,16 +1106,6 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init)
 		scx_bpf_error("nr_cpu_ids=%u exceeds SCX_QMAP_MAX_CPUS=%d",
 			      nr_cpu_ids, SCX_QMAP_MAX_CPUS);
 		return -EINVAL;
-	}
-
-	/*
-	 * cid-override test hook. Must run before anything that reads the
-	 * cid space (scx_bpf_nr_cids, cmask_init, etc.). On invalid input,
-	 * the kfunc calls scx_error() which aborts the scheduler.
-	 */
-	if (cid_override_mode) {
-		scx_bpf_cid_override((const s32 *)cid_override_cpu_to_cid,
-				     nr_cpu_ids * sizeof(s32));
 	}
 
 	/*
@@ -1235,6 +1244,7 @@ SCX_OPS_CID_DEFINE(qmap_ops,
 	       .cgroup_set_bandwidth	= (void *)qmap_cgroup_set_bandwidth,
 	       .sub_attach		= (void *)qmap_sub_attach,
 	       .sub_detach		= (void *)qmap_sub_detach,
+	       .init_cids		= (void *)qmap_init_cids,
 	       .init			= (void *)qmap_init,
 	       .exit			= (void *)qmap_exit,
 	       .timeout_ms		= 5000U,

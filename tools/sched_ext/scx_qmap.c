@@ -157,11 +157,11 @@ restart:
 			u32 mode, i;
 
 			if (!strcmp(optarg, "shuffle"))
-				mode = 1;
+				mode = QMAP_CID_OVR_SHUFFLE;
 			else if (!strcmp(optarg, "bad-dup"))
-				mode = 2;
+				mode = QMAP_CID_OVR_BAD_DUP;
 			else if (!strcmp(optarg, "bad-range"))
-				mode = 3;
+				mode = QMAP_CID_OVR_BAD_RANGE;
 			else {
 				fprintf(stderr, "unknown cid-override mode '%s'\n", optarg);
 				return 1;
@@ -170,14 +170,14 @@ restart:
 
 			/* shuffle: reversed cpu_to_cid, bad-dup: dup cid 0, bad-range: identity */
 			for (i = 0; i < nr_cpus; i++) {
-				if (mode == 1)
+				if (mode == QMAP_CID_OVR_SHUFFLE)
 					skel->bss->cid_override_cpu_to_cid[i] = nr_cpus - 1 - i;
 				else
 					skel->bss->cid_override_cpu_to_cid[i] = i;
 			}
-			if (mode == 2 && nr_cpus >= 2)
+			if (mode == QMAP_CID_OVR_BAD_DUP && nr_cpus >= 2)
 				skel->bss->cid_override_cpu_to_cid[1] = 0;
-			if (mode == 3)
+			if (mode == QMAP_CID_OVR_BAD_RANGE)
 				skel->bss->cid_override_cpu_to_cid[0] = (s32)nr_cpus;
 			break;
 		}

@@ -27,6 +27,14 @@
  */
 #define SCX_QMAP_MAX_CPUS	1024
 
+/* -C cid-override test modes. Selects cid_override_mode in scx_qmap.bpf.c. */
+enum qmap_cid_override {
+	QMAP_CID_OVR_OFF	= 0,	/* disabled */
+	QMAP_CID_OVR_SHUFFLE	= 1,	/* valid reversed cpu->cid mapping */
+	QMAP_CID_OVR_BAD_DUP	= 2,	/* invalid: duplicate cid assignment */
+	QMAP_CID_OVR_BAD_RANGE	= 3,	/* invalid: out-of-range cid */
+};
+
 struct cpu_ctx {
 	u64 dsp_idx;		/* dispatch index */
 	u64 dsp_cnt;		/* remaining count */

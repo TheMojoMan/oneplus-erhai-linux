@@ -13,10 +13,10 @@
 /*
  * cid tables.
  *
- * Pointers are published once on first enable and never revoked. The default
- * mapping is populated before ops.init() runs; scx_bpf_cid_override() commits
- * before it returns. As long as the BPF scheduler only uses the tables from
- * those points onward, it sees a consistent view.
+ * Pointers are allocated on first enable and never freed. During root enable,
+ * the default mapping is populated and then ops.init_cids() is called which can
+ * use scx_bpf_cid_override() to change the mapping. The mapping stays stable
+ * until the root is disabled.
  */
 s16 *scx_cid_to_cpu_tbl;
 s16 *scx_cpu_to_cid_tbl;
@@ -282,7 +282,7 @@ __bpf_kfunc_start_defs();
  * @cpu_to_cid__sz: must be nr_cpu_ids * sizeof(s32) bytes
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
- * May only be called from ops.init() of the root scheduler. Replace the
+ * May only be called from ops.init_cids() of the root scheduler. Replace the
  * topology-probed cid mapping with the caller-provided one. Each possible cpu
  * must map to a unique cid in [0, num_possible_cpus()). Topo info is cleared.
  * On invalid input, trigger scx_error() to abort the scheduler.
@@ -306,11 +306,6 @@ __bpf_kfunc void scx_bpf_cid_override(const s32 *cpu_to_cid, u32 cpu_to_cid__sz,
 
 	if (!alloced) {
 		scx_error(sch, "scx_bpf_cid_override: failed to allocate cpumask");
-		return;
-	}
-
-	if (scx_parent(sch)) {
-		scx_error(sch, "scx_bpf_cid_override() only allowed from root sched");
 		return;
 	}
 
@@ -645,13 +640,13 @@ __bpf_kfunc void scx_bpf_cid_topo(s32 cid, struct scx_cid_topo *out__uninit,
 
 __bpf_kfunc_end_defs();
 
-BTF_KFUNCS_START(scx_kfunc_ids_init)
+BTF_KFUNCS_START(scx_kfunc_ids_init_cids)
 BTF_ID_FLAGS(func, scx_bpf_cid_override, KF_IMPLICIT_ARGS | KF_SLEEPABLE)
-BTF_KFUNCS_END(scx_kfunc_ids_init)
+BTF_KFUNCS_END(scx_kfunc_ids_init_cids)
 
-static const struct btf_kfunc_id_set scx_kfunc_set_init = {
+static const struct btf_kfunc_id_set scx_kfunc_set_init_cids = {
 	.owner	= THIS_MODULE,
-	.set	= &scx_kfunc_ids_init,
+	.set	= &scx_kfunc_ids_init_cids,
 	.filter	= scx_kfunc_context_filter,
 };
 
@@ -668,7 +663,7 @@ static const struct btf_kfunc_id_set scx_kfunc_set_cid = {
 
 int scx_cid_kfunc_init(void)
 {
-	return register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &scx_kfunc_set_init) ?:
+	return register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &scx_kfunc_set_init_cids) ?:
 		register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS, &scx_kfunc_set_cid) ?:
 		register_btf_kfunc_id_set(BPF_PROG_TYPE_TRACING, &scx_kfunc_set_cid) ?:
 		register_btf_kfunc_id_set(BPF_PROG_TYPE_SYSCALL, &scx_kfunc_set_cid);

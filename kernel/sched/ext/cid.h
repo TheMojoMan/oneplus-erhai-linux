@@ -51,7 +51,7 @@ struct scx_sched;
 extern s16 *scx_cid_to_cpu_tbl;
 extern s16 *scx_cpu_to_cid_tbl;
 extern struct scx_cid_topo *scx_cid_topo;
-extern struct btf_id_set8 scx_kfunc_ids_init;
+extern struct btf_id_set8 scx_kfunc_ids_init_cids;
 
 void scx_cmask_clear(struct scx_cmask *m);
 void scx_cmask_fill(struct scx_cmask *m);

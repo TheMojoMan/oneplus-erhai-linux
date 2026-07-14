@@ -6725,15 +6725,19 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 
 	scx_idle_enable(ops);
 
-	if (sch->ops.init) {
-		ret = SCX_CALL_OP_RET(sch, init, NULL);
+	/*
+	 * A cid-form scheduler finalizes its cid layout in ops.init_cids(),
+	 * which may call scx_bpf_cid_override(). Run it before ops.init() so
+	 * the final layout is in effect.
+	 */
+	if (sch->is_cid_type && sch->ops_cid.init_cids) {
+		ret = SCX_CALL_OP_RET(sch, init_cids, NULL);
 		if (ret) {
-			ret = scx_ops_sanitize_err(sch, "init", ret);
+			ret = scx_ops_sanitize_err(sch, "init_cids", ret);
 			cpus_read_unlock();
-			scx_error(sch, "ops.init() failed (%d)", ret);
+			scx_error(sch, "ops.init_cids() failed (%d)", ret);
 			goto err_disable;
 		}
-		sch->exit_info->flags |= SCX_EFLAG_INITIALIZED;
 	}
 
 	ret = scx_arena_pool_init(sch);
@@ -6746,6 +6750,17 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 	if (ret) {
 		cpus_read_unlock();
 		goto err_disable;
+	}
+
+	if (sch->ops.init) {
+		ret = SCX_CALL_OP_RET(sch, init, NULL);
+		if (ret) {
+			ret = scx_ops_sanitize_err(sch, "init", ret);
+			cpus_read_unlock();
+			scx_error(sch, "ops.init() failed (%d)", ret);
+			goto err_disable;
+		}
+		sch->exit_info->flags |= SCX_EFLAG_INITIALIZED;
 	}
 
 	for (i = SCX_OPI_CPU_HOTPLUG_BEGIN; i < SCX_OPI_CPU_HOTPLUG_END; i++)
@@ -7184,6 +7199,7 @@ static int bpf_scx_check_member(const struct btf_type *t,
 #endif
 	case offsetof(struct sched_ext_ops, cpu_online):
 	case offsetof(struct sched_ext_ops, cpu_offline):
+	case offsetof(struct sched_ext_ops, init_cids):
 	case offsetof(struct sched_ext_ops, init):
 	case offsetof(struct sched_ext_ops, exit):
 	case offsetof(struct sched_ext_ops, sub_attach):
@@ -7342,6 +7358,7 @@ static s32 sched_ext_ops__sub_attach(struct scx_sub_attach_args *args) { return 
 static void sched_ext_ops__sub_detach(struct scx_sub_detach_args *args) {}
 static void sched_ext_ops__cpu_online(s32 cpu) {}
 static void sched_ext_ops__cpu_offline(s32 cpu) {}
+static s32 sched_ext_ops__init_cids(void) { return -EINVAL; }
 static s32 sched_ext_ops__init(void) { return -EINVAL; }
 static void sched_ext_ops__exit(struct scx_exit_info *info) {}
 static void sched_ext_ops__dump(struct scx_dump_ctx *ctx) {}
@@ -7383,6 +7400,7 @@ static struct sched_ext_ops __bpf_ops_sched_ext_ops = {
 	.sub_detach		= sched_ext_ops__sub_detach,
 	.cpu_online		= sched_ext_ops__cpu_online,
 	.cpu_offline		= sched_ext_ops__cpu_offline,
+	.init_cids		= sched_ext_ops__init_cids,
 	.init			= sched_ext_ops__init,
 	.exit			= sched_ext_ops__exit,
 	.dump			= sched_ext_ops__dump,
@@ -7445,6 +7463,7 @@ static struct sched_ext_ops_cid __bpf_ops_sched_ext_ops_cid = {
 	.sub_detach		= sched_ext_ops__sub_detach,
 	.cid_online		= sched_ext_ops__cpu_online,
 	.cid_offline		= sched_ext_ops__cpu_offline,
+	.init_cids		= sched_ext_ops__init_cids,
 	.init			= sched_ext_ops__init,
 	.exit			= sched_ext_ops__exit,
 	.dump			= sched_ext_ops__dump,
@@ -9703,7 +9722,7 @@ BTF_KFUNCS_END(scx_kfunc_ids_cpu_only)
  */
 enum scx_kf_allow_flags {
 	SCX_KF_ALLOW_UNLOCKED		= 1 << 0,
-	SCX_KF_ALLOW_INIT		= 1 << 1,
+	SCX_KF_ALLOW_INIT_CIDS		= 1 << 1,
 	SCX_KF_ALLOW_CPU_RELEASE	= 1 << 2,
 	SCX_KF_ALLOW_DISPATCH		= 1 << 3,
 	SCX_KF_ALLOW_ENQUEUE		= 1 << 4,
@@ -9735,7 +9754,8 @@ static const u32 scx_kf_allow_flags[] = {
 	[SCX_OP_IDX(sub_detach)]	= SCX_KF_ALLOW_UNLOCKED,
 	[SCX_OP_IDX(cpu_online)]	= SCX_KF_ALLOW_UNLOCKED,
 	[SCX_OP_IDX(cpu_offline)]	= SCX_KF_ALLOW_UNLOCKED,
-	[SCX_OP_IDX(init)]		= SCX_KF_ALLOW_UNLOCKED | SCX_KF_ALLOW_INIT,
+	[SCX_OP_IDX(init_cids)]		= SCX_KF_ALLOW_UNLOCKED | SCX_KF_ALLOW_INIT_CIDS,
+	[SCX_OP_IDX(init)]		= SCX_KF_ALLOW_UNLOCKED,
 	[SCX_OP_IDX(exit)]		= SCX_KF_ALLOW_UNLOCKED,
 };
 
@@ -9750,7 +9770,7 @@ static const u32 scx_kf_allow_flags[] = {
 int scx_kfunc_context_filter(const struct bpf_prog *prog, u32 kfunc_id)
 {
 	bool in_unlocked = btf_id_set8_contains(&scx_kfunc_ids_unlocked, kfunc_id);
-	bool in_init = btf_id_set8_contains(&scx_kfunc_ids_init, kfunc_id);
+	bool in_init_cids = btf_id_set8_contains(&scx_kfunc_ids_init_cids, kfunc_id);
 	bool in_select_cpu = btf_id_set8_contains(&scx_kfunc_ids_select_cpu, kfunc_id);
 	bool in_enqueue = btf_id_set8_contains(&scx_kfunc_ids_enqueue_dispatch, kfunc_id);
 	bool in_dispatch = btf_id_set8_contains(&scx_kfunc_ids_dispatch, kfunc_id);
@@ -9761,7 +9781,7 @@ int scx_kfunc_context_filter(const struct bpf_prog *prog, u32 kfunc_id)
 	u32 moff, flags;
 
 	/* Not an SCX kfunc - allow. */
-	if (!(in_unlocked || in_init || in_select_cpu || in_enqueue || in_dispatch ||
+	if (!(in_unlocked || in_init_cids || in_select_cpu || in_enqueue || in_dispatch ||
 	      in_cpu_release || in_idle || in_any))
 		return 0;
 
@@ -9813,7 +9833,7 @@ int scx_kfunc_context_filter(const struct bpf_prog *prog, u32 kfunc_id)
 
 	if ((flags & SCX_KF_ALLOW_UNLOCKED) && in_unlocked)
 		return 0;
-	if ((flags & SCX_KF_ALLOW_INIT) && in_init)
+	if ((flags & SCX_KF_ALLOW_INIT_CIDS) && in_init_cids)
 		return 0;
 	if ((flags & SCX_KF_ALLOW_CPU_RELEASE) && in_cpu_release)
 		return 0;
@@ -9869,6 +9889,7 @@ static int __init scx_init(void)
 	CID_OFFSET_MATCH(dump_task, dump_task);
 	CID_OFFSET_MATCH(sub_attach, sub_attach);
 	CID_OFFSET_MATCH(sub_detach, sub_detach);
+	CID_OFFSET_MATCH(init_cids, init_cids);
 	CID_OFFSET_MATCH(init, init);
 	CID_OFFSET_MATCH(exit, exit);
 #ifdef CONFIG_EXT_GROUP_SCHED
