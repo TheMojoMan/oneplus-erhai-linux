@@ -155,8 +155,8 @@ static void iwl_mvm_rx_monitor_notif(struct iwl_mvm *mvm,
 	if (notif->type != cpu_to_le32(IWL_DP_MON_NOTIF_TYPE_EXT_CCA))
 		return;
 
-	/* FIXME: should fetch the link and not the vif */
-	vif = iwl_mvm_get_vif_by_macid(mvm, notif->link_id);
+	/* mac_id = link_id since we don't support MLO */
+	vif = iwl_mvm_rcu_dereference_vif_id(mvm, notif->link_id, false);
 	if (!vif || vif->type != NL80211_IFTYPE_STATION)
 		return;
 
