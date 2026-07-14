@@ -33,6 +33,7 @@ enum qmap_cid_override {
 	QMAP_CID_OVR_SHUFFLE	= 1,	/* valid reversed cpu->cid mapping */
 	QMAP_CID_OVR_BAD_DUP	= 2,	/* invalid: duplicate cid assignment */
 	QMAP_CID_OVR_BAD_RANGE	= 3,	/* invalid: out-of-range cid */
+	QMAP_CID_OVR_BAD_MONO	= 4,	/* invalid: non-monotonic shard_start */
 };
 
 struct cpu_ctx {

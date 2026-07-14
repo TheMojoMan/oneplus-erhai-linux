@@ -43,7 +43,7 @@ const char help_fmt[] =
 "  -p            Switch only tasks on SCHED_EXT policy instead of all\n"
 "  -I            Turn on SCX_OPS_ALWAYS_ENQ_IMMED\n"
 "  -F COUNT      IMMED stress: force every COUNT'th enqueue to a busy local DSQ (use with -I)\n"
-"  -C MODE       cid-override test (shuffle|bad-dup|bad-range)\n"
+"  -C MODE       cid-override test (shuffle|bad-dup|bad-range|bad-mono)\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
@@ -155,6 +155,7 @@ restart:
 		case 'C': {
 			u32 nr_cpus = libbpf_num_possible_cpus();
 			u32 mode, i;
+			s32 shard_sz = 4;
 
 			if (!strcmp(optarg, "shuffle"))
 				mode = QMAP_CID_OVR_SHUFFLE;
@@ -162,13 +163,15 @@ restart:
 				mode = QMAP_CID_OVR_BAD_DUP;
 			else if (!strcmp(optarg, "bad-range"))
 				mode = QMAP_CID_OVR_BAD_RANGE;
+			else if (!strcmp(optarg, "bad-mono"))
+				mode = QMAP_CID_OVR_BAD_MONO;
 			else {
 				fprintf(stderr, "unknown cid-override mode '%s'\n", optarg);
 				return 1;
 			}
 			skel->rodata->cid_override_mode = mode;
 
-			/* shuffle: reversed cpu_to_cid, bad-dup: dup cid 0, bad-range: identity */
+			/* shuffle: reversed cpu_to_cid; others: identity */
 			for (i = 0; i < nr_cpus; i++) {
 				if (mode == QMAP_CID_OVR_SHUFFLE)
 					skel->bss->cid_override_cpu_to_cid[i] = nr_cpus - 1 - i;
@@ -179,6 +182,33 @@ restart:
 				skel->bss->cid_override_cpu_to_cid[1] = 0;
 			if (mode == QMAP_CID_OVR_BAD_RANGE)
 				skel->bss->cid_override_cpu_to_cid[0] = (s32)nr_cpus;
+
+			/*
+			 * bad-mono needs >= 3 shards to build a 0-based but
+			 * non-monotonic shard_start. Shrink the shard size so
+			 * the test runs on any machine with >= 3 cpus.
+			 */
+			if (mode == QMAP_CID_OVR_BAD_MONO) {
+				if (nr_cpus < 3) {
+					fprintf(stderr, "bad-mono needs >= 3 cpus (have %u)\n",
+						nr_cpus);
+					return 1;
+				}
+				shard_sz = nr_cpus / 3;
+			}
+
+			/* shards of shard_sz each */
+			skel->rodata->cid_override_nr_shards = (nr_cpus + shard_sz - 1) / shard_sz;
+			for (i = 0; i < skel->rodata->cid_override_nr_shards; i++)
+				skel->bss->cid_override_shard_start[i] = i * shard_sz;
+
+			if (mode == QMAP_CID_OVR_BAD_MONO) {
+				/* swap [1] and [2] to break monotonicity */
+				s32 tmp = skel->bss->cid_override_shard_start[1];
+				skel->bss->cid_override_shard_start[1] =
+					skel->bss->cid_override_shard_start[2];
+				skel->bss->cid_override_shard_start[2] = tmp;
+			}
 			break;
 		}
 		case 'v':

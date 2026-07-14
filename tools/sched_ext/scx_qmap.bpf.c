@@ -54,18 +54,20 @@ const volatile u32 max_tasks;
 
 /*
  * Optional cid-override test harness. When cid_override_mode is non-zero,
- * qmap_init_cids() calls scx_bpf_cid_override() with the caller-supplied
- * cpu_to_cid array to exercise the kfunc's acceptance and error paths. See enum
+ * qmap_init_cids() calls scx_bpf_cid_override() with the caller-supplied arrays
+ * to exercise the kfunc's acceptance and error paths. See enum
  * qmap_cid_override for the modes.
  */
 const volatile u32 cid_override_mode;
+const volatile u32 cid_override_nr_shards;
 /*
- * Array lives in bss (writable) because scx_bpf_cid_override()'s BPF
- * verifier signature treats its len-paired pointer as read/write - rodata
+ * Arrays live in bss (writable) because scx_bpf_cid_override()'s BPF
+ * verifier signature treats its len-paired pointers as read/write - rodata
  * fails verification with "write into map forbidden". Userspace populates
- * it before SCX_OPS_LOAD, same as rodata, and nothing writes it after.
+ * them before SCX_OPS_LOAD, same as rodata, and nothing writes them after.
  */
 s32 cid_override_cpu_to_cid[SCX_QMAP_MAX_CPUS];
+s32 cid_override_shard_start[SCX_QMAP_MAX_CPUS];
 
 UEI_DEFINE(uei);
 
@@ -1082,7 +1084,9 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init_cids)
 	}
 
 	scx_bpf_cid_override((const s32 *)cid_override_cpu_to_cid,
-			     nr_cpu_ids * sizeof(s32));
+			     nr_cpu_ids * sizeof(s32),
+			     (const s32 *)cid_override_shard_start,
+			     cid_override_nr_shards * sizeof(s32));
 	return 0;
 }
 

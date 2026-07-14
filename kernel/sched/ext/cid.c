@@ -392,29 +392,66 @@ void scx_cpumask_to_cmask(const struct cpumask *src, struct scx_cmask *dst)
 	}
 }
 
+/*
+ * Return the index of the largest entry in @counts, or NUMA_NO_NODE if all
+ * entries are zero. Ties resolve to the lowest index.
+ */
+static s32 pick_max_node(const u32 *counts, u32 n)
+{
+	s32 best = NUMA_NO_NODE;
+	u32 best_count = 0, i;
+
+	for (i = 0; i < n; i++) {
+		if (counts[i] > best_count) {
+			best_count = counts[i];
+			best = i;
+		}
+	}
+	return best;
+}
+
 __bpf_kfunc_start_defs();
 
 /**
- * scx_bpf_cid_override - Install an explicit cpu->cid mapping
- * @cpu_to_cid: array of nr_cpu_ids s32 entries (cid for each cpu)
- * @cpu_to_cid__sz: must be nr_cpu_ids * sizeof(s32) bytes
+ * scx_bpf_cid_override - Install an explicit cpu->cid mapping with shard info
+ * @cpu_to_cid_src: array of nr_cpu_ids s32 entries (cid for each cpu)
+ * @cpu_to_cid_src__sz: must be nr_cpu_ids * sizeof(s32) bytes
+ * @shard_start_src: array of first-cid-of-each-shard, strictly increasing from 0
+ * @shard_start_src__sz: nr_shards * sizeof(s32) bytes
  * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
  *
  * May only be called from ops.init_cids() of the root scheduler. Replace the
- * topology-probed cid mapping with the caller-provided one. Each possible cpu
- * must map to a unique cid in [0, num_possible_cpus()). Topo info is cleared.
- * On invalid input, trigger scx_error() to abort the scheduler.
+ * topology-probed cid mapping and shard layout with caller-provided ones. Each
+ * possible cpu must map to a unique cid in [0, num_possible_cpus()). The shard
+ * starts must be strictly increasing with the first entry 0 and all values <
+ * num_possible_cpus(). The last shard extends to num_possible_cpus() and no
+ * shard may span more than SCX_CID_SHARD_MAX_CPUS cids. Topo info
+ * (core/LLC/node) is cleared and the shard layout is set from the input. On
+ * invalid input, abort the scheduler.
  */
-__bpf_kfunc void scx_bpf_cid_override(const s32 *cpu_to_cid, u32 cpu_to_cid__sz,
-				      const struct bpf_prog_aux *aux)
+__bpf_kfunc void scx_bpf_cid_override(const s32 *cpu_to_cid_src, u32 cpu_to_cid_src__sz,
+				       const s32 *shard_start_src, u32 shard_start_src__sz,
+				       const struct bpf_prog_aux *aux)
 {
 	cpumask_var_t seen __free(free_cpumask_var) = CPUMASK_VAR_NULL;
+	u32 *node_counts __free(kfree) = NULL;
+	s32 *cpu_to_cid __free(kfree) = NULL;
+	s32 *shard_start __free(kfree) = NULL;
+	u32 npossible = num_possible_cpus();
 	struct scx_sched *sch;
+	u32 nr_shards;
 	bool alloced;
-	s32 cpu, cid;
+	s32 cpu, cid, si;
 
-	/* GFP_KERNEL alloc must happen before the rcu read section */
+	/*
+	 * GFP_KERNEL allocs must happen before the rcu read section. Snapshot
+	 * the BPF-supplied arrays so a concurrent map mutation can't change
+	 * them between validation and use.
+	 */
 	alloced = zalloc_cpumask_var(&seen, GFP_KERNEL);
+	node_counts = kcalloc(nr_node_ids, sizeof(*node_counts), GFP_KERNEL);
+	cpu_to_cid = kmemdup(cpu_to_cid_src, cpu_to_cid_src__sz, GFP_KERNEL);
+	shard_start = kmemdup(shard_start_src, shard_start_src__sz, GFP_KERNEL);
 
 	guard(rcu)();
 
@@ -422,17 +459,57 @@ __bpf_kfunc void scx_bpf_cid_override(const s32 *cpu_to_cid, u32 cpu_to_cid__sz,
 	if (unlikely(!sch))
 		return;
 
-	if (!alloced) {
-		scx_error(sch, "scx_bpf_cid_override: failed to allocate cpumask");
+	if (!alloced || !node_counts || !cpu_to_cid || !shard_start) {
+		scx_error(sch, "scx_bpf_cid_override: allocation failed");
 		return;
 	}
 
-	if (cpu_to_cid__sz != nr_cpu_ids * sizeof(s32)) {
-		scx_error(sch, "scx_bpf_cid_override: expected %zu bytes, got %u",
-			  nr_cpu_ids * sizeof(s32), cpu_to_cid__sz);
+	if (cpu_to_cid_src__sz != nr_cpu_ids * sizeof(s32)) {
+		scx_error(sch, "scx_bpf_cid_override: cpu_to_cid expected %zu bytes, got %u",
+			  nr_cpu_ids * sizeof(s32), cpu_to_cid_src__sz);
 		return;
 	}
 
+	if (!shard_start_src__sz || shard_start_src__sz % sizeof(s32)) {
+		scx_error(sch, "scx_bpf_cid_override: invalid shard_start size %u",
+			  shard_start_src__sz);
+		return;
+	}
+
+	nr_shards = shard_start_src__sz / sizeof(s32);
+
+	/* validate shard_start[]: starts at 0, strictly increasing, in range */
+	if (shard_start[0] != 0) {
+		scx_error(sch, "scx_bpf_cid_override: shard_start[0] must be 0, got %d",
+			  shard_start[0]);
+		return;
+	}
+	for (si = 1; si < nr_shards; si++) {
+		if (shard_start[si] <= shard_start[si - 1]) {
+			scx_error(sch, "scx_bpf_cid_override: shard_start not increasing at [%d]",
+				  si);
+			return;
+		}
+		if (shard_start[si] >= npossible) {
+			scx_error(sch, "scx_bpf_cid_override: shard_start[%d]=%d >= %u",
+				  si, shard_start[si], npossible);
+			return;
+		}
+		if (shard_start[si] - shard_start[si - 1] > SCX_CID_SHARD_MAX_CPUS) {
+			scx_error(sch, "scx_bpf_cid_override: shard[%d] span %d exceeds max %d",
+				  si - 1, shard_start[si] - shard_start[si - 1],
+				  SCX_CID_SHARD_MAX_CPUS);
+			return;
+		}
+	}
+	if (npossible - shard_start[nr_shards - 1] > SCX_CID_SHARD_MAX_CPUS) {
+		scx_error(sch, "scx_bpf_cid_override: shard[%d] span %d exceeds max %d",
+			  nr_shards - 1, npossible - shard_start[nr_shards - 1],
+			  SCX_CID_SHARD_MAX_CPUS);
+		return;
+	}
+
+	/* Validate first so that invalid input leaves globals untouched. */
 	for_each_possible_cpu(cpu) {
 		s32 c = cpu_to_cid[cpu];
 
@@ -442,13 +519,56 @@ __bpf_kfunc void scx_bpf_cid_override(const s32 *cpu_to_cid, u32 cpu_to_cid__sz,
 			scx_error(sch, "cid %d assigned to multiple cpus", c);
 			return;
 		}
+	}
+
+	for_each_possible_cpu(cpu) {
+		s32 c = cpu_to_cid[cpu];
+
 		scx_cpu_to_cid_tbl[cpu] = c;
 		scx_cid_to_cpu_tbl[c] = cpu;
 	}
 
-	/* Invalidate stale topo info - the override carries no topology. */
-	for (cid = 0; cid < num_possible_cpus(); cid++)
+	/*
+	 * Derive scx_shard_node[] by majority count: an overridden shard may
+	 * span NUMA nodes, so assign each to the node that owns the most cpus.
+	 */
+	for (si = 0; si < nr_shards; si++) {
+		u32 end = (si + 1 < nr_shards) ? shard_start[si + 1] : npossible;
+
+		memset(node_counts, 0, nr_node_ids * sizeof(*node_counts));
+		for (cid = shard_start[si]; cid < end; cid++) {
+			s32 node = cpu_to_node(scx_cid_to_cpu_tbl[cid]);
+
+			if (numa_valid_node(node))
+				node_counts[node]++;
+		}
+		scx_shard_node[si] = pick_max_node(node_counts, nr_node_ids);
+	}
+
+	/*
+	 * Invalidate stale topo info and install shard layout from
+	 * @shard_start. Walk shards to derive shard_cid/shard_idx for each cid.
+	 */
+	si = 0;
+	for (cid = 0; cid < npossible; cid++) {
+		if (si + 1 < nr_shards && cid >= shard_start[si + 1])
+			si++;
+		scx_cid_to_shard[cid] = si;
 		scx_cid_topo[cid] = SCX_CID_TOPO_NEG;
+		scx_cid_topo[cid].shard_cid = shard_start[si];
+		scx_cid_topo[cid].shard_idx = si;
+	}
+
+	/* Rebuild scx_cid_shard_ranges[] for the new layout. */
+	memset(scx_cid_shard_ranges, 0, npossible * sizeof(*scx_cid_shard_ranges));
+	for (si = 0; si < nr_shards; si++) {
+		u32 end = (si + 1 < nr_shards) ? shard_start[si + 1] : npossible;
+
+		scx_cid_shard_ranges[si].base_cid = shard_start[si];
+		scx_cid_shard_ranges[si].nr_cids = end - shard_start[si];
+	}
+
+	scx_nr_cid_shards = nr_shards;
 }
 
 /**
