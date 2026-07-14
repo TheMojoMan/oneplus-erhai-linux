@@ -30,7 +30,7 @@
 #include <drm/drm_syncobj.h>
 
 #include "amdgpu.h"
-#include "amdgpu_userq_fence.h"
+#include "amdgpu_trace.h"
 
 #define AMDGPU_USERQ_MAX_HANDLES	(1U << 16)
 
@@ -528,6 +528,8 @@ int amdgpu_userq_signal_ioctl(struct drm_device *dev, void *data,
 	/* Create the new fence */
 	amdgpu_userq_fence_init(queue, fence, wptr);
 
+	trace_amdgpu_userq_emit_fence(dev->dev, queue, fence);
+
 	mutex_unlock(&userq_mgr->userq_mutex);
 
 	/*
@@ -593,7 +595,7 @@ free_syncobj_handles:
 static int
 amdgpu_userq_wait_count_fences(struct drm_file *filp,
 			       struct drm_amdgpu_userq_wait *wait_info,
-			       u32 *syncobj_handles, u32 *timeline_points,
+			       u32 *syncobj_handles, u64 *timeline_points,
 			       u32 *timeline_handles,
 			       struct drm_gem_object **gobj_write,
 			       struct drm_gem_object **gobj_read)
@@ -701,9 +703,9 @@ amdgpu_userq_wait_add_fence(struct drm_amdgpu_userq_wait *wait_info,
 }
 
 static int
-amdgpu_userq_wait_return_fence_info(struct drm_file *filp,
+amdgpu_userq_wait_return_fence_info(struct drm_device *dev, struct drm_file *filp,
 				    struct drm_amdgpu_userq_wait *wait_info,
-				    u32 *syncobj_handles, u32 *timeline_points,
+				    u32 *syncobj_handles, u64 *timeline_points,
 				    u32 *timeline_handles,
 				    struct drm_gem_object **gobj_write,
 				    struct drm_gem_object **gobj_read)
@@ -869,6 +871,8 @@ amdgpu_userq_wait_return_fence_info(struct drm_file *filp,
 
 		amdgpu_userq_fence_driver_get(fence_drv);
 
+		trace_amdgpu_userq_wait_deps(dev->dev, waitq, userq_fence);
+
 		/* Store drm syncobj's gpu va address and value */
 		fence_info[cnt].va = fence_drv->va;
 		fence_info[cnt].value = fences[i]->seqno;
@@ -906,7 +910,8 @@ int amdgpu_userq_wait_ioctl(struct drm_device *dev, void *data,
 			    struct drm_file *filp)
 {
 	int num_points, num_syncobj, num_read_bo_handles, num_write_bo_handles;
-	u32 *syncobj_handles, *timeline_points, *timeline_handles;
+	u32 *syncobj_handles, *timeline_handles;
+	u64 *timeline_points;
 	struct drm_amdgpu_userq_wait *wait_info = data;
 	struct drm_gem_object **gobj_write;
 	struct drm_gem_object **gobj_read;
@@ -935,7 +940,7 @@ int amdgpu_userq_wait_ioctl(struct drm_device *dev, void *data,
 	}
 
 	ptr = u64_to_user_ptr(wait_info->syncobj_timeline_points);
-	timeline_points = memdup_array_user(ptr, num_points, sizeof(u32));
+	timeline_points = memdup_array_user(ptr, num_points, sizeof(u64));
 	if (IS_ERR(timeline_points)) {
 		r = PTR_ERR(timeline_points);
 		goto free_timeline_handles;
@@ -968,7 +973,7 @@ int amdgpu_userq_wait_ioctl(struct drm_device *dev, void *data,
 						   gobj_write,
 						   gobj_read);
 	} else {
-		r = amdgpu_userq_wait_return_fence_info(filp, wait_info,
+		r = amdgpu_userq_wait_return_fence_info(dev, filp, wait_info,
 							syncobj_handles,
 							timeline_points,
 							timeline_handles,

@@ -599,7 +599,7 @@ static void drm_sched_scheduler_two_clients_test(struct kunit *test)
 	 *  -  qd: Number of outstanding jobs in the client/entity
 	 */
 
-	pr_info(" [pct] - Job sumission progress\n"
+	pr_info(" [pct] - Job submission progress\n"
 " [cps] - Cycles per second\n"
 "  [qd] - Number of outstanding jobs in the client/entity\n");
 	pr_info("%s:\n\t            pct1 cps1 qd1;  pct2 cps2 qd2\n",
@@ -666,14 +666,10 @@ static void drm_sched_scheduler_two_clients_test(struct kunit *test)
 	}
 }
 
-static const struct kunit_attributes drm_sched_scheduler_two_clients_attr = {
-	.speed = KUNIT_SPEED_SLOW,
-};
-
 static struct kunit_case drm_sched_scheduler_two_clients_tests[] = {
 	KUNIT_CASE_PARAM_ATTR(drm_sched_scheduler_two_clients_test,
 			      drm_sched_scheduler_two_clients_gen_params,
-			      drm_sched_scheduler_two_clients_attr),
+			      { .speed = KUNIT_SPEED_SLOW }),
 	{}
 };
 
@@ -858,14 +854,10 @@ static void drm_sched_scheduler_many_clients_test(struct kunit *test)
 		drm_mock_sched_entity_free(client[i].entity);
 }
 
-static const struct kunit_attributes drm_sched_scheduler_many_clients_attr = {
-	.speed = KUNIT_SPEED_SLOW,
-};
-
 static struct kunit_case drm_sched_scheduler_many_clients_tests[] = {
 	KUNIT_CASE_PARAM_ATTR(drm_sched_scheduler_many_clients_test,
 			      drm_sched_scheduler_many_clients_gen_params,
-			      drm_sched_scheduler_many_clients_attr),
+			      { .speed = KUNIT_SPEED_SLOW }),
 	{}
 };
 

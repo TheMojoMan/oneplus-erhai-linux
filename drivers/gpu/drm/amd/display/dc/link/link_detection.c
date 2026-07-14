@@ -933,7 +933,7 @@ static bool should_verify_link_capability_destructively(struct dc_link *link,
 		destrictive = true;
 		if (is_hdmi_frl_in_use(link)) {
 			destrictive = false;
-		} else if (link->dc->config.skip_frl_pretraining) {
+		} else if (link->local_sink->edid_caps.panel_patch.skip_frl_pre_training) {
 			for (i = 0; i < MAX_PIPES; i++) {
 				if (pipes[i].stream != NULL &&
 					pipes[i].stream->link == link) {
@@ -1164,8 +1164,11 @@ static bool detect_link_and_local_sink(struct dc_link *link,
 			    link->link_enc->features.flags.bits.DP_IS_USB_C == 1) {
 
 				/* if alt mode times out, return false */
-				if (!wait_for_entering_dp_alt_mode(link))
+				if (!wait_for_entering_dp_alt_mode(link)) {
+					if (prev_sink)
+						dc_sink_release(prev_sink);
 					return false;
+				}
 			}
 
 			if (!detect_dp(link, &sink_caps, reason)) {

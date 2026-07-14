@@ -6,7 +6,6 @@
 #include <linux/err.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/mod_devicetable.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
@@ -680,7 +679,7 @@ static const struct drm_bridge_funcs ssd2825_bridge_funcs = {
 	.atomic_enable = ssd2825_bridge_atomic_enable,
 	.atomic_disable = ssd2825_bridge_atomic_disable,
 
-	.atomic_reset = drm_atomic_helper_bridge_reset,
+	.atomic_create_state = drm_atomic_helper_bridge_create_state,
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state = drm_atomic_helper_bridge_destroy_state,
 };

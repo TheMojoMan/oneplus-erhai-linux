@@ -397,7 +397,7 @@ static const struct drm_driver regular_driver = {
 	    XE_DISPLAY_DRIVER_FEATURES |
 	    DRIVER_GEM |
 	    DRIVER_RENDER | DRIVER_SYNCOBJ |
-	    DRIVER_SYNCOBJ_TIMELINE | DRIVER_GEM_GPUVA,
+	    DRIVER_SYNCOBJ_TIMELINE,
 	.open = xe_file_open,
 	.postclose = xe_file_close,
 
@@ -428,7 +428,7 @@ static const struct drm_ioctl_desc xe_ioctls_admin_only[] = {
 static const struct drm_driver admin_only_driver = {
 	.driver_features =
 	    XE_DISPLAY_DRIVER_FEATURES |
-	    DRIVER_GEM | DRIVER_RENDER | DRIVER_GEM_GPUVA,
+	    DRIVER_GEM | DRIVER_RENDER,
 	.open = xe_file_open,
 	.postclose = xe_file_close,
 	.ioctls = xe_ioctls_admin_only,
@@ -1143,14 +1143,14 @@ void xe_device_shutdown(struct xe_device *xe)
 
 	drm_dbg(&xe->drm, "Shutting down device\n");
 
-	xe_display_pm_shutdown(xe);
+	xe_display_shutdown(xe);
 
 	xe_irq_suspend(xe);
 
 	for_each_gt(gt, xe, id)
 		xe_gt_shutdown(gt);
 
-	xe_display_pm_shutdown_late(xe);
+	xe_display_shutdown_late(xe);
 
 	if (!xe_driver_flr_disabled(xe)) {
 		/* BOOM! */

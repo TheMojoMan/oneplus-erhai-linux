@@ -349,8 +349,11 @@ static int amdxdna_hmm_register(struct amdxdna_gem_obj *abo,
 	u32 nr_pages;
 	int ret;
 
-	if (!amdxdna_pasid_on(abo->client))
+	if (!amdxdna_pasid_on(abo->client)) {
+		/* Need to set uva for heap uva validation */
+		abo->mem.uva = addr;
 		return 0;
+	}
 
 	mapp = kzalloc_obj(*mapp);
 	if (!mapp)
@@ -728,9 +731,15 @@ static int amdxdna_gem_dev_obj_vmap(struct drm_gem_object *obj, struct iosys_map
 	return 0;
 }
 
+static struct dma_buf *amdxdna_gem_dev_obj_export(struct drm_gem_object *gobj, int flags)
+{
+	return ERR_PTR(-EOPNOTSUPP);
+}
+
 static const struct drm_gem_object_funcs amdxdna_gem_dev_obj_funcs = {
 	.free = amdxdna_gem_dev_obj_free,
 	.vmap = amdxdna_gem_dev_obj_vmap,
+	.export = amdxdna_gem_dev_obj_export,
 };
 
 static const struct drm_gem_object_funcs amdxdna_gem_shmem_funcs = {
@@ -1297,7 +1306,7 @@ int amdxdna_drm_sync_bo_ioctl(struct drm_device *dev,
 		 args->handle, args->offset, args->size);
 
 	if (args->direction == SYNC_DIRECT_FROM_DEVICE)
-		ret = amdxdna_hwctx_sync_debug_bo(abo->client, args->handle);
+		ret = amdxdna_hwctx_sync_debug_bo(client, args->handle);
 
 put_obj:
 	drm_gem_object_put(gobj);
