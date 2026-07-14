@@ -770,11 +770,25 @@ struct sched_ext_ops {
 	 * Delivered asynchronously after the change is recorded, and may run
 	 * before it takes effect on any given cpu. Use it to track which caps
 	 * the sub-sched holds and propagate to its own children, not to decide
-	 * if a task can run on a cpu now.
+	 * if a task can run on a cpu now. sub_ecaps_updated() reports that per
+	 * cpu, once it is in effect.
 	 *
 	 * May call scx_bpf_sub_grant() / scx_bpf_sub_revoke() on children.
 	 */
 	void (*sub_caps_updated)(const struct scx_cmask *cmask, u64 caps);
+
+	/**
+	 * @sub_ecaps_updated: This sub-sched's effective caps on a cid changed
+	 * @cid: the cid whose effective caps changed
+	 * @before: effective caps as of the last delivery
+	 * @after: effective caps now
+	 *
+	 * Invoked when this sub-sched's effective caps on @cid change, once the
+	 * change is in effect on the cpu. Runs in dispatch context with rq lock
+	 * held, and can perform all operations allowed in ops.dispatch()
+	 * including inserting/moving tasks.
+	 */
+	void (*sub_ecaps_updated)(s32 cid, u64 before, u64 after);
 
 	/*
 	 * All online ops must come before ops.cpu_online().
@@ -997,6 +1011,7 @@ struct sched_ext_ops_cid {
 	s32 (*sub_attach)(struct scx_sub_attach_args *args);
 	void (*sub_detach)(struct scx_sub_detach_args *args);
 	void (*sub_caps_updated)(const struct scx_cmask *cmask, u64 caps);
+	void (*sub_ecaps_updated)(s32 cid, u64 before, u64 after);
 	void (*cid_online)(s32 cid);
 	void (*cid_offline)(s32 cid);
 	s32 (*init_cids)(void);
@@ -1198,6 +1213,8 @@ struct scx_sched_pcpu {
 	 */
 	u64			ecaps;
 	struct llist_node	ecaps_to_sync_node;
+	/* effective caps as of the last sub_ecaps_updated() delivery */
+	u64			reported_ecaps;
 #endif
 
 	/*
