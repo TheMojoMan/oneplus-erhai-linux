@@ -191,6 +191,29 @@ static void intel_dp_set_default_sink_rates(struct intel_dp *intel_dp)
 	intel_dp->num_sink_rates = 1;
 }
 
+static bool dprx_supports_128b132b(struct intel_dp *intel_dp)
+{
+	if (intel_dp_tunnel_bw_alloc_is_enabled(intel_dp))
+		return drm_dp_tunnel_128b132b_supported(intel_dp->tunnel);
+	else
+		return drm_dp_128b132b_supported(intel_dp->dpcd);
+}
+
+static u8 dprx_128b132b_link_rates(struct intel_dp *intel_dp, u8 no_bwa_rates)
+{
+	u8 ret;
+
+	if (!intel_dp_tunnel_bw_alloc_is_enabled(intel_dp))
+		return no_bwa_rates;
+
+	ret = drm_dp_tunnel_128b132b_dprx_rates(intel_dp->tunnel);
+	static_assert(DP_TUNNELING_10GBPS_PER_LANE_SUPPORT == DP_UHBR10 &&
+		      DP_TUNNELING_13_5GBPS_PER_LANE_SUPPORT == DP_UHBR13_5 &&
+		      DP_TUNNELING_20GBPS_PER_LANE_SUPPORT == DP_UHBR20);
+
+	return ret;
+}
+
 /* update sink rates from dpcd */
 static void intel_dp_set_dpcd_sink_rates(struct intel_dp *intel_dp)
 {
@@ -199,6 +222,7 @@ static void intel_dp_set_dpcd_sink_rates(struct intel_dp *intel_dp)
 	};
 	int i, max_rate;
 	int max_lttpr_rate;
+	u8 uhbr_rates = 0;
 
 	if (drm_dp_has_quirk(&intel_dp->desc, DP_DPCD_QUIRK_CAN_DO_MAX_LINK_RATE_3_24_GBPS)) {
 		/* Needed, e.g., for Apple MBP 2017, 15 inch eDP Retina panel */
@@ -225,16 +249,19 @@ static void intel_dp_set_dpcd_sink_rates(struct intel_dp *intel_dp)
 	}
 
 	/*
+	 * The following register must be read unconditionally for the later
+	 * DP tunnel 128b132b detection to work, see DP Standard v2.1 5.14.3 .
+	 */
+	drm_dp_dpcd_read_byte(&intel_dp->aux, DP_128B132B_SUPPORTED_LINK_RATES, &uhbr_rates);
+
+	/*
 	 * Sink rates for 128b/132b. If set, sink should support all 8b/10b
 	 * rates and 10 Gbps.
 	 */
-	if (drm_dp_128b132b_supported(intel_dp->dpcd)) {
-		u8 uhbr_rates = 0;
-
+	if (dprx_supports_128b132b(intel_dp)) {
 		BUILD_BUG_ON(ARRAY_SIZE(intel_dp->sink_rates) < ARRAY_SIZE(dp_rates) + 3);
 
-		drm_dp_dpcd_readb(&intel_dp->aux,
-				  DP_128B132B_SUPPORTED_LINK_RATES, &uhbr_rates);
+		uhbr_rates = dprx_128b132b_link_rates(intel_dp, uhbr_rates);
 
 		if (drm_dp_lttpr_count(intel_dp->lttpr_common_caps)) {
 			/* We have a repeater */
