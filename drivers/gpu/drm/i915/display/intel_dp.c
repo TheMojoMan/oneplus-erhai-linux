@@ -1688,6 +1688,7 @@ intel_dp_compute_link_config_wide(struct intel_dp *intel_dp,
 	struct intel_dp_link_caps *link_caps = intel_dp->link.caps;
 	struct intel_dp_link_caps_order order =
 		intel_dp_link_caps_connector_compute_order(connector);
+	int err = -EINVAL;
 	int link_avail;
 
 	for (bpp = fxp_q4_to_int(limits->link.max_bpp_x16);
@@ -1718,12 +1719,18 @@ intel_dp_compute_link_config_wide(struct intel_dp *intel_dp,
 				pipe_config->pipe_bpp = bpp;
 				pipe_config->port_clock = link_config.rate;
 
-				return 0;
+				err = 0;
+
+				break;
 			}
 		}
+		intel_dp_link_caps_iter_end(&iter);
+
+		if (!err)
+			break;
 	}
 
-	return -EINVAL;
+	return err;
 }
 
 int intel_dp_dsc_max_src_input_bpc(struct intel_display *display)
@@ -1924,6 +1931,7 @@ static int dsc_compute_link_config(struct intel_dp *intel_dp,
 		intel_dp_link_caps_connector_compute_order(connector);
 	struct intel_dp_link_config link_config;
 	struct intel_dp_link_caps_iter iter;
+	int err = -EINVAL;
 
 	intel_dp_link_caps_iter_start(&iter, link_caps, order, limits->link_config_filter);
 	for_each_dp_link_config(&iter, &link_config) {
@@ -1966,10 +1974,13 @@ static int dsc_compute_link_config(struct intel_dp *intel_dp,
 				continue;
 		}
 
-		return 0;
-	}
+		err = 0;
 
-	return -EINVAL;
+		break;
+	}
+	intel_dp_link_caps_iter_end(&iter);
+
+	return err;
 }
 
 static
