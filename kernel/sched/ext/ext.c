@@ -1436,8 +1436,12 @@ static void scx_dispatch_enqueue(struct scx_sched *sch, struct rq *rq,
 		local_dsq_post_enq(sch, dsq, p, enq_flags);
 	} else {
 		/*
-		 * Task on global/bypass DSQ: leave custody, task on
-		 * non-terminal DSQ: enter custody.
+		 * Global and bypass DSQs are terminal - the task leaves the
+		 * scheduler's custody, so ops.dequeue() fires here. It can run
+		 * without @p's rq lock (finish_dispatch() passes the dispatch
+		 * rq); that's safe because dequeue_task_scx() waits on
+		 * SCX_OPSS_DISPATCHING (see the ops_state note above) and so
+		 * can't race it. A non-terminal DSQ keeps the task in custody.
 		 */
 		if (dsq->id == SCX_DSQ_GLOBAL || dsq->id == SCX_DSQ_BYPASS)
 			call_task_dequeue(sch, rq, p, 0);
@@ -3446,8 +3450,9 @@ void scx_sub_init_cancel_task(struct scx_sched *sch, struct task_struct *p)
 	lockdep_assert_held(&p->pi_lock);
 	lockdep_assert_rq_held(task_rq(p));
 
+	/* @p was never associated with @sch, dispatch on the explicit @sch */
 	if (SCX_HAS_OP(sch, exit_task))
-		SCX_CALL_OP_TASK(sch, exit_task, task_rq(p), p, &args);
+		__SCX_CALL_OP_TASK(sch, ops, exit_task, task_rq(p), p, &args);
 }
 
 void scx_disable_and_exit_task(struct scx_sched *sch, struct task_struct *p)
@@ -4184,12 +4189,13 @@ void scx_cgroup_move_task(struct task_struct *p)
 	 * cgroup changes. Migration keys off css rather than cgroup identity,
 	 * so it can hand an unchanged-cgroup task here with cgrp_moving_from
 	 * NULL. Nothing to report to the BPF scheduler then, so skip it and
-	 * keep prep_move and move paired.
+	 * keep prep_move and move paired. Cgroup ops run on the root sched,
+	 * dispatch on the explicit @sch.
 	 */
 	if (SCX_HAS_OP(sch, cgroup_move) && p->scx.cgrp_moving_from)
-		SCX_CALL_OP_TASK(sch, cgroup_move, task_rq(p),
-				 p, p->scx.cgrp_moving_from,
-				 tg_cgrp(task_group(p)));
+		__SCX_CALL_OP_TASK(sch, ops, cgroup_move, task_rq(p),
+				   p, p->scx.cgrp_moving_from,
+				   tg_cgrp(task_group(p)));
 	p->scx.cgrp_moving_from = NULL;
 }
 

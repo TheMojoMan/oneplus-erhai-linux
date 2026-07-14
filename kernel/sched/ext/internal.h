@@ -1810,8 +1810,15 @@ do {										\
 	current->scx.kf_tasks[0] = NULL;					\
 } while (0)
 
+/*
+ * A per-task op runs on @task's owner - WARN if @sch isn't it. Sites that must
+ * target a different scheduler call __SCX_CALL_OP_TASK() directly.
+ */
 #define SCX_CALL_OP_TASK(sch, op, locked_rq, task, args...)			\
-	__SCX_CALL_OP_TASK(sch, ops, op, locked_rq, task, ##args)
+do {										\
+	WARN_ON_ONCE((sch) != scx_task_sched_rcu(task));			\
+	__SCX_CALL_OP_TASK((sch), ops, op, locked_rq, task, ##args);		\
+} while (0)
 
 /*
  * Dispatch a task op through the cid-form ops_cid table. Only set_cmask() needs
@@ -1824,6 +1831,7 @@ do {										\
 #define SCX_CALL_OP_TASK_RET(sch, op, locked_rq, task, args...)			\
 ({										\
 	__typeof__((sch)->ops.op(task, ##args)) __ret;				\
+	WARN_ON_ONCE((sch) != scx_task_sched_rcu(task));			\
 	WARN_ON_ONCE(current->scx.kf_tasks[0]);					\
 	current->scx.kf_tasks[0] = task;					\
 	__ret = SCX_CALL_OP_RET((sch), op, locked_rq, task, ##args);		\
