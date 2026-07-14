@@ -237,12 +237,17 @@ struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq 
 					       struct task_struct *p, u64 *enq_flags)
 {
 	s32 cid = __scx_cpu_to_cid(cpu_of(rq));
+	struct scx_sched *asch = rq->scx.remote_activate_sch ?: sch;
 	u64 needed = scx_caps_for_enq(*enq_flags);
 	u64 missing;
 
+	/*
+	 * On a remote activation the scheduling sched (@asch) differs from
+	 * @p's owner (@sch). Check caps against the scheduling sched.
+	 */
 	if (*enq_flags & SCX_ENQ_PREEMPT)
-		needed |= scx_caps_for_preempt(sch, rq);
-	missing = scx_missing_caps(sch, cpu_of(rq), needed);
+		needed |= scx_caps_for_preempt(asch, rq);
+	missing = scx_missing_caps(asch, cpu_of(rq), needed);
 
 	/* requirements met */
 	if (likely(!missing))
