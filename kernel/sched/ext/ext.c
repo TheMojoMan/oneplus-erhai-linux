@@ -2607,6 +2607,8 @@ static int balance_one(struct rq *rq, struct task_struct *prev)
 	rq->scx.flags |= SCX_RQ_IN_BALANCE;
 	rq->scx.flags &= ~SCX_RQ_BAL_KEEP;
 
+	scx_process_sync_ecaps(rq);
+
 	if ((sch->ops.flags & SCX_OPS_HAS_CPU_PREEMPT) &&
 	    unlikely(rq->scx.cpu_released)) {
 		/*
@@ -4664,6 +4666,9 @@ static void scx_sched_free_rcu_work(struct work_struct *work)
 		 */
 		WARN_ON_ONCE(!list_empty(&pcpu->deferred_reenq_local.node));
 
+		/* flush the queued ecaps syncs */
+		scx_discard_ecaps_to_sync(cpu, pcpu);
+
 		/*
 		 * Bypass blocks new kicks. Flush the kick irq_work so this
 		 * pcpu's to_kick_node is off the list before it is freed.
@@ -6428,6 +6433,9 @@ struct scx_sched *scx_alloc_and_add_sched(struct scx_enable_cmd *cmd,
 		node = cpu_to_node(cpu);
 		pcpu->sch = sch;
 		INIT_LIST_HEAD(&pcpu->deferred_reenq_local.node);
+#ifdef CONFIG_EXT_SUB_SCHED
+		init_llist_node(&pcpu->ecaps_to_sync_node);
+#endif
 		INIT_LIST_HEAD(&pcpu->to_kick_node);
 		if (!zalloc_cpumask_var_node(&pcpu->cpus_to_kick, GFP_KERNEL, node) ||
 		    !zalloc_cpumask_var_node(&pcpu->cpus_to_kick_if_idle, GFP_KERNEL, node) ||
@@ -6771,6 +6779,8 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 		rq->scx.local_dsq.sched = sch;
 		rq->scx.cpuperf_target = SCX_CPUPERF_ONE;
 	}
+
+	scx_discard_stale_ecaps_syncs();
 
 	/*
 	 * Keep CPUs stable during enable so that the BPF scheduler can track

@@ -297,6 +297,125 @@ static void scx_sub_seed_caps(struct scx_sched *sch)
 	caps_updated_deliver(&to_deliver);
 }
 
+static u64 calc_effective_caps(struct scx_pshard *ps, s32 cid)
+{
+	u64 ecaps = 0;
+	u32 cap_bit;
+
+	for (cap_bit = 0; cap_bit < __SCX_NR_CAPS; cap_bit++)
+		if (scx_cmask_test(cid, &ps->caps[cap_bit].cmask))
+			ecaps |= BIT_U64(cap_bit) | scx_caps_implied(BIT_U64(cap_bit));
+	return ecaps;
+}
+
+/**
+ * queue_sync_ecaps - Queue ecaps update for a (sch, cid) pair
+ * @sch: sched to update
+ * @cid: cid to update
+ *
+ * Queue an ecaps update for @sch's @cid and kick the cpu so that it syncs in
+ * balance_one().
+ */
+static void queue_sync_ecaps(struct scx_sched *sch, s32 cid)
+{
+	s32 cpu = __scx_cid_to_cpu(cid);
+	struct scx_sched_pcpu *pcpu = per_cpu_ptr(sch->pcpu, cpu);
+
+	/*
+	 * Pairs with smp_mb() in scx_process_sync_ecaps(). Either the check
+	 * below sees the node off the list and queues it, or the in-flight sync
+	 * sees the caps[] update made before this call.
+	 */
+	smp_mb();
+
+	/* @cid's pshard->lock excludes concurrent queueing attempts */
+	if (llist_on_list(&pcpu->ecaps_to_sync_node))
+		return;
+	if (llist_add(&pcpu->ecaps_to_sync_node, &cpu_rq(cpu)->scx.ecaps_to_sync))
+		scx_kick_cpu(scx_root, cpu, 0);
+}
+
+/* discard @rq's queued ecaps syncs */
+static void discard_queued_syncs(struct rq *rq)
+{
+	struct llist_node *pos, *tmp;
+
+	lockdep_assert_rq_held(rq);
+
+	llist_for_each_safe(pos, tmp, llist_del_all(&rq->scx.ecaps_to_sync))
+		init_llist_node(pos);
+}
+
+/**
+ * scx_process_sync_ecaps - Sync this cpu's ecaps to pshard->caps[]
+ * @rq: the cid's cpu rq
+ *
+ * pshard->caps[] is the target configuration. pcpu->ecaps is the effective
+ * transposed copy owned by the cid's cpu and written only here under @rq's
+ * lock.
+ */
+void scx_process_sync_ecaps(struct rq *rq)
+{
+	s32 cid = __scx_cpu_to_cid(cpu_of(rq));
+	s32 shard = scx_cid_to_shard[cid];
+	struct llist_node *batch, *pos, *tmp;
+
+	lockdep_assert_rq_held(rq);
+
+	if (likely(llist_empty(&rq->scx.ecaps_to_sync)))
+		return;
+
+	batch = llist_del_all(&rq->scx.ecaps_to_sync);
+	llist_for_each_safe(pos, tmp, batch) {
+		struct scx_sched_pcpu *pcpu =
+			container_of(pos, struct scx_sched_pcpu, ecaps_to_sync_node);
+		struct scx_pshard *ps = pcpu->sch->pshard[shard];
+
+		init_llist_node(pos);
+
+		/* pairs with smp_mb() in queue_sync_ecaps(), see there */
+		smp_mb();
+
+		WRITE_ONCE(pcpu->ecaps, calc_effective_caps(ps, cid));
+	}
+}
+
+/*
+ * @pcpu's sched was unhashed before the grace period, so nothing new queues.
+ * Flush its pending sync so the pcpu can be freed. scx_process_sync_ecaps()
+ * takes nodes off the list before syncing and acquiring the rq lock waits for
+ * any in-flight walk.
+ */
+void scx_discard_ecaps_to_sync(s32 cpu, struct scx_sched_pcpu *pcpu)
+{
+	scoped_guard (rq_lock_irqsave, cpu_rq(cpu))
+		scx_process_sync_ecaps(cpu_rq(cpu));
+
+	WARN_ON_ONCE(llist_on_list(&pcpu->ecaps_to_sync_node));
+}
+
+/**
+ * scx_discard_stale_ecaps_syncs - Discard ecaps syncs from earlier schedulers
+ *
+ * To be called during root enable before the scheduler goes live. An earlier
+ * root's sub-sched may not have gone through its RCU free path yet (e.g. a
+ * still-open link fd defers it) and can leave queued ecaps syncs behind.
+ * Processing them would decode the dead sched's pshards with the current cid
+ * layout. Discard them instead. The backing scx_sched_pcpu's are still
+ * allocated as the free path drains ecaps_to_sync_node before freeing.
+ */
+void scx_discard_stale_ecaps_syncs(void)
+{
+	s32 cpu;
+
+	for_each_possible_cpu(cpu) {
+		struct rq *rq = cpu_rq(cpu);
+
+		guard(rq_lock_irqsave)(rq);
+		discard_queued_syncs(rq);
+	}
+}
+
 static DECLARE_WAIT_QUEUE_HEAD(scx_unlink_waitq);
 
 void drain_descendants(struct scx_sched *sch)
@@ -1059,9 +1178,14 @@ __bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
 				granted_caps |= BIT_U64(cap_bit);
 			}
 
-			if (granted_caps)
+			if (granted_caps) {
+				s32 cid;
+
 				caps_updated_record(cps, changed_cids, granted_caps,
 						    &to_deliver);
+				scx_cmask_for_each_cid(cid, changed_cids)
+					queue_sync_ecaps(child, cid);
+			}
 		}
 
 		/* record cids that didn't make it through into @denied_out */
@@ -1154,9 +1278,14 @@ __bpf_kfunc void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps,
 					revoked_caps |= BIT_U64(cap_bit);
 				}
 
-				if (revoked_caps)
+				if (revoked_caps) {
+					s32 cid;
+
 					caps_updated_record(ps, changed_cids, revoked_caps,
 							    &to_deliver);
+					scx_cmask_for_each_cid(cid, changed_cids)
+						queue_sync_ecaps(pos, cid);
+				}
 			}
 
 			if (revoked_caps)

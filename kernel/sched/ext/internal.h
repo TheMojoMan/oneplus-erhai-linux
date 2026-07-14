@@ -1182,6 +1182,24 @@ struct scx_sched_pcpu {
 	cpumask_var_t		cpus_to_wait;
 	struct list_head	to_kick_node;
 
+#ifdef CONFIG_EXT_SUB_SCHED
+	/*
+	 * pshard->caps[cap_bit] is the set of cids the sched holds that one
+	 * cap on. ecaps is its transpose: the set of SCX_CAP_* bits the sched
+	 * holds on this cpu, collected so that the hot-path check is a single
+	 * read.
+	 *
+	 * While pshard->caps[] under pshard->lock is the target configuration,
+	 * ecaps is the effective copy owned by the cpu. It is written under the
+	 * rq lock while processing rq->ecaps_to_sync. Can also be read with
+	 * READ_ONCE() outside rq lock.
+	 *
+	 * See queue_sync_ecaps() and scx_process_sync_ecaps().
+	 */
+	u64			ecaps;
+	struct llist_node	ecaps_to_sync_node;
+#endif
+
 	/*
 	 * The event counters are in a per-CPU variable to minimize the
 	 * accounting overhead. A system-wide view on the event counter is
@@ -1291,7 +1309,8 @@ struct scx_pshard {
 
 	/*
 	 * Per-cap cmask, inline via TRAILING_OVERLAP so cmask.bits[] overlaps
-	 * the trailing _bits[] storage. Access as &caps[i].cmask.
+	 * the trailing _bits[] storage. Access as &caps[i].cmask. See
+	 * scx_sched_pcpu->ecaps.
 	 */
 	TRAILING_OVERLAP(struct scx_cmask, cmask, bits,
 			 u64 _bits[SCX_CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS)];

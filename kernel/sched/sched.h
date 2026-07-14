@@ -806,6 +806,9 @@ struct scx_rq {
 	u32			flags;
 	u32			nr_immed;		/* ENQ_IMMED tasks on local_dsq */
 	u64			clock;			/* current per-rq clock -- see scx_bpf_now() */
+#ifdef CONFIG_EXT_SUB_SCHED
+	struct llist_head	ecaps_to_sync;		/* pending ecaps syncs */
+#endif
 	cpumask_var_t		cpus_to_sync;
 	bool			kick_sync_pending;
 	unsigned long		kick_sync;
