@@ -1202,6 +1202,7 @@ struct scx_sched {
 		struct sched_ext_ops_cid	ops_cid;
 	};
 	bool			is_cid_type;	/* true if registered via bpf_sched_ext_ops_cid */
+	bool			dead;		/* set after ops.exit(), gates scx_prog_sched() */
 
 	/*
 	 * Arena map auto-discovered from member progs at struct_ops attach.
@@ -1976,14 +1977,20 @@ static inline bool scx_task_on_sched(struct scx_sched *sch,
 static inline struct scx_sched *scx_prog_sched(const struct bpf_prog_aux *aux)
 {
 	struct sched_ext_ops *ops;
-	struct scx_sched *root;
+	struct scx_sched *sch, *root;
 
 	ops = bpf_prog_get_assoc_struct_ops(aux);
-	if (likely(ops))
-		return rcu_dereference_all(ops->priv);
+	if (likely(ops)) {
+		sch = rcu_dereference_all(ops->priv);
+		if (sch && unlikely(READ_ONCE(sch->dead)))
+			return NULL;
+		return sch;
+	}
 
 	root = rcu_dereference_all(scx_root);
 	if (root) {
+		if (unlikely(READ_ONCE(root->dead)))
+			return NULL;
 		/*
 		 * COMPAT-v6.19: Schedulers built before sub-sched support was
 		 * introduced may have unassociated non-struct_ops programs.
@@ -2035,7 +2042,11 @@ static inline bool scx_task_on_sched(struct scx_sched *sch,
 
 static inline struct scx_sched *scx_prog_sched(const struct bpf_prog_aux *aux)
 {
-	return rcu_dereference_all(scx_root);
+	struct scx_sched *root = rcu_dereference_all(scx_root);
+
+	if (root && unlikely(READ_ONCE(root->dead)))
+		return NULL;
+	return root;
 }
 
 static inline struct scx_sched *scx_parent(struct scx_sched *sch) { return NULL; }

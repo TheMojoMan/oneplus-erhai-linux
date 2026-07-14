@@ -344,6 +344,15 @@ void scx_sub_disable(struct scx_sched *sch)
 
 	if (sch->ops.exit)
 		SCX_CALL_OP(sch, exit, NULL, sch->exit_info);
+
+	/*
+	 * @sch's non-ops programs such as timers and tracers can fire after
+	 * ops.exit(). Now that exit is complete, stop scx_prog_sched() from
+	 * resolving to @sch and drain in-flight resolvers.
+	 */
+	WRITE_ONCE(sch->dead, true);
+	synchronize_rcu();
+
 	if (sch->sub_kset)
 		kobject_del(&sch->sub_kset->kobj);
 	/* not added if enable failed before scx_sched_sysfs_add() */
