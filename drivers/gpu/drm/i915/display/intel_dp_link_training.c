@@ -1874,11 +1874,6 @@ static bool reduce_link_params(struct intel_dp *intel_dp, const struct intel_crt
 			continue;
 		}
 
-		if (!is_mst &&
-		    drm_dp_is_uhbr_rate(config.rate) !=
-		    drm_dp_is_uhbr_rate(old_config.rate))
-			continue;
-
 		*new_link_rate = config.rate;
 		*new_lane_count = config.lane_count;
 		new_found = true;

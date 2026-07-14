@@ -1199,11 +1199,6 @@ get_fallback_configs_for_output_type(struct kunit *test,
 	}
 }
 
-static bool output_type_allows_uhbr_fallback(enum intel_output_type output_type)
-{
-	return output_type == INTEL_OUTPUT_DP_MST;
-}
-
 static void assert_config_is_supported(const struct test_config_table *expected_table,
 				       const struct intel_dp_link_config *config)
 {
@@ -1230,14 +1225,10 @@ static bool get_fallback_config(const struct test_config_table *expected_table,
 		const struct intel_dp_link_config *config =
 			&config_set->entries[i];
 
-		if (output_type_allows_uhbr_fallback(output_type) ||
-		    (drm_dp_is_uhbr_rate(target_config->rate) ==
-		     drm_dp_is_uhbr_rate(config->rate))) {
-			assert_config_is_supported(expected_table, config);
-			*fallback_config = *config;
+		assert_config_is_supported(expected_table, config);
+		*fallback_config = *config;
 
-			return true;
-		}
+		return true;
 	}
 
 	return false;
