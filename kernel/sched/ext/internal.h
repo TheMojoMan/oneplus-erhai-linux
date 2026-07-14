@@ -786,9 +786,9 @@ struct sched_ext_ops {
 	/**
 	 * @init_cids: Finalize the cid layout (cid-form only)
 	 *
-	 * Runs after the default cid layout is built, before ops.init(). A
-	 * cid-form scheduler may call scx_bpf_cid_override() here for a custom
-	 * layout. Ignored for cpu-form schedulers.
+	 * Runs after the default cid layout is built, before caps and shards
+	 * are finalized. A cid-form scheduler may call scx_bpf_cid_override()
+	 * here for a custom layout. Ignored for cpu-form schedulers.
 	 */
 	s32 (*init_cids)(void);
 
@@ -1183,9 +1183,57 @@ struct scx_sched_pnode {
 	struct scx_dispatch_q	global_dsq;
 };
 
+/*
+ * Sub-sched capability delegation.
+ *
+ * Caps are per-cid permissions parents delegate to direct children via
+ * scx_bpf_sub_grant() / scx_bpf_sub_revoke(). A child's cap set is always a
+ * subset of its parent's. A sub-sched checks its caps locally, and cross-sched
+ * communication is needed only when the delegation set itself changes.
+ *
+ * Caps are used to implement sub-sched scheduling on the enqueue path. Picking
+ * a cid for a task at a leaf depends on which cids the leaf is allowed to use.
+ * Resolving that programmatically on every enqueue would mean a cross-sched
+ * round-trip call chain, possibly retrying if the request can't be granted
+ * as-is.
+ *
+ * The dispatch path is different - it runs as top-down recursion via
+ * scx_bpf_sub_dispatch(): a sched's dispatch op invokes a child's dispatch op
+ * on the local rq, and the subtree dispatches in a single pass.
+ *
+ * Locking is per shard. cid space is split into shards, and each sub-sched has
+ * its own pshard->lock for each shard. Operations are broken up on shard
+ * boundaries. Different shards never contend. Shards are expected to be
+ * topology-aligned and likely to serve as the locality unit when cids are
+ * allocated to schedulers, so per-shard lock granularity scales naturally with
+ * the allocation pattern.
+ */
+enum scx_cap_flags {
+	__SCX_CAP_DUMMY			= 0,
+
+	__SCX_NR_CAPS,
+	__SCX_CAP_ALL			= BIT_U64(__SCX_NR_CAPS) - 1,
+
+	SCX_CAP_DUMMY			= BIT_U64(__SCX_CAP_DUMMY),
+};
+
 #ifdef CONFIG_EXT_SUB_SCHED
+/* iterate set bits in a u64 cap mask */
+#define scx_for_each_cap_bit(cap_bit, caps)				\
+	for (u64 __caps = (caps);					\
+	     __caps && ((cap_bit) = __ffs64(__caps), true);		\
+	     __caps &= __caps - 1)
+
 struct scx_pshard {
-	int			_dummy;		/* until the first real field lands */
+	raw_spinlock_t		lock;		/* serializes caps */
+	struct scx_sched	*sch;		/* backpointer */
+	/*
+	 * Per-cap cmask, inline via TRAILING_OVERLAP so cmask.bits[] overlaps
+	 * the trailing _bits[] storage. Access as &caps[i].cmask.
+	 */
+	TRAILING_OVERLAP(struct scx_cmask, cmask, bits,
+			 u64 _bits[SCX_CMASK_NR_WORDS(SCX_CID_SHARD_MAX_CPUS)];
+	) caps[__SCX_NR_CAPS];
 };
 #endif
 

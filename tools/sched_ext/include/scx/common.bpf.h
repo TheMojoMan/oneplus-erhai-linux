@@ -114,6 +114,12 @@ u32 scx_bpf_cidperf_cap(s32 cid) __ksym __weak;
 u32 scx_bpf_cidperf_cur(s32 cid) __ksym __weak;
 void scx_bpf_cidperf_set(s32 cid, u32 perf) __ksym __weak;
 
+/* sub-scheduler cap control, scx_bpf_sub_caps() cgroup_id 0 == self */
+s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps, const struct scx_cmask *cmask,
+		      struct scx_cmask *denied) __ksym __weak;
+void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps, const struct scx_cmask *cmask) __ksym __weak;
+s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask *out) __ksym __weak;
+
 /*
  * Use the following as @it__iter when calling scx_bpf_dsq_move[_vtime]() from
  * within bpf_for_each() loops.

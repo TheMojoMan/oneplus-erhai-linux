@@ -4742,9 +4742,52 @@ static ssize_t scx_attr_events_show(struct kobject *kobj,
 }
 SCX_ATTR(events);
 
+#ifdef CONFIG_EXT_SUB_SCHED
+static const char *scx_cap_names[__SCX_NR_CAPS] = {
+	[__SCX_CAP_DUMMY]	= "dummy",
+};
+
+static ssize_t scx_attr_caps_show(struct kobject *kobj,
+				  struct kobj_attribute *ka, char *buf)
+{
+	struct scx_sched *sch = container_of(kobj, struct scx_sched, kobj);
+	u32 npossible = num_possible_cpus();
+	struct scx_cmask *agg __free(kfree) =
+		kzalloc(struct_size(agg, bits, SCX_CMASK_NR_WORDS(npossible)), GFP_KERNEL);
+	unsigned long *agg_bm __free(bitmap) = bitmap_zalloc(npossible, GFP_KERNEL);
+	ssize_t count = 0;
+	s32 cap, si;
+
+	if (!agg || !agg_bm)
+		return -ENOMEM;
+
+	for (cap = 0; cap < __SCX_NR_CAPS; cap++) {
+		SCX_CMASK_DEFINE(snap, 0, SCX_CID_SHARD_MAX_CPUS);
+
+		scx_cmask_init(agg, 0, npossible);
+		for (si = 0; si < sch->nr_pshards; si++) {
+			struct scx_cmask *cm = &sch->pshard[si]->caps[cap].cmask;
+
+			scx_cmask_reframe(snap, cm->base, cm->nr_cids);
+			scx_cmask_copy(snap, cm);
+			scx_cmask_or(agg, snap);
+		}
+		/* %*pbl takes unsigned long bitmap layout, convert from u64 */
+		bitmap_from_arr64(agg_bm, agg->bits, npossible);
+		count += sysfs_emit_at(buf, count, "%s: %*pbl\n",
+				       scx_cap_names[cap], npossible, agg_bm);
+	}
+	return count;
+}
+SCX_ATTR(caps);
+#endif	/* CONFIG_EXT_SUB_SCHED */
+
 static struct attribute *scx_sched_attrs[] = {
 	&scx_attr_ops.attr,
 	&scx_attr_events.attr,
+#ifdef CONFIG_EXT_SUB_SCHED
+	&scx_attr_caps.attr,
+#endif
 	NULL,
 };
 ATTRIBUTE_GROUPS(scx_sched);
@@ -6763,8 +6806,8 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 
 	/*
 	 * A cid-form scheduler finalizes its cid layout in ops.init_cids(),
-	 * which may call scx_bpf_cid_override(). Run it before ops.init() so
-	 * the final layout is in effect.
+	 * which may call scx_bpf_cid_override(). Run it before the caps and
+	 * shard state are built so the final layout is in effect.
 	 */
 	if (sch->is_cid_type && sch->ops_cid.init_cids) {
 		ret = SCX_CALL_OP_RET(sch, init_cids, NULL);
@@ -6794,6 +6837,9 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 		goto err_disable;
 	}
 
+	scx_init_root_caps(sch);
+
+	/* the cid caps and shards are live now, so ops.init() can query them */
 	if (sch->ops.init) {
 		ret = SCX_CALL_OP_RET(sch, init, NULL);
 		if (ret) {
@@ -7475,7 +7521,7 @@ static struct bpf_struct_ops bpf_sched_ext_ops = {
 
 /*
  * cid-form cfi stubs. Stubs whose signatures match the cpu-form (param types
- * identical, only param names differ across structs) are reused; only
+ * identical, only param names differ across structs) are reused. Only
  * set_cmask needs a fresh stub since the second argument type differs.
  */
 static void sched_ext_ops_cid__set_cmask(struct task_struct *p,
@@ -9672,6 +9718,28 @@ out:
 }
 #endif	/* CONFIG_CGROUP_SCHED */
 
+#ifndef CONFIG_EXT_SUB_SCHED
+__bpf_kfunc s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps,
+				  const struct scx_cmask *cmask__ign,
+				  struct scx_cmask *denied_out__ign,
+				  const struct bpf_prog_aux *aux)
+{
+	return -EOPNOTSUPP;
+}
+
+__bpf_kfunc void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps,
+				    const struct scx_cmask *cmask__ign,
+				    const struct bpf_prog_aux *aux)
+{
+}
+
+__bpf_kfunc s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask *out__ign,
+				 const struct bpf_prog_aux *aux)
+{
+	return -EOPNOTSUPP;
+}
+#endif	/* !CONFIG_EXT_SUB_SCHED */
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(scx_kfunc_ids_any)
@@ -9716,6 +9784,9 @@ BTF_ID_FLAGS(func, scx_bpf_events)
 #ifdef CONFIG_CGROUP_SCHED
 BTF_ID_FLAGS(func, scx_bpf_task_cgroup, KF_IMPLICIT_ARGS | KF_RCU | KF_ACQUIRE)
 #endif
+BTF_ID_FLAGS(func, scx_bpf_sub_grant, KF_IMPLICIT_ARGS)
+BTF_ID_FLAGS(func, scx_bpf_sub_revoke, KF_IMPLICIT_ARGS)
+BTF_ID_FLAGS(func, scx_bpf_sub_caps, KF_IMPLICIT_ARGS)
 BTF_KFUNCS_END(scx_kfunc_ids_any)
 
 static const struct btf_kfunc_id_set scx_kfunc_set_any = {

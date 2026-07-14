@@ -27,6 +27,7 @@ void scx_sub_enable_workfn(struct kthread_work *work);
 bool scx_bpf_sub_dispatch(u64 cgroup_id, const struct bpf_prog_aux *aux);
 void scx_free_pshards(struct scx_sched *sch);
 s32 scx_alloc_pshards(struct scx_sched *sch);
+void scx_init_root_caps(struct scx_sched *sch);
 
 static inline const char *sch_cgrp_path(struct scx_sched *sch)
 {
@@ -45,6 +46,7 @@ static inline void drain_descendants(struct scx_sched *sch) { }
 static inline void scx_sub_disable(struct scx_sched *sch) { }
 static inline void scx_free_pshards(struct scx_sched *sch) {}
 static inline s32 scx_alloc_pshards(struct scx_sched *sch) { return 0; }
+static inline void scx_init_root_caps(struct scx_sched *sch) {}
 
 #endif	/* CONFIG_EXT_SUB_SCHED */
 
