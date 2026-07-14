@@ -51,6 +51,7 @@ enum scx_exit_kind {
 	SCX_EXIT_UNREG_KERN,	/* kernel-initiated unregistration */
 	SCX_EXIT_SYSRQ,		/* requested by 'S' sysrq */
 	SCX_EXIT_PARENT,	/* parent exiting */
+	SCX_EXIT_PARENT_KILL,	/* killed by parent scheduler */
 
 	SCX_EXIT_ERROR = 1024,	/* runtime error, error msg contains details */
 	SCX_EXIT_ERROR_BPF,	/* ERROR but triggered through scx_bpf_error() */
@@ -1876,6 +1877,12 @@ struct scx_enable_cmd {
 	int			ret;
 };
 
+/* string formatting from BPF */
+struct scx_bstr_buf {
+	u64			data[MAX_BPRINTF_VARARGS];
+	char			line[SCX_EXIT_MSG_LEN];
+};
+
 extern struct scx_sched __rcu *scx_root;
 DECLARE_PER_CPU(struct rq *, scx_locked_rq_state);
 
@@ -1936,10 +1943,14 @@ struct scx_sched *scx_alloc_and_add_sched(struct scx_enable_cmd *cmd,
 int scx_validate_ops(struct scx_sched *sch, const struct sched_ext_ops *ops);
 int scx_sched_sysfs_add(struct scx_sched *sch);
 bool scx_is_descendant(struct scx_sched *sch, struct scx_sched *ancestor);
+__printf(3, 0) s32 scx_bstr_format(struct scx_sched *sch, struct scx_bstr_buf *buf,
+				   char *fmt, unsigned long long *data, u32 data__sz);
 
 extern raw_spinlock_t scx_sched_lock;
 extern struct mutex scx_enable_mutex;
 extern struct percpu_rw_semaphore scx_fork_rwsem;
+extern raw_spinlock_t scx_exit_bstr_buf_lock;
+extern struct scx_bstr_buf scx_exit_bstr_buf;
 #ifdef CONFIG_EXT_SUB_SCHED
 extern const struct rhashtable_params scx_sched_hash_params;
 extern struct rhashtable scx_sched_hash;

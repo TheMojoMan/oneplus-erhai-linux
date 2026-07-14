@@ -1694,6 +1694,63 @@ __bpf_kfunc s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask *out_
 	return 0;
 }
 
+/**
+ * scx_bpf_sub_kill_bstr - Kill a direct child sub-scheduler
+ * @cgroup_id: cgroup id of the direct child to kill
+ * @fmt: reason message format string
+ * @data: format string parameters packaged using ___bpf_fill() macro
+ * @data__sz: @data len, must end in '__sz' for the verifier
+ * @aux: implicit BPF argument to access bpf_prog_aux hidden from BPF progs
+ *
+ * Evict a direct child sub-scheduler, disabling it with the supplied reason.
+ * The child and its subtree are torn down asynchronously through the usual
+ * disable path.
+ *
+ * Unlike scx_bpf_exit(), no exit code is taken: the child is a separate
+ * scheduler with its own exit-code semantics, so a code chosen by the parent
+ * would have no defined meaning. The reason string carries the intent.
+ *
+ * Return 0 on success or -ENODEV if @cgroup_id names no sub-scheduler, which
+ * can race with the child detaching on its own and so is not a scheduler error.
+ * Naming a sched that exists but is not a direct child aborts the parent.
+ */
+__printf(2, 0)
+__bpf_kfunc s32 scx_bpf_sub_kill_bstr(u64 cgroup_id, char *fmt,
+				      unsigned long long *data, u32 data__sz,
+				      const struct bpf_prog_aux *aux)
+{
+	struct scx_sched *parent, *child;
+	s32 ret;
+
+	guard(rcu)();
+
+	parent = scx_prog_sched(aux);
+	if (unlikely(!parent))
+		return -ENODEV;
+
+	if (!scx_is_cid_type()) {
+		scx_error(parent, "sub-cap kfuncs require a cid-form scheduler");
+		return -EOPNOTSUPP;
+	}
+
+	child = scx_find_sub_sched(cgroup_id);
+	if (unlikely(!child))
+		return -ENODEV;
+
+	if (unlikely(scx_parent(child) != parent)) {
+		scx_error(parent, "%s: sub-%llu is not a direct child",
+			  parent->cgrp_path, cgroup_id);
+		return -EINVAL;
+	}
+
+	guard(raw_spinlock_irqsave)(&scx_exit_bstr_buf_lock);
+	ret = scx_bstr_format(parent, &scx_exit_bstr_buf, fmt, data, data__sz);
+	if (ret < 0)
+		return ret;
+	scx_exit(child, SCX_EXIT_PARENT_KILL, 0, "%s", scx_exit_bstr_buf.line);
+	return 0;
+}
+
 __bpf_kfunc_end_defs();
 
 #endif	/* CONFIG_EXT_SUB_SCHED */

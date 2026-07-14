@@ -187,14 +187,8 @@ static const struct rhashtable_params dsq_hash_params = {
 
 static LLIST_HEAD(dsqs_to_free);
 
-/* string formatting from BPF */
-struct scx_bstr_buf {
-	u64			data[MAX_BPRINTF_VARARGS];
-	char			line[SCX_EXIT_MSG_LEN];
-};
-
-static DEFINE_RAW_SPINLOCK(scx_exit_bstr_buf_lock);
-static struct scx_bstr_buf scx_exit_bstr_buf;
+DEFINE_RAW_SPINLOCK(scx_exit_bstr_buf_lock);
+struct scx_bstr_buf scx_exit_bstr_buf;
 
 /* ops debug dump */
 static DEFINE_RAW_SPINLOCK(scx_dump_lock);
@@ -5755,6 +5749,8 @@ static const char *scx_exit_reason(enum scx_exit_kind kind)
 		return "disabled by sysrq-S";
 	case SCX_EXIT_PARENT:
 		return "parent exiting";
+	case SCX_EXIT_PARENT_KILL:
+		return "killed by parent scheduler";
 	case SCX_EXIT_ERROR:
 		return "runtime error";
 	case SCX_EXIT_ERROR_BPF:
@@ -9370,8 +9366,8 @@ static s32 __bstr_format(struct scx_sched *sch, u64 *data_buf, char *line_buf,
 }
 
 __printf(3, 0)
-static s32 bstr_format(struct scx_sched *sch, struct scx_bstr_buf *buf,
-		       char *fmt, unsigned long long *data, u32 data__sz)
+s32 scx_bstr_format(struct scx_sched *sch, struct scx_bstr_buf *buf,
+		    char *fmt, unsigned long long *data, u32 data__sz)
 {
 	return __bstr_format(sch, buf->data, buf->line, sizeof(buf->line),
 			     fmt, data, data__sz);
@@ -9401,7 +9397,7 @@ __bpf_kfunc void scx_bpf_exit_bstr(s64 exit_code, char *fmt,
 	raw_spin_lock_irqsave(&scx_exit_bstr_buf_lock, flags);
 	sch = scx_prog_sched(aux);
 	if (likely(sch) &&
-	    bstr_format(sch, &scx_exit_bstr_buf, fmt, data, data__sz) >= 0)
+	    scx_bstr_format(sch, &scx_exit_bstr_buf, fmt, data, data__sz) >= 0)
 		scx_exit(sch, SCX_EXIT_UNREG_BPF, exit_code, "%s", scx_exit_bstr_buf.line);
 	raw_spin_unlock_irqrestore(&scx_exit_bstr_buf_lock, flags);
 }
@@ -9426,7 +9422,7 @@ __bpf_kfunc void scx_bpf_error_bstr(char *fmt, unsigned long long *data,
 	raw_spin_lock_irqsave(&scx_exit_bstr_buf_lock, flags);
 	sch = scx_prog_sched(aux);
 	if (likely(sch) &&
-	    bstr_format(sch, &scx_exit_bstr_buf, fmt, data, data__sz) >= 0)
+	    scx_bstr_format(sch, &scx_exit_bstr_buf, fmt, data, data__sz) >= 0)
 		scx_exit(sch, SCX_EXIT_ERROR_BPF, 0, "%s", scx_exit_bstr_buf.line);
 	raw_spin_unlock_irqrestore(&scx_exit_bstr_buf_lock, flags);
 }
@@ -10062,6 +10058,13 @@ __bpf_kfunc s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask *out_
 {
 	return -EOPNOTSUPP;
 }
+
+__bpf_kfunc s32 scx_bpf_sub_kill_bstr(u64 cgroup_id, char *fmt,
+				      unsigned long long *data, u32 data__sz,
+				      const struct bpf_prog_aux *aux)
+{
+	return -EOPNOTSUPP;
+}
 #endif	/* !CONFIG_EXT_SUB_SCHED */
 
 __bpf_kfunc_end_defs();
@@ -10111,6 +10114,7 @@ BTF_ID_FLAGS(func, scx_bpf_task_cgroup, KF_IMPLICIT_ARGS | KF_RCU | KF_ACQUIRE)
 BTF_ID_FLAGS(func, scx_bpf_sub_grant, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, scx_bpf_sub_revoke, KF_IMPLICIT_ARGS)
 BTF_ID_FLAGS(func, scx_bpf_sub_caps, KF_IMPLICIT_ARGS)
+BTF_ID_FLAGS(func, scx_bpf_sub_kill_bstr, KF_IMPLICIT_ARGS)
 BTF_KFUNCS_END(scx_kfunc_ids_any)
 
 static const struct btf_kfunc_id_set scx_kfunc_set_any = {

@@ -119,6 +119,8 @@ s32 scx_bpf_sub_grant(u64 cgroup_id, u64 caps, const struct scx_cmask *cmask,
 		      struct scx_cmask *denied) __ksym __weak;
 void scx_bpf_sub_revoke(u64 cgroup_id, u64 caps, const struct scx_cmask *cmask) __ksym __weak;
 s32 scx_bpf_sub_caps(u64 cgroup_id, u64 caps, struct scx_cmask *out) __ksym __weak;
+s32 scx_bpf_sub_kill_bstr(u64 cgroup_id, char *fmt,
+			  unsigned long long *data, u32 data__sz) __ksym __weak;
 
 /*
  * Use the following as @it__iter when calling scx_bpf_dsq_move[_vtime]() from
@@ -163,6 +165,22 @@ void ___scx_bpf_bstr_format_checker(const char *fmt, ...) {}
 	scx_bpf_bstr_preamble(fmt, args)					\
 	scx_bpf_exit_bstr(code, ___fmt, ___param, sizeof(___param));		\
 	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+})
+
+/*
+ * scx_bpf_sub_kill() wraps the scx_bpf_sub_kill_bstr() kfunc with variadic
+ * arguments instead of an array of u64. It kills the direct child sub-scheduler
+ * @cgid, passing the formatted reason to its user space, and evaluates to the
+ * kfunc's return value. On a kernel without sub-scheduler support the kfunc is
+ * absent and it returns -EOPNOTSUPP.
+ */
+#define scx_bpf_sub_kill(cgid, fmt, args...)					\
+({										\
+	scx_bpf_bstr_preamble(fmt, args)					\
+	___scx_bpf_bstr_format_checker(fmt, ##args);				\
+	bpf_ksym_exists(scx_bpf_sub_kill_bstr) ?				\
+		scx_bpf_sub_kill_bstr((cgid), ___fmt, ___param,			\
+				      sizeof(___param)) : -EOPNOTSUPP;		\
 })
 
 /*
