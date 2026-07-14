@@ -1135,6 +1135,13 @@ struct scx_event_stats {
 	 * from sub_bypass_dsq's.
 	 */
 	s64		SCX_EV_SUB_BYPASS_DISPATCH;
+
+	/*
+	 * The number of times a migration-disabled task lacking the cap for its
+	 * cid was allowed onto the local DSQ. It must run on its pinned CPU, so
+	 * it can't be rejected. The violation is counted here.
+	 */
+	s64		SCX_EV_SUB_FORCED_ADMIT;
 };
 
 #define SCX_EVENTS_LIST(SCX_EVENT)					\
@@ -1150,7 +1157,8 @@ struct scx_event_stats {
 	SCX_EVENT(SCX_EV_BYPASS_DISPATCH);				\
 	SCX_EVENT(SCX_EV_BYPASS_ACTIVATE);				\
 	SCX_EVENT(SCX_EV_INSERT_NOT_OWNED);				\
-	SCX_EVENT(SCX_EV_SUB_BYPASS_DISPATCH)
+	SCX_EVENT(SCX_EV_SUB_BYPASS_DISPATCH);				\
+	SCX_EVENT(SCX_EV_SUB_FORCED_ADMIT)
 
 struct scx_sched;
 
@@ -1270,6 +1278,9 @@ enum scx_cap_flags {
 	__SCX_CAP_ALL			= BIT_U64(__SCX_NR_CAPS) - 1,
 
 	SCX_CAP_DUMMY			= BIT_U64(__SCX_CAP_DUMMY),
+
+	/* caps whose loss strands queued tasks, see scx_process_sync_ecaps() */
+	SCX_CAPS_REENQ_ON_LOSS		= 0,
 };
 
 #ifdef CONFIG_EXT_SUB_SCHED
@@ -1583,6 +1594,9 @@ enum scx_reenq_flags {
 	/* low 16bits determine which tasks should be reenqueued */
 	SCX_REENQ_ANY		= 1LLU << 0,	/* all tasks */
 
+	/* internal: kernel-issued on cap revoke, not accepted from BPF */
+	SCX_REENQ_CAP_REVOKE	= 1LLU << 1,
+
 	__SCX_REENQ_FILTER_MASK	= 0xffffLLU,
 
 	__SCX_REENQ_USER_MASK	= SCX_REENQ_ANY,
@@ -1835,6 +1849,9 @@ void scx_task_iter_start(struct scx_task_iter *iter, struct cgroup *cgrp);
 void scx_task_iter_unlock(struct scx_task_iter *iter);
 void scx_task_iter_stop(struct scx_task_iter *iter);
 struct task_struct *scx_task_iter_next_locked(struct scx_task_iter *iter);
+void scx_dispatch_dequeue(struct rq *rq, struct task_struct *p);
+void scx_do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
+			 int sticky_cpu);
 bool scx_consume_dispatch_q(struct scx_sched *sch, struct rq *rq,
 			    struct scx_dispatch_q *dsq, u64 enq_flags);
 bool scx_consume_global_dsq(struct scx_sched *sch, struct rq *rq);

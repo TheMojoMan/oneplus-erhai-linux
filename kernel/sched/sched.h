@@ -794,6 +794,9 @@ enum scx_rq_flags {
 
 struct scx_rq {
 	struct scx_dispatch_q	local_dsq;
+#ifdef CONFIG_EXT_SUB_SCHED
+	struct scx_dispatch_q	reject_dsq;		/* staging for cap-rejected tasks */
+#endif
 	struct list_head	runnable_list;		/* runnable tasks on this rq */
 	struct list_head	ddsp_deferred_locals;	/* deferred ddsps from enq */
 	unsigned long		ops_qseq;

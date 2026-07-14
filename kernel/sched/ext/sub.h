@@ -34,6 +34,10 @@ void scx_online_ecaps(struct rq *rq);
 void scx_offline_ecaps(struct rq *rq);
 void scx_discard_ecaps_to_sync(s32 cpu, struct scx_sched_pcpu *pcpu);
 void scx_discard_stale_ecaps_syncs(void);
+struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq *rq,
+					       struct task_struct *p, u64 *enq_flags);
+bool scx_task_reenq_on_cap_revoke(struct rq *rq, struct task_struct *p);
+void scx_reenq_reject(struct rq *rq);
 
 static inline const char *sch_cgrp_path(struct scx_sched *sch)
 {
@@ -58,6 +62,9 @@ static inline void scx_online_ecaps(struct rq *rq) {}
 static inline void scx_offline_ecaps(struct rq *rq) {}
 static inline void scx_discard_ecaps_to_sync(s32 cpu, struct scx_sched_pcpu *pcpu) {}
 static inline void scx_discard_stale_ecaps_syncs(void) {}
+static inline struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq *rq, struct task_struct *p, u64 *enq_flags) { return &rq->scx.local_dsq; }
+static inline bool scx_task_reenq_on_cap_revoke(struct rq *rq, struct task_struct *p) { return false; }
+static inline void scx_reenq_reject(struct rq *rq) {}
 
 #endif	/* CONFIG_EXT_SUB_SCHED */
 
@@ -76,11 +83,53 @@ static inline void scx_discard_stale_ecaps_syncs(void) {}
 
 #ifdef CONFIG_EXT_SUB_SCHED
 
+/**
+ * scx_missing_caps - The caps in @needed that @sch lacks on @cpu
+ * @sch: sched to test
+ * @cpu: cpu to test on
+ * @needed: bitmask of SCX_CAP_* values
+ *
+ * Return the caps in @needed that @sch lacks for @cpu, 0 if it holds them all.
+ */
+static inline u64 scx_missing_caps(struct scx_sched *sch, s32 cpu, u64 needed)
+{
+	u64 ecaps;
+
+	/* root holds every cap on every cpu */
+	if (!sch->level)
+		return 0;
+
+	ecaps = READ_ONCE(per_cpu_ptr(sch->pcpu, cpu)->ecaps);
+
+	return needed & ~ecaps;
+}
+
+/*
+ * Cap semantics: which caps an action requires, and which caps a cap implies.
+ * Keep all such mappings collected here.
+ */
+
+/* map @enq_flags to the SCX_CAP_* bit required for the local-DSQ insert */
+static inline u64 scx_caps_for_enq(u64 enq_flags)
+{
+	return 0;
+}
+
+/* map queued @p to the SCX_CAP_* bit required to stay on its local DSQ */
+static inline u64 scx_caps_for_task(struct task_struct *p)
+{
+	return 0;
+}
+
 /* caps implied by holding @cap */
 static inline u64 scx_caps_implied(u64 cap)
 {
 	return 0;
 }
+
+#else	/* CONFIG_EXT_SUB_SCHED */
+
+static inline u64 scx_missing_caps(struct scx_sched *sch, s32 cpu, u64 needed) { return 0; }
 
 #endif	/* CONFIG_EXT_SUB_SCHED */
 

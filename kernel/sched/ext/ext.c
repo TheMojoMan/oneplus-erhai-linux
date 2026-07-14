@@ -101,6 +101,7 @@ static bool dsq_is_rq_owned(struct scx_dispatch_q *dsq)
 {
 	switch (dsq->id) {
 	case SCX_DSQ_LOCAL:
+	case SCX_DSQ_REJECT:
 		return true;
 	default:
 		return false;
@@ -1287,6 +1288,12 @@ static void rq_owned_post_enq(struct scx_sched *sch, struct rq *rq,
 {
 	call_task_dequeue(sch, rq, p, 0);
 
+	/* rejected: kick the deferred reenq, skip wakeup/preemption */
+	if (unlikely(dsq->id == SCX_DSQ_REJECT)) {
+		schedule_deferred_locked(rq);
+		return;
+	}
+
 	/*
 	 * Note that @rq's lock may be dropped between this enqueue and @p
 	 * actually getting on CPU. This gives higher-class tasks (e.g. RT)
@@ -1344,7 +1351,12 @@ static void scx_dispatch_enqueue(struct scx_sched *sch, struct rq *rq,
 				 struct scx_dispatch_q *dsq, struct task_struct *p,
 				 u64 enq_flags)
 {
-	bool is_rq_owned = dsq_is_rq_owned(dsq);
+	bool is_rq_owned = false;
+
+	if (dsq->id == SCX_DSQ_LOCAL) {
+		dsq = scx_local_or_reject_dsq(sch, rq, p, &enq_flags);
+		is_rq_owned = true;
+	}
 
 	WARN_ON_ONCE(p->scx.dsq || !list_empty(&p->scx.dsq_list.node));
 	WARN_ON_ONCE((p->scx.dsq_flags & SCX_TASK_DSQ_ON_PRIQ) ||
@@ -1494,7 +1506,7 @@ static void task_unlink_from_dsq(struct task_struct *p,
 	}
 }
 
-static void scx_dispatch_dequeue(struct rq *rq, struct task_struct *p)
+void scx_dispatch_dequeue(struct rq *rq, struct task_struct *p)
 {
 	struct scx_dispatch_q *dsq = p->scx.dsq;
 	bool is_rq_owned = dsq && dsq_is_rq_owned(dsq);
@@ -1584,6 +1596,10 @@ static struct scx_dispatch_q *find_dsq_for_dispatch(struct scx_sched *sch,
 	else
 		dsq = find_user_dsq(sch, dsq_id);
 
+	/*
+	 * Built-in DSQs are never inserted into dsq_hash, so REJECT hits the
+	 * error below. It cannot be reached with an ID.
+	 */
 	if (unlikely(!dsq)) {
 		scx_error(sch, "non-existent DSQ 0x%llx", dsq_id);
 		return find_global_dsq(sch, tcpu);
@@ -1709,8 +1725,8 @@ bool scx_rq_online(struct rq *rq)
 	return likely((rq->scx.flags & SCX_RQ_ONLINE) && cpu_active(cpu_of(rq)));
 }
 
-static void scx_do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
-				int sticky_cpu)
+void scx_do_enqueue_task(struct rq *rq, struct task_struct *p, u64 enq_flags,
+			 int sticky_cpu)
 {
 	struct scx_sched *sch = scx_task_sched(p);
 	struct task_struct **ddsp_taskp;
@@ -2079,7 +2095,7 @@ static void move_local_task_to_local_dsq(struct scx_sched *sch,
 					 struct scx_dispatch_q *src_dsq,
 					 struct rq *dst_rq)
 {
-	struct scx_dispatch_q *dst_dsq = &dst_rq->scx.local_dsq;
+	struct scx_dispatch_q *dst_dsq = scx_local_or_reject_dsq(sch, dst_rq, p, &enq_flags);
 
 	/* @dsq is locked and @p is on @dst_rq */
 	lockdep_assert_held(&src_dsq->lock);
@@ -3808,7 +3824,8 @@ static void process_ddsp_deferred_locals(struct rq *rq)
  * another reenq cycle. Repetitions are bounded by %SCX_REENQ_LOCAL_MAX_REPEAT
  * in process_deferred_reenq_locals().
  */
-static bool local_task_should_reenq(struct task_struct *p, u64 *reenq_flags, u32 *reason)
+static bool local_task_should_reenq(struct rq *rq, struct task_struct *p,
+				    u64 *reenq_flags, u32 *reason)
 {
 	bool first;
 
@@ -3821,6 +3838,12 @@ static bool local_task_should_reenq(struct task_struct *p, u64 *reenq_flags, u32
 	    (!first || !(*reenq_flags & SCX_REENQ_TSR_RQ_OPEN))) {
 		__scx_add_event(scx_task_sched(p), SCX_EV_REENQ_IMMED, 1);
 		*reason = SCX_TASK_REENQ_IMMED;
+		return true;
+	}
+
+	if ((*reenq_flags & SCX_REENQ_CAP_REVOKE) &&
+	    scx_task_reenq_on_cap_revoke(rq, p)) {
+		*reason = SCX_TASK_REENQ_CAP;
 		return true;
 	}
 
@@ -3867,7 +3890,7 @@ static u32 reenq_local(struct scx_sched *sch, struct rq *rq, u64 reenq_flags)
 		if (!scx_is_descendant(task_sch, sch))
 			continue;
 
-		if (!local_task_should_reenq(p, &reenq_flags, &reason))
+		if (!local_task_should_reenq(rq, p, &reenq_flags, &reason))
 			continue;
 
 		scx_dispatch_dequeue(rq, p);
@@ -4063,6 +4086,8 @@ static void run_deferred(struct rq *rq)
 
 	if (!list_empty(&rq->scx.deferred_reenq_users))
 		process_deferred_reenq_users(rq);
+
+	scx_reenq_reject(rq);
 }
 
 #ifdef CONFIG_NO_HZ_FULL
@@ -7896,6 +7921,9 @@ void __init init_sched_ext_class(void)
 
 		/* local_dsq's sch will be set during scx_root_enable() */
 		BUG_ON(init_dsq(&rq->scx.local_dsq, SCX_DSQ_LOCAL, NULL));
+#ifdef CONFIG_EXT_SUB_SCHED
+		BUG_ON(init_dsq(&rq->scx.reject_dsq, SCX_DSQ_REJECT, NULL));
+#endif
 
 		INIT_LIST_HEAD(&rq->scx.runnable_list);
 		INIT_LIST_HEAD(&rq->scx.ddsp_deferred_locals);

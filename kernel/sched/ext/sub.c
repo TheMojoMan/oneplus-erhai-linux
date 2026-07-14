@@ -216,6 +216,118 @@ void scx_init_root_caps(struct scx_sched *sch)
 	}
 }
 
+/**
+ * scx_local_or_reject_dsq - Pick the local or reject DSQ for an insert
+ * @sch: enqueuing sub-sched
+ * @rq: rq whose local DSQ @p targets
+ * @p: task being inserted
+ * @enq_flags: in/out; %SCX_ENQ_IMMED is cleared when diverting to reject
+ *
+ * Return @rq's local DSQ if @sch holds the required caps on @rq's cid,
+ * otherwise @rq's reject DSQ after recording the reenq reason on @p.
+ *
+ * Bypass doesn't need special-casing as a bypassing sched's tasks are enqueued
+ * to and run by its nearest non-bypassing ancestor. If root is bypassing, it
+ * always holds all caps.
+ */
+struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq *rq,
+					       struct task_struct *p, u64 *enq_flags)
+{
+	s32 cid = __scx_cpu_to_cid(cpu_of(rq));
+	u64 missing = scx_missing_caps(sch, cpu_of(rq), scx_caps_for_enq(*enq_flags));
+
+	/* requirements met */
+	if (likely(!missing))
+		return &rq->scx.local_dsq;
+
+	/*
+	 * The task must run on this CPU regardless of caps: the rq is draining
+	 * offline (BPF scheduler bypassed), the task is migration-disabled, or a
+	 * migration is pending. Admit despite the missing caps and count it.
+	 */
+	if (unlikely(!scx_rq_online(rq) || is_migration_disabled(p) ||
+		     p->migration_pending)) {
+		__scx_add_event(sch, SCX_EV_SUB_FORCED_ADMIT, 1);
+		return &rq->scx.local_dsq;
+	}
+
+	p->scx.reenq_reason_caps = missing;
+	p->scx.reenq_reason_cid = cid;
+
+	/*
+	 * Only local DSQ can honor IMMED and dsq_inc_nr() WARNs on IMMED into
+	 * others. Strip both the enq flag and the sticky task flag - the
+	 * latter can carry in from an earlier admitted IMMED insert.
+	 */
+	*enq_flags &= ~SCX_ENQ_IMMED;
+	p->scx.flags &= ~SCX_TASK_IMMED;
+
+	return &rq->scx.reject_dsq;
+}
+
+/* @p lost the caps needed to stay on @rq's local DSQ? Record reason if so. */
+bool scx_task_reenq_on_cap_revoke(struct rq *rq, struct task_struct *p)
+{
+	u64 missing;
+
+	/* migration-disabled tasks are admitted regardless of caps */
+	if (is_migration_disabled(p))
+		return false;
+
+	missing = scx_missing_caps(scx_task_sched(p), cpu_of(rq), scx_caps_for_task(p));
+	if (likely(!missing))
+		return false;
+
+	p->scx.reenq_reason_caps = missing;
+	p->scx.reenq_reason_cid = __scx_cpu_to_cid(cpu_of(rq));
+	return true;
+}
+
+/*
+ * Drain @rq->scx.reject_dsq, reenqueueing each task so the BPF re-decides
+ * from p->scx.reenq_reason_*.
+ *
+ * A task can be re-rejected repeatedly, and there's no repeat limit here.
+ * Rejection can't happen for root, and sub-scheds can be safely ejected after
+ * triggering the stall watchdog.
+ */
+void scx_reenq_reject(struct rq *rq)
+{
+	LIST_HEAD(tasks);
+	struct task_struct *p, *n;
+
+	lockdep_assert_rq_held(rq);
+
+	if (list_empty(&rq->scx.reject_dsq.list))
+		return;
+
+	/*
+	 * Move to a private list so a task re-rejected by the
+	 * scx_do_enqueue_task() below isn't revisited this round.
+	 */
+	list_for_each_entry_safe(p, n, &rq->scx.reject_dsq.list, scx.dsq_list.node) {
+		/* migration_pending tasks should have bypassed to local DSQ */
+		if (WARN_ON_ONCE(p->migration_pending))
+			continue;
+
+		scx_dispatch_dequeue(rq, p);
+
+		if (WARN_ON_ONCE(p->scx.flags & SCX_TASK_REENQ_REASON_MASK))
+			p->scx.flags &= ~SCX_TASK_REENQ_REASON_MASK;
+		p->scx.flags |= SCX_TASK_REENQ_CAP;
+
+		list_add_tail(&p->scx.dsq_list.node, &tasks);
+	}
+
+	list_for_each_entry_safe(p, n, &tasks, scx.dsq_list.node) {
+		list_del_init(&p->scx.dsq_list.node);
+
+		scx_do_enqueue_task(rq, p, SCX_ENQ_REENQ, -1);
+
+		p->scx.flags &= ~SCX_TASK_REENQ_REASON_MASK;
+	}
+}
+
 /* record a caps change, see struct scx_caps_updated */
 static void caps_updated_record(struct scx_pshard *ps, const struct scx_cmask *cids, u64 caps,
 				struct list_head *to_deliver)
@@ -361,6 +473,7 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 	s32 cpu = cpu_of(rq);
 	s32 cid, shard;
 	struct llist_node *batch, *pos, *tmp;
+	u64 lost_all = 0;
 
 	lockdep_assert_rq_held(rq);
 
@@ -389,15 +502,19 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 		struct scx_sched_pcpu *pcpu =
 			container_of(pos, struct scx_sched_pcpu, ecaps_to_sync_node);
 		struct scx_pshard *ps = pcpu->sch->pshard[shard];
-		u64 ecaps;
+		u64 old, ecaps, lost;
 
 		init_llist_node(pos);
 
 		/* pairs with smp_mb() in queue_sync_ecaps(), see there */
 		smp_mb();
 
+		old = READ_ONCE(pcpu->ecaps);
 		ecaps = calc_effective_caps(ps, cid);
 		WRITE_ONCE(pcpu->ecaps, ecaps);
+
+		lost = old & ~ecaps;
+		lost_all |= lost;
 
 		/* tell the sched its effective caps on this cid changed */
 		if (ecaps != pcpu->reported_ecaps &&
@@ -415,6 +532,14 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 			pcpu->reported_ecaps = ecaps;
 		}
 	}
+
+	/*
+	 * Losing a cap can strand already-queued tasks. Schedule a reenq scan
+	 * to move the now-capless ones off the local DSQ. The scan tests
+	 * against the effective caps and thus must come after the ecaps sync.
+	 */
+	if (lost_all & SCX_CAPS_REENQ_ON_LOSS)
+		scx_schedule_reenq_local(rq, SCX_REENQ_CAP_REVOKE);
 }
 
 /*
