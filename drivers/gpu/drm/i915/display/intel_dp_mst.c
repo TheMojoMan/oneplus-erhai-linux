@@ -1453,6 +1453,11 @@ static int mst_connector_get_ddc_modes(struct drm_connector *_connector)
 
 	drm_edid_free(drm_edid);
 
+	if (intel_dp_tunnel_uhbr_lanes_wa_setup(intel_dp)) {
+		intel_dp_flush_connector_commits(connector);
+		intel_dp_tunnel_uhbr_lanes_wa_apply(intel_dp);
+	}
+
 	return ret;
 }
 

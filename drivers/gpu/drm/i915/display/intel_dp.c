@@ -3590,6 +3590,8 @@ void intel_dp_reset_link_params(struct intel_dp *intel_dp)
 	 * was called.
 	 */
 	intel_dp_link_caps_reset(intel_dp->link.caps);
+	intel_dp_tunnel_uhbr_lanes_wa_apply(intel_dp);
+
 	intel_dp->link.mst_probed_lane_count = 0;
 	intel_dp->link.mst_probed_rate = 0;
 	intel_dp_link_training_reset(intel_dp->link.training);
@@ -6242,6 +6244,8 @@ intel_dp_detect(struct drm_connector *_connector,
 
 		intel_dp_tunnel_disconnect(intel_dp);
 
+		intel_dp_tunnel_uhbr_lanes_wa_reset(intel_dp);
+
 		goto out_unset_edid;
 	}
 
@@ -6305,6 +6309,9 @@ intel_dp_detect(struct drm_connector *_connector,
 	intel_dp_set_edid(intel_dp);
 	if (intel_dp_is_edp(intel_dp) || connector->detect_edid)
 		status = connector_status_connected;
+
+	if (intel_dp_tunnel_uhbr_lanes_wa_setup(intel_dp))
+		intel_dp_tunnel_uhbr_lanes_wa_apply(intel_dp);
 
 out_unset_edid:
 	if (status != connector_status_connected && !intel_dp->is_mst)

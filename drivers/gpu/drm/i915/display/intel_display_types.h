@@ -1878,6 +1878,7 @@ struct intel_dp {
 
 	struct drm_dp_tunnel *tunnel;
 	bool tunnel_suspended:1;
+	u8 disabled_uhbr_lane_mask;
 
 	struct {
 		struct intel_dp_mst_encoder *stream_encoders[I915_MAX_PIPES];
