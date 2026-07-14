@@ -130,9 +130,20 @@ static inline u64 scx_caps_implied(u64 cap)
 	return 0;
 }
 
+/* may @p keep running on @rq's cpu? requires baseline cpu access */
+static inline bool scx_task_can_stay_on_cpu(struct rq *rq, struct task_struct *p)
+{
+	/* a migration-disabled task is let in without caps, keep it likewise */
+	if (unlikely(is_migration_disabled(p)))
+		return true;
+
+	return likely(!scx_missing_caps(scx_task_sched(p), cpu_of(rq), SCX_CAP_BASE));
+}
+
 #else	/* CONFIG_EXT_SUB_SCHED */
 
 static inline u64 scx_missing_caps(struct scx_sched *sch, s32 cpu, u64 needed) { return 0; }
+static inline bool scx_task_can_stay_on_cpu(struct rq *rq, struct task_struct *p) { return true; }
 
 #endif	/* CONFIG_EXT_SUB_SCHED */
 

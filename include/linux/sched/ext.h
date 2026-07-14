@@ -223,10 +223,11 @@ struct sched_ext_entity {
 	/* BPF scheduler modifiable fields */
 
 	/*
-	 * Runtime budget in nsecs. This is usually set through
-	 * scx_bpf_dsq_insert() but can also be modified directly by the BPF
-	 * scheduler. Automatically decreased by SCX as the task executes. On
-	 * depletion, a scheduling event is triggered.
+	 * Runtime budget in nsecs - how long the task may hold its cpu. Owned
+	 * by the task's scheduler. Set it when enqueuing via
+	 * scx_bpf_dsq_insert(), or otherwise via scx_bpf_task_set_slice().
+	 * Automatically decreased as the task executes. On depletion a
+	 * scheduling event is triggered.
 	 *
 	 * This value is cleared to zero if the task is preempted by
 	 * %SCX_KICK_PREEMPT and shouldn't be used to determine how long the
@@ -242,6 +243,14 @@ struct sched_ext_entity {
 	 * mangle the ordering and is not recommended.
 	 */
 	u64			dsq_vtime;
+
+	/*
+	 * Out-of-band slice request from scx_bpf_task_set_slice() when the
+	 * caller does not hold the rq lock, applied under the rq lock at the
+	 * next slice consideration. One atomic64 packs the pending flag, the
+	 * issuing sch's id, and the requested slice. See scx_slice_oob_consts.
+	 */
+	atomic64_t		slice_oob;
 
 	/*
 	 * Sub-sched cap rejected reenq context, valid only while
