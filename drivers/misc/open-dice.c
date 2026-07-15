@@ -31,7 +31,8 @@
 struct open_dice_drvdata {
 	struct mutex lock;
 	char name[16];
-	struct reserved_mem *rmem;
+	phys_addr_t mem_base;
+	resource_size_t mem_size;
 	struct miscdevice misc;
 };
 
@@ -45,14 +46,14 @@ static int open_dice_wipe(struct open_dice_drvdata *drvdata)
 	void *kaddr;
 
 	mutex_lock(&drvdata->lock);
-	kaddr = devm_memremap(drvdata->misc.this_device, drvdata->rmem->base,
-			      drvdata->rmem->size, MEMREMAP_WC);
+	kaddr = devm_memremap(drvdata->misc.this_device, drvdata->mem_base,
+			      drvdata->mem_size, MEMREMAP_WC);
 	if (IS_ERR(kaddr)) {
 		mutex_unlock(&drvdata->lock);
 		return PTR_ERR(kaddr);
 	}
 
-	memset(kaddr, 0, drvdata->rmem->size);
+	memset(kaddr, 0, drvdata->mem_size);
 	devm_memunmap(drvdata->misc.this_device, kaddr);
 	mutex_unlock(&drvdata->lock);
 	return 0;
@@ -64,7 +65,7 @@ static int open_dice_wipe(struct open_dice_drvdata *drvdata)
 static ssize_t open_dice_read(struct file *filp, char __user *ptr, size_t len,
 			      loff_t *off)
 {
-	unsigned long val = to_open_dice_drvdata(filp)->rmem->size;
+	unsigned long val = to_open_dice_drvdata(filp)->mem_size;
 
 	return simple_read_from_buffer(ptr, len, off, &val, sizeof(val));
 }
@@ -102,8 +103,8 @@ static int open_dice_mmap_prepare(struct vm_area_desc *desc)
 	/* Create write-combine mapping so all clients observe a wipe. */
 	desc->page_prot = pgprot_writecombine(desc->page_prot);
 	vma_desc_set_flags(desc, VMA_DONTCOPY_BIT, VMA_DONTDUMP_BIT);
-	mmap_action_simple_ioremap(desc, drvdata->rmem->base,
-				   drvdata->rmem->size);
+	mmap_action_simple_ioremap(desc, drvdata->mem_base,
+				   drvdata->mem_size);
 	return 0;
 }
 
@@ -118,27 +119,31 @@ static int __init open_dice_probe(struct platform_device *pdev)
 {
 	static unsigned int dev_idx;
 	struct device *dev = &pdev->dev;
-	struct reserved_mem *rmem = NULL;
 	struct open_dice_drvdata *drvdata;
+	phys_addr_t mem_base;
+	resource_size_t mem_size;
 	int ret;
 
 	if (dev->of_node) {
-		rmem = of_reserved_mem_lookup(dev->of_node);
+		struct reserved_mem *rmem = of_reserved_mem_lookup(dev->of_node);
+
 		if (!rmem) {
 			dev_err(dev, "failed to lookup reserved memory\n");
 			return -EINVAL;
 		}
+		mem_base = rmem->base;
+		mem_size = rmem->size;
 	} else {
 		dev_err(dev, "device not supported (no DT node)\n");
 		return -EINVAL;
 	}
 
-	if (!rmem->size || (rmem->size > ULONG_MAX)) {
+	if (!mem_size || (mem_size > ULONG_MAX)) {
 		dev_err(dev, "invalid memory region size\n");
 		return -EINVAL;
 	}
 
-	if (!PAGE_ALIGNED(rmem->base) || !PAGE_ALIGNED(rmem->size)) {
+	if (!PAGE_ALIGNED(mem_base) || !PAGE_ALIGNED(mem_size)) {
 		dev_err(dev, "memory region must be page-aligned\n");
 		return -EINVAL;
 	}
@@ -148,7 +153,8 @@ static int __init open_dice_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	*drvdata = (struct open_dice_drvdata){
-		.rmem = rmem,
+		.mem_base = mem_base,
+		.mem_size = mem_size,
 		.misc = (struct miscdevice){
 			.parent	= dev,
 			.name	= drvdata->name,
