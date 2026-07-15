@@ -705,7 +705,7 @@ iwl_mld_handle_wake_pkt_notif(struct iwl_mld *mld,
 {
 	const struct iwl_wowlan_wake_pkt_notif *notif = (void *)pkt->data;
 	u32 actual_size, len = iwl_rx_packet_payload_len(pkt);
-	u32 expected_size = le32_to_cpu(notif->wake_packet_length);
+	u32 expected_size;
 
 	if (IWL_FW_CHECK(mld, len < sizeof(*notif),
 			 "Invalid WoWLAN wake packet notification (expected size=%zu got=%u)\n",
@@ -718,6 +718,7 @@ iwl_mld_handle_wake_pkt_notif(struct iwl_mld *mld,
 			 wowlan_status->wakeup_reasons))
 		return true;
 
+	expected_size = le32_to_cpu(notif->wake_packet_length);
 	actual_size = len - offsetof(struct iwl_wowlan_wake_pkt_notif,
 				     wake_packet);
 
