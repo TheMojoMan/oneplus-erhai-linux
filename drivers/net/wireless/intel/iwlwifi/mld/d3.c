@@ -573,18 +573,42 @@ iwl_mld_convert_wowlan_notif_v5(const struct iwl_wowlan_info_notif_v5 *notif_v5,
 	}
 }
 
-static bool iwl_mld_validate_wowlan_notif_size(struct iwl_mld *mld,
-					       u32 len,
-					       u32 expected_len,
-					       u8 num_mlo_keys,
+static bool iwl_mld_validate_wowlan_notif_size(struct iwl_mld *mld, u32 len,
+					       const void *notif_data,
 					       int version)
 {
 	u32 len_with_mlo_keys;
+	u32 expected_len;
+	u8 num_mlo_keys;
 
-	if (IWL_FW_CHECK(mld, len < expected_len,
-			 "Invalid wowlan_info_notif v%d (expected=%u got=%u)\n",
-			 version, expected_len, len))
+	/* Extract num_mlo_keys from the void pointer based on version */
+	if (version == 5) {
+		const struct iwl_wowlan_info_notif_v5 *notif_v5 = notif_data;
+
+		expected_len = sizeof(*notif_v5);
+
+		if (IWL_FW_CHECK(mld, len < expected_len,
+				 "Invalid wowlan_info_notif v5 (expected=%u got=%u)\n",
+				 expected_len, len))
+			return false;
+
+		num_mlo_keys = notif_v5->num_mlo_link_keys;
+	} else if (version == 6) {
+		const struct iwl_wowlan_info_notif *notif = notif_data;
+
+		expected_len = sizeof(*notif);
+
+		if (IWL_FW_CHECK(mld, len < expected_len,
+				 "Invalid wowlan_info_notif v6 (expected=%u got=%u)\n",
+				 expected_len, len))
+			return false;
+
+		num_mlo_keys = notif->num_mlo_link_keys;
+	} else {
+		IWL_WARN(mld, "Unsupported wowlan_info_notif version %d\n",
+			 version);
 		return false;
+	}
 
 	len_with_mlo_keys = expected_len +
 		(num_mlo_keys * sizeof(struct iwl_wowlan_mlo_gtk));
@@ -616,16 +640,14 @@ iwl_mld_handle_wowlan_info_notif(struct iwl_mld *mld,
 
 	if (wowlan_info_ver == 5) {
 		/* v5 format - validate before conversion */
-		const struct iwl_wowlan_info_notif_v5 *notif_v5 = (void *)pkt->data;
+		const struct iwl_wowlan_info_notif_v5 *_notif =
+			(void *)pkt->data;
 
-		if (!iwl_mld_validate_wowlan_notif_size(mld, len,
-							sizeof(*notif_v5),
-							notif_v5->num_mlo_link_keys,
-							5))
+		if (!iwl_mld_validate_wowlan_notif_size(mld, len, _notif, 5))
 			return true;
 
 		converted_notif = kzalloc_flex(*converted_notif, mlo_gtks,
-					       notif_v5->num_mlo_link_keys,
+					       _notif->num_mlo_link_keys,
 					       GFP_ATOMIC);
 		if (!converted_notif) {
 			IWL_ERR(mld,
@@ -633,15 +655,12 @@ iwl_mld_handle_wowlan_info_notif(struct iwl_mld *mld,
 			return true;
 		}
 
-		iwl_mld_convert_wowlan_notif_v5(notif_v5,
-						converted_notif);
+		iwl_mld_convert_wowlan_notif_v5(_notif, converted_notif);
 		notif = converted_notif;
 	} else if (wowlan_info_ver == 6) {
 		notif = (void *)pkt->data;
-		if (!iwl_mld_validate_wowlan_notif_size(mld, len,
-							sizeof(*notif),
-							notif->num_mlo_link_keys,
-							6))
+
+		if (!iwl_mld_validate_wowlan_notif_size(mld, len, notif, 6))
 			return true;
 	} else {
 		/* smaller versions are not supported */
