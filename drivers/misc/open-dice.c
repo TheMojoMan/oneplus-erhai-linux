@@ -2,6 +2,7 @@
 /*
  * Copyright (C) 2021 - Google LLC
  * Author: David Brazdil <dbrazdil@google.com>
+ * Author: Song Guo <songguo@google.com>
  *
  * Driver for Open Profile for DICE.
  *
@@ -19,6 +20,7 @@
  *     close(fd);
  */
 
+#include <linux/acpi.h>
 #include <linux/io.h>
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
@@ -133,8 +135,17 @@ static int __init open_dice_probe(struct platform_device *pdev)
 		}
 		mem_base = rmem->base;
 		mem_size = rmem->size;
+	} else if (is_acpi_node(dev->fwnode)) {
+		struct resource *res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+
+		if (!res) {
+			dev_err(dev, "failed to get MMIO resource\n");
+			return -EINVAL;
+		}
+		mem_base = res->start;
+		mem_size = resource_size(res);
 	} else {
-		dev_err(dev, "device not supported (no DT node)\n");
+		dev_err(dev, "device not supported (no DT or ACPI node)\n");
 		return -EINVAL;
 	}
 
@@ -218,3 +229,4 @@ module_exit(open_dice_exit);
 MODULE_DESCRIPTION("Driver for Open Profile for DICE.");
 MODULE_LICENSE("GPL v2");
 MODULE_AUTHOR("David Brazdil <dbrazdil@google.com>");
+MODULE_AUTHOR("Song Guo <songguo@google.com>");
