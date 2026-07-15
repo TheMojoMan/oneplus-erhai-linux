@@ -1344,16 +1344,17 @@ int audio_graph2_parse_of(struct simple_util_priv *priv, struct device *dev,
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_parse_card_name(priv, NULL);
-	if (ret < 0)
-		goto err;
-
 	ret = simple_util_parse_aux_devs(priv, NULL);
 	if (ret < 0)
 		goto err;
 
 	memset(li, 0, sizeof(*li));
 	ret = graph_for_each_link(priv, hooks, li, graph_link);
+	if (ret < 0)
+		goto err;
+
+	/* Card name should be set after graph_for_each_link() */
+	ret = simple_util_parse_card_name(priv, NULL);
 	if (ret < 0)
 		goto err;
 

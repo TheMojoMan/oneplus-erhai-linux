@@ -704,10 +704,6 @@ static int simple_parse_of(struct simple_util_priv *priv)
 	if (ret < 0)
 		goto end;
 
-	ret = simple_util_parse_card_name(priv, PREFIX);
-	if (ret < 0)
-		goto err;
-
 	ret = simple_util_parse_aux_devs(priv, PREFIX);
 	if (ret < 0)
 		goto err;
@@ -717,6 +713,11 @@ static int simple_parse_of(struct simple_util_priv *priv)
 	ret = simple_for_each_link(priv, li,
 				   simple_dai_link_of,
 				   simple_dai_link_of_dpcm);
+	if (ret < 0)
+		goto err;
+
+	/* Card name should be set after simple_for_each_link() */
+	ret = simple_util_parse_card_name(priv, PREFIX);
 	if (ret < 0)
 		goto err;
 
