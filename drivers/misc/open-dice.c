@@ -118,13 +118,18 @@ static int __init open_dice_probe(struct platform_device *pdev)
 {
 	static unsigned int dev_idx;
 	struct device *dev = &pdev->dev;
-	struct reserved_mem *rmem;
+	struct reserved_mem *rmem = NULL;
 	struct open_dice_drvdata *drvdata;
 	int ret;
 
-	rmem = of_reserved_mem_lookup(dev->of_node);
-	if (!rmem) {
-		dev_err(dev, "failed to lookup reserved memory\n");
+	if (dev->of_node) {
+		rmem = of_reserved_mem_lookup(dev->of_node);
+		if (!rmem) {
+			dev_err(dev, "failed to lookup reserved memory\n");
+			return -EINVAL;
+		}
+	} else {
+		dev_err(dev, "device not supported (no DT node)\n");
 		return -EINVAL;
 	}
 
