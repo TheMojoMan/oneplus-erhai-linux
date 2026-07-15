@@ -22,6 +22,12 @@
 
 #ifdef CONFIG_EXT_SUB_SCHED
 
+/*
+ * On while any sub-scheduler exists so that a root-only system doesn't pay for
+ * the sub-sched portions of hot paths. See scx_has_subs().
+ */
+DEFINE_STATIC_KEY_FALSE(__scx_has_subs);
+
 /**
  * scx_skip_subtree_pre - Skip @pos's subtree in a pre-order walk
  * @pos: current position
@@ -236,6 +242,9 @@ void scx_init_root_caps(struct scx_sched *sch)
 struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq *rq,
 					       struct task_struct *p, u64 *enq_flags)
 {
+	if (!scx_has_subs())
+		return &rq->scx.local_dsq;
+
 	s32 cid = __scx_cpu_to_cid(cpu_of(rq));
 	struct scx_sched *asch = rq->scx.remote_activate_sch ?: sch;
 	u64 needed = scx_caps_for_enq(*enq_flags);
@@ -314,7 +323,7 @@ void scx_reenq_reject(struct rq *rq)
 
 	lockdep_assert_rq_held(rq);
 
-	if (list_empty(&rq->scx.reject_dsq.list))
+	if (!scx_has_subs() || list_empty(&rq->scx.reject_dsq.list))
 		return;
 
 	/*
@@ -497,7 +506,7 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 
 	lockdep_assert_rq_held(rq);
 
-	if (likely(llist_empty(&rq->scx.ecaps_to_sync)))
+	if (!scx_has_subs() || likely(llist_empty(&rq->scx.ecaps_to_sync)))
 		return;
 
 	/*
@@ -1016,10 +1025,18 @@ void scx_sub_enable_workfn(struct kthread_work *work)
 	kobject_get(&parent->kobj);
 	raw_spin_unlock_irq(&scx_sched_lock);
 
+	/*
+	 * Flip the hot-path gates before ops->priv is published - the sub's
+	 * programs can e.g. kick cpus from that point on. The matching dec is
+	 * at the end of scx_sched_free_rcu_work().
+	 */
+	static_branch_inc(&__scx_has_subs);
+
 	/* scx_alloc_and_add_sched() consumes @cgrp whether it succeeds or not */
 	sch = scx_alloc_and_add_sched(cmd, cgrp, parent);
 	kobject_put(&parent->kobj);
 	if (IS_ERR(sch)) {
+		static_branch_dec(&__scx_has_subs);
 		ret = PTR_ERR(sch);
 		goto out_unlock;
 	}

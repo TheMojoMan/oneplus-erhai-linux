@@ -746,6 +746,16 @@ static void scx_idle_notify(struct rq *rq, bool idle, bool do_notify, bool root_
 
 	lockdep_assert_rq_held(rq);
 
+	/* with no sub-sched, only the root can be owed a notification */
+	if (!scx_has_subs()) {
+		struct scx_sched *sch = scx_root;
+
+		if ((do_notify || root_renotify) &&
+		    SCX_HAS_OP(sch, update_idle) && !scx_bypassing(sch, cpu))
+			SCX_CALL_OP(sch, update_idle, rq, cid, idle);
+		return;
+	}
+
 	pos = scx_next_descendant_pre(NULL, scx_root);
 	while (pos) {
 		bool forced = false;

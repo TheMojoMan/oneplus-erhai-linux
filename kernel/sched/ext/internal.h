@@ -2110,7 +2110,7 @@ do {										\
  */
 #define SCX_CALL_OP_TASK(sch, op, locked_rq, task, args...)			\
 do {										\
-	WARN_ON_ONCE((sch) != scx_task_sched_rcu(task));			\
+	WARN_ON_ONCE(scx_has_subs() && (sch) != scx_task_sched_rcu(task));	\
 	__SCX_CALL_OP_TASK((sch), ops, op, locked_rq, task, ##args);		\
 } while (0)
 
@@ -2125,7 +2125,7 @@ do {										\
 #define SCX_CALL_OP_TASK_RET(sch, op, locked_rq, task, args...)			\
 ({										\
 	__typeof__((sch)->ops.op(task, ##args)) __ret;				\
-	WARN_ON_ONCE((sch) != scx_task_sched_rcu(task));			\
+	WARN_ON_ONCE(scx_has_subs() && (sch) != scx_task_sched_rcu(task));	\
 	WARN_ON_ONCE(current->scx.kf_tasks[0]);					\
 	current->scx.kf_tasks[0] = task;					\
 	__ret = SCX_CALL_OP_RET((sch), op, locked_rq, task, ##args);		\
@@ -2165,6 +2165,19 @@ static inline bool scx_bypassing(struct scx_sched *sch, s32 cpu)
 }
 
 #ifdef CONFIG_EXT_SUB_SCHED
+DECLARE_STATIC_KEY_FALSE(__scx_has_subs);
+
+/**
+ * scx_has_subs - Whether any sub-scheduler exists
+ *
+ * Gates the sub-sched portions of hot paths so that a root-only system doesn't
+ * pay for them. See scx_sub_enable_workfn() and scx_sched_free_rcu_work().
+ */
+static inline bool scx_has_subs(void)
+{
+	return static_branch_unlikely(&__scx_has_subs);
+}
+
 /**
  * scx_task_sched - Find scx_sched scheduling a task
  * @p: task of interest
@@ -2259,6 +2272,8 @@ static inline struct scx_sched *scx_parent(struct scx_sched *sch)
 		return NULL;
 }
 #else	/* CONFIG_EXT_SUB_SCHED */
+static inline bool scx_has_subs(void) { return false; }
+
 static inline struct scx_sched *scx_task_sched(const struct task_struct *p)
 {
 	return rcu_dereference_protected(scx_root,

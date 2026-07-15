@@ -44,6 +44,13 @@ static inline const char *sch_cgrp_path(struct scx_sched *sch)
 	return sch->cgrp_path;
 }
 
+/* a dying sub's hot-path influence ends in scx_sched_free_rcu_work() */
+static inline void scx_dec_has_subs(struct scx_sched *sch)
+{
+	if (sch->level)
+		static_branch_dec(&__scx_has_subs);
+}
+
 #else	/* CONFIG_EXT_SUB_SCHED */
 
 static inline struct scx_sched *scx_next_descendant_pre(struct scx_sched *pos, struct scx_sched *root) { return pos ? NULL : root; }
@@ -66,6 +73,7 @@ static inline void scx_discard_stale_ecaps_syncs(void) {}
 static inline struct scx_dispatch_q *scx_local_or_reject_dsq(struct scx_sched *sch, struct rq *rq, struct task_struct *p, u64 *enq_flags) { return &rq->scx.local_dsq; }
 static inline bool scx_task_reenq_on_cap_revoke(struct rq *rq, struct task_struct *p) { return false; }
 static inline void scx_reenq_reject(struct rq *rq) {}
+static inline void scx_dec_has_subs(struct scx_sched *sch) {}
 
 #endif	/* CONFIG_EXT_SUB_SCHED */
 
@@ -95,6 +103,10 @@ static inline void scx_reenq_reject(struct rq *rq) {}
 static inline u64 scx_missing_caps(struct scx_sched *sch, s32 cpu, u64 needed)
 {
 	u64 ecaps;
+
+	/* no sub-scheds, no missing caps */
+	if (!scx_has_subs())
+		return 0;
 
 	/* root holds every cap on every cpu */
 	if (!sch->level)
@@ -156,6 +168,9 @@ static inline u64 scx_caps_implied(u64 cap)
 /* may @p keep running on @rq's cpu? requires baseline cpu access */
 static inline bool scx_task_can_stay_on_cpu(struct rq *rq, struct task_struct *p)
 {
+	if (!scx_has_subs())
+		return true;
+
 	/* a migration-disabled task is let in without caps, keep it likewise */
 	if (unlikely(is_migration_disabled(p)))
 		return true;

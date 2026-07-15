@@ -4920,6 +4920,10 @@ static void scx_sched_free_rcu_work(struct work_struct *work)
 	scx_arena_pool_destroy(sch);
 	if (sch->arena_map)
 		bpf_map_put(sch->arena_map);
+
+	/* @sch is completely inactive by now */
+	scx_dec_has_subs(sch);
+
 	kfree(sch);
 }
 
