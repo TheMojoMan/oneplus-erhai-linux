@@ -13,7 +13,6 @@
  * Copyright (c) 2026 Meta Platforms, Inc. and affiliates.
  * Copyright (c) 2026 Tejun Heo <tj@kernel.org>
  */
-#include <linux/delay.h>
 #include <linux/rhashtable.h>
 #include "internal.h"
 #include "cid.h"
@@ -537,7 +536,12 @@ void scx_process_sync_ecaps(struct rq *rq, struct task_struct *prev)
 		gained = ecaps & ~old;
 		lost_all |= lost;
 
-		/* tell the sched its effective caps on this cid changed */
+		/*
+		 * Tell the sched its effective caps on this cid changed. The
+		 * invocation is equivalent to the dispatch path and may drop
+		 * and re-acquire the rq lock temporarily while the rest of
+		 * @batch is held privately, see scx_discard_ecaps_to_sync().
+		 */
 		if (ecaps != pcpu->reported_ecaps &&
 		    SCX_HAS_OP(pcpu->sch, sub_ecaps_updated) &&
 		    !scx_bypassing(pcpu->sch, cpu)) {
@@ -661,38 +665,51 @@ void scx_offline_ecaps(struct rq *rq)
 }
 
 /*
- * @pcpu's sched was unhashed before the grace period, so nothing new queues.
- * Flush its pending sync so the pcpu can be freed. If the cpu is online and
- * scx is enabled, drain via balance_one(). Otherwise, discard under the rq
- * lock.
+ * @pcpu's sched was unhashed before the grace period, so nothing re-queues its
+ * sync node. Remove the node from @rq's pending list so the pcpu can be freed.
  */
 void scx_discard_ecaps_to_sync(s32 cpu, struct scx_sched_pcpu *pcpu)
 {
 	struct rq *rq = cpu_rq(cpu);
+	struct llist_node *head = NULL, *tail = NULL;
+	struct llist_node *pos, *tmp;
 
+	/*
+	 * llist can't unlink a single node. Take all queued nodes, drop @pcpu's
+	 * and resplice the rest. Nodes in the taken batch read as on-list
+	 * throughout, so queue_sync_ecaps() stays correct.
+	 */
+	if (llist_on_list(&pcpu->ecaps_to_sync_node)) {
+		scoped_guard (rq_lock_irqsave, rq) {
+			llist_for_each_safe(pos, tmp, llist_del_all(&rq->scx.ecaps_to_sync)) {
+				if (pos == &pcpu->ecaps_to_sync_node) {
+					init_llist_node(pos);
+				} else {
+					pos->next = head;
+					head = pos;
+					if (!tail)
+						tail = pos;
+				}
+			}
+			if (head)
+				llist_add_batch(head, tail, &rq->scx.ecaps_to_sync);
+		}
+	}
+
+	/*
+	 * An in-flight scx_process_sync_ecaps() batch may still hold the node
+	 * privately across dispatch-induced rq unlocks, reading as on-list.
+	 *
+	 * Because a bypassing sched gets no op call, init_llist_node() and all
+	 * @pcpu accesses share one contiguous lock hold, off-list under the rq
+	 * lock means @pcpu won't be accessed again.
+	 */
 	while (true) {
 		scoped_guard (rq_lock_irqsave, rq) {
-			/*
-			 * scx_process_sync_ecaps() takes the node off the list
-			 * before it is done accessing @pcpu but does all of it
-			 * under the rq lock. Off-list observed under the rq
-			 * lock guarantees that the sync is complete.
-			 */
 			if (!llist_on_list(&pcpu->ecaps_to_sync_node))
 				return;
-			/*
-			 * Discard only when the cpu is truly down. cpu_active()
-			 * is already set when scx_online_ecaps() queues an online
-			 * resync while SCX_RQ_ONLINE is not - so test cpu_active(),
-			 * or that resync would be dropped.
-			 */
-			if (!scx_enabled() || !cpu_active(cpu)) {
-				discard_queued_syncs(rq);
-				return;
-			}
 		}
-		resched_cpu(cpu);
-		msleep(1);
+		cpu_relax();
 	}
 }
 
@@ -704,7 +721,7 @@ void scx_discard_ecaps_to_sync(s32 cpu, struct scx_sched_pcpu *pcpu)
  * still-open link fd defers it) and can leave queued ecaps syncs behind.
  * Processing them would decode the dead sched's pshards with the current cid
  * layout. Discard them instead. The backing scx_sched_pcpu's are still
- * allocated as the free path drains ecaps_to_sync_node before freeing.
+ * allocated as the free path removes ecaps_to_sync_node before freeing.
  */
 void scx_discard_stale_ecaps_syncs(void)
 {
