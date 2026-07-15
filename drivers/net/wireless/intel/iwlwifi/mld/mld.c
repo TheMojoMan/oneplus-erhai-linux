@@ -212,6 +212,7 @@ static const struct iwl_hcmd_names iwl_mld_reg_and_nvm_names[] = {
 	HCMD_NAME(TAS_CONFIG),
 	HCMD_NAME(SAR_OFFSET_MAPPING_TABLE_CMD),
 	HCMD_NAME(MCC_ALLOWED_AP_TYPE_CMD),
+	HCMD_NAME(PNVM_INIT_COMPLETE_NTFY),
 };
 
 /* Please keep this array *SORTED* by hex value.
