@@ -2352,10 +2352,9 @@ int iwl_mvm_set_sta_pkt_ext(struct iwl_mvm *mvm,
 		int bw;
 
 		for (bw = 0;
-		     bw < ARRAY_SIZE(*pkt_ext->pkt_ext_qam_th[i]);
+		     bw < ARRAY_SIZE(pkt_ext->pkt_ext_qam_th[i]);
 		     bw++) {
-			u8 *qam_th =
-				&pkt_ext->pkt_ext_qam_th[i][bw][0];
+			u8 *qam_th = pkt_ext->pkt_ext_qam_th[i][bw];
 
 			IWL_DEBUG_HT(mvm,
 				     "PPE table: nss[%d] bw[%d] PPET8 = %d, PPET16 = %d\n",
