@@ -74,16 +74,19 @@ scx_dispatch_sched(struct scx_sched *sch, struct rq *rq,
 	do {
 		dspc->nr_tasks = 0;
 
-		if (nested) {
-			SCX_CALL_OP(sch, dispatch, rq, scx_cpu_arg(cpu),
-				    prev_on_sch ? prev : NULL);
-		} else {
-			/* stash @prev so that nested invocations can access it */
+#ifdef CONFIG_EXT_SUB_SCHED
+		/* stash @prev so that nested invocations can access it */
+		if (!nested)
 			rq->scx.sub_dispatch_prev = prev;
-			SCX_CALL_OP(sch, dispatch, rq, scx_cpu_arg(cpu),
-				    prev_on_sch ? prev : NULL);
+#endif
+
+		SCX_CALL_OP(sch, dispatch, rq, scx_cpu_arg(cpu),
+			    prev_on_sch ? prev : NULL);
+
+#ifdef CONFIG_EXT_SUB_SCHED
+		if (!nested)
 			rq->scx.sub_dispatch_prev = NULL;
-		}
+#endif
 
 		scx_flush_dispatch_buf(sch, rq);
 

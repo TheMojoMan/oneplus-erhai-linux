@@ -814,14 +814,13 @@ struct scx_rq {
 	u64			clock;			/* current per-rq clock -- see scx_bpf_now() */
 #ifdef CONFIG_EXT_SUB_SCHED
 	struct llist_head	ecaps_to_sync;		/* pending ecaps syncs */
+	struct task_struct	*sub_dispatch_prev;
 #endif
 	cpumask_var_t		cpus_to_sync;
 	bool			kick_sync_pending;
 	unsigned long		kick_sync;
 
 	struct list_head	sched_pcpus_to_kick;	/* see kick_cpus_irq_workfn() */
-
-	struct task_struct	*sub_dispatch_prev;
 
 	raw_spinlock_t		deferred_reenq_lock;
 	u64			deferred_reenq_locals_seq;
