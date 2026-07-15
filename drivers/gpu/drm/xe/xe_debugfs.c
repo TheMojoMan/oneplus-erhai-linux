@@ -5,6 +5,7 @@
 
 #include "xe_debugfs.h"
 
+#include <linux/bits.h>
 #include <linux/debugfs.h>
 #include <linux/fault-inject.h>
 #include <linux/string_helpers.h>
@@ -41,6 +42,55 @@
 
 DECLARE_FAULT_ATTR(gt_reset_failure);
 DECLARE_FAULT_ATTR(inject_csc_hw_error);
+
+static bool csc_hw_error_available(struct xe_device *xe)
+{
+	return !IS_SRIOV_VF(xe) && xe->info.platform == XE_BATTLEMAGE;
+}
+
+/*
+ * Fault injection table.  Each entry registers a debugfs attribute; add a
+ * matching FAULT_ACTION() below for every entry added here.
+ */
+static struct {
+	const char *name;
+	struct fault_attr *attr;
+	bool (*is_visible)(struct xe_device *xe);
+} xe_fault_inject_entry[] = {
+	{ .name = "fail_gt_reset",
+	  .attr = &gt_reset_failure },
+	{ .name = "inject_csc_hw_error",
+	  .attr = &inject_csc_hw_error,
+	  .is_visible = csc_hw_error_available },
+};
+
+/*
+ * FAULT_ACTION(name, fault_attr) - generate xe_fault_<name>() accessor.
+ * Add one entry per row in xe_fault_inject_entry[].
+ */
+#define FAULT_ACTION(name, fault_attr)			\
+bool xe_fault_##name(void)				\
+{							\
+	return should_fail(&(fault_attr), 1);		\
+}
+
+FAULT_ACTION(gt_reset, gt_reset_failure)
+FAULT_ACTION(csc_hw_error, inject_csc_hw_error)
+
+static void xe_fault_inject_debugfs_register(struct xe_device *xe,
+					     struct dentry *root)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(xe_fault_inject_entry); i++) {
+		if (xe_fault_inject_entry[i].is_visible &&
+		    !xe_fault_inject_entry[i].is_visible(xe))
+			continue;
+
+		fault_create_debugfs_attr(xe_fault_inject_entry[i].name, root,
+					  xe_fault_inject_entry[i].attr);
+	}
+}
 
 static void read_residency_counter(struct xe_device *xe, struct xe_mmio *mmio,
 				   u32 offset, const char *name, struct drm_printer *p)
@@ -583,8 +633,6 @@ void xe_debugfs_register(struct xe_device *xe)
 		drm_debugfs_create_files(debugfs_residencies,
 					 ARRAY_SIZE(debugfs_residencies),
 					 root, minor);
-		fault_create_debugfs_attr("inject_csc_hw_error", root,
-					  &inject_csc_hw_error);
 	}
 
 	/*
@@ -642,7 +690,7 @@ void xe_debugfs_register(struct xe_device *xe)
 
 	xe_psmi_debugfs_register(xe);
 
-	fault_create_debugfs_attr("fail_gt_reset", root, &gt_reset_failure);
+	xe_fault_inject_debugfs_register(xe, root);
 
 	if (IS_SRIOV_PF(xe))
 		xe_sriov_pf_debugfs_register(xe, root);
