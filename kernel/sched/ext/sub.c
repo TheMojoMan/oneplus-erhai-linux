@@ -18,6 +18,7 @@
 #include "cid.h"
 #include "arena.h"
 #include "sub.h"
+#include "inlines.h"
 
 #ifdef CONFIG_EXT_SUB_SCHED
 

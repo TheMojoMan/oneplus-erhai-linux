@@ -20,6 +20,7 @@
 #include "arena.h"
 #include "idle.h"
 #include "sub.h"
+#include "inlines.h"
 
 DEFINE_RAW_SPINLOCK(scx_sched_lock);
 
