@@ -707,6 +707,7 @@ static const struct iwl_hcmd_names iwl_mvm_regulatory_and_nvm_names[] = {
 	HCMD_NAME(NVM_ACCESS_COMPLETE),
 	HCMD_NAME(NVM_GET_INFO),
 	HCMD_NAME(TAS_CONFIG),
+	HCMD_NAME(LARI_CONFIG_EXTENSION),
 };
 
 /* Please keep this array *SORTED* by hex value.

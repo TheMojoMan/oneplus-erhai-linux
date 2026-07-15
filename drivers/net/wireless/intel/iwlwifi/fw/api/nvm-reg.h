@@ -47,6 +47,11 @@ enum iwl_regulatory_and_nvm_subcmd_ids {
 	MCC_ALLOWED_AP_TYPE_CMD = 0x5,
 
 	/**
+	 * @LARI_CONFIG_EXTENSION: &struct iwl_lari_config_extension_cmd
+	 */
+	LARI_CONFIG_EXTENSION = 0x8,
+
+	/**
 	 * @PNVM_INIT_COMPLETE_NTFY: &struct iwl_pnvm_init_complete_ntfy
 	 */
 	PNVM_INIT_COMPLETE_NTFY = 0xFE,
@@ -513,6 +518,27 @@ struct iwl_bios_config_hdr {
 	u8 table_revision;
 	u8 reserved[2];
 } __packed; /* BIOS_CONFIG_HDR_API_S_VER_1 */
+
+/**
+ * struct iwl_lari_config_extension_cmd - extend LARI configuration
+ *
+ * LARI_CONFIG_CHANGE's version must remain stable for frozen firmware.
+ * Because the driver might not know this version but still load that
+ * frozen FW and then send some default old version of LARI, causing the FW to
+ * assert about the bad size of it. To handle this, we do the following:
+ * 1. For newer firmware: increase the LARI_CONFIG_CHANGE version to support the
+ *	new firmware API with extra UHB bits.
+ * 2. For frozen firmware: add a special alternative API that doesn't require
+ *	modifying the frozen LARI_CONFIG_CHANGE's version.
+ * @dsm_table_hdr: BIOS DSM table source and revision
+ * @oem_uhb_allow_extension_bitmap: extension bitmap for OEM UHB config
+ * @reserved: reserved
+ */
+struct iwl_lari_config_extension_cmd {
+	struct iwl_bios_config_hdr dsm_table_hdr;
+	__le32 oem_uhb_allow_extension_bitmap;
+	__le32 reserved[10];
+} __packed; /* LARI_CONFIG_EXTENSION_CMD_API_S_VER_1 */
 
 /**
  * struct bios_value_u32 - BIOS configuration.
