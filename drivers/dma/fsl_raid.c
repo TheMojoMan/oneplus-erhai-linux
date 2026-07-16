@@ -242,9 +242,9 @@ static void fill_cfd_frame(struct fsl_re_cmpnd_frame *cf, u8 index,
 	u32 efrl = length & FSL_RE_CF_LENGTH_MASK;
 
 	efrl |= final << FSL_RE_CF_FINAL_SHIFT;
-	cf[index].efrl32 = efrl;
-	cf[index].addr_high = upper_32_bits(addr);
-	cf[index].addr_low = lower_32_bits(addr);
+	cf[index].efrl32 = cpu_to_be32(efrl);
+	cf[index].addr_high = cpu_to_be32(upper_32_bits(addr));
+	cf[index].addr_low = cpu_to_be32(lower_32_bits(addr));
 }
 
 static struct fsl_re_desc *fsl_re_init_desc(struct fsl_re_chan *re_chan,
@@ -256,9 +256,10 @@ static struct fsl_re_desc *fsl_re_init_desc(struct fsl_re_chan *re_chan,
 	dma_async_tx_descriptor_init(&desc->async_tx, &re_chan->chan);
 	INIT_LIST_HEAD(&desc->node);
 
-	desc->hwdesc.fmt32 = FSL_RE_FRAME_FORMAT << FSL_RE_HWDESC_FMT_SHIFT;
-	desc->hwdesc.lbea32 = upper_32_bits(paddr);
-	desc->hwdesc.addr_low = lower_32_bits(paddr);
+	desc->hwdesc.fmt32 = cpu_to_be32(FSL_RE_FRAME_FORMAT <<
+					  FSL_RE_HWDESC_FMT_SHIFT);
+	desc->hwdesc.lbea32 = cpu_to_be32(upper_32_bits(paddr));
+	desc->hwdesc.addr_low = cpu_to_be32(lower_32_bits(paddr));
 	desc->cf_addr = cf;
 	desc->cf_paddr = paddr;
 
