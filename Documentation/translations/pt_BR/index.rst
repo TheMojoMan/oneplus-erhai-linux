@@ -87,5 +87,5 @@ kernel e sobre como ver seu trabalho integrado.
    Lista de verificação para submissão de patches do kernel Linux <process/submit-checklist>
    Interpretação do Código de Conduta do Kernel Linux <process/code-of-conduct-interpretation>
    Código de Conduta de Compromisso do Colaborador <process/code-of-conduct>
-
+   Interfaces, recursos de linguagem, atributos e convenções obsoletos <process/deprecated>
 
