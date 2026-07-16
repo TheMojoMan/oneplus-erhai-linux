@@ -1054,6 +1054,7 @@ int xe_exec_queue_set_property_ioctl(struct drm_device *dev, void *data,
 
 static int exec_queue_user_ext_check(struct xe_exec_queue *q, u64 properties)
 {
+	struct xe_device *xe = gt_to_xe(q->gt);
 	u64 secondary_queue_valid_props = BIT_ULL(DRM_XE_EXEC_QUEUE_SET_PROPERTY_MULTI_GROUP) |
 				  BIT_ULL(DRM_XE_EXEC_QUEUE_SET_PROPERTY_MULTI_QUEUE_PRIORITY);
 
@@ -1063,6 +1064,16 @@ static int exec_queue_user_ext_check(struct xe_exec_queue *q, u64 properties)
 	 */
 	if (xe_exec_queue_is_multi_queue_secondary(q) &&
 	    properties & ~secondary_queue_valid_props)
+		return -EINVAL;
+
+	/*
+	 * HWDRM is the only supported PXP type today. It is display related and
+	 * hence can't work with multi-queue. Reject the combination. The secondary
+	 * queue path above already rejects any PXP property, so this also covers
+	 * the multi-queue primary which would otherwise allow it.
+	 */
+	if (XE_IOCTL_DBG(xe, (properties & BIT_ULL(DRM_XE_EXEC_QUEUE_SET_PROPERTY_MULTI_GROUP)) &&
+			 (properties & BIT_ULL(DRM_XE_EXEC_QUEUE_SET_PROPERTY_PXP_TYPE))))
 		return -EINVAL;
 
 	return 0;
