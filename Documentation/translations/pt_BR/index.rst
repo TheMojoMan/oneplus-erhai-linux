@@ -85,3 +85,4 @@ kernel e sobre como ver seu trabalho integrado.
    Adicionando uma nova chamada de Sistema <process/adding-syscalls>
    Declaração sobre Drivers do Kernel <process/kernel-driver-statement>
    Lista de verificação para submissão de patches do kernel Linux <process/submit-checklist>
+   Interpretação do Código de Conduta do Kernel Linux <process/code-of-conduct-interpretation>
