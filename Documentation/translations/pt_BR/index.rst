@@ -86,3 +86,6 @@ kernel e sobre como ver seu trabalho integrado.
    Declaração sobre Drivers do Kernel <process/kernel-driver-statement>
    Lista de verificação para submissão de patches do kernel Linux <process/submit-checklist>
    Interpretação do Código de Conduta do Kernel Linux <process/code-of-conduct-interpretation>
+   Código de Conduta de Compromisso do Colaborador <process/code-of-conduct>
+
+
