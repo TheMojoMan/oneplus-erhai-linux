@@ -375,11 +375,11 @@ static struct dma_async_tx_descriptor *fsl_re_prep_dma_genq(
 	for (i = 2, j = 0; j < save_src_cnt; i++, j++)
 		fill_cfd_frame(cf, i, len, src[j], 0);
 
+	/* Fill the last frame and mark it final */
 	if (cont_q)
-		fill_cfd_frame(cf, i++, len, dest, 0);
-
-	/* Setting the final bit in the last source buffer frame in CFD */
-	cf[i - 1].efrl32 |= 1 << FSL_RE_CF_FINAL_SHIFT;
+		fill_cfd_frame(cf, i, len, dest, 1);
+	else
+		fill_cfd_frame(cf, i - 1, len, src[j - 1], 1);
 
 	return &desc->async_tx;
 }
@@ -505,15 +505,15 @@ static struct dma_async_tx_descriptor *fsl_re_prep_dma_pq(
 			p[save_src_cnt + 2] = 1;
 			fill_cfd_frame(cf, i++, len, dest[0], 0);
 			fill_cfd_frame(cf, i++, len, dest[1], 0);
-			fill_cfd_frame(cf, i++, len, dest[1], 0);
+			fill_cfd_frame(cf, i++, len, dest[1], 1);
 		} else {
 			dev_err(re_chan->dev, "PQ tx continuation error!\n");
 			return NULL;
 		}
+	} else {
+		/* Mark the last source buffer frame final */
+		fill_cfd_frame(cf, i - 1, len, src[j - 1], 1);
 	}
-
-	/* Setting the final bit in the last source buffer frame in CFD */
-	cf[i - 1].efrl32 |= 1 << FSL_RE_CF_FINAL_SHIFT;
 
 	return &desc->async_tx;
 }
