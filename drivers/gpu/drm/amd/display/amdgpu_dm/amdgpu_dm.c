@@ -779,6 +779,14 @@ static int amdgpu_dm_init(struct amdgpu_device *adev)
 
 	dc_hardware_init(adev->dm.dc);
 
+	/* GOP/vBIOS may leave an OPTC enabled for a display present at power-on
+	 * but no longer driven (e.g. an external DP unplugged at boot). Such a
+	 * dangling pipe keeps DCN out of idle and blocks s0i3. Power it down
+	 * here when nothing needs to be preserved.
+	 */
+	if (adev->flags & AMD_IS_APU)
+		dc_disable_dangling_timing_generators(adev->dm.dc);
+
 	adev->dm.hpd_rx_offload_wq = amdgpu_dm_hpd_rx_irq_create_workqueue(adev);
 	if (!adev->dm.hpd_rx_offload_wq) {
 		drm_err(adev_to_drm(adev), "failed to create hpd rx offload workqueue.\n");
@@ -1010,14 +1018,11 @@ static void amdgpu_dm_fini(struct amdgpu_device *adev)
 		adev->dm.hpd_rx_offload_wq = NULL;
 	}
 
+	amdgpu_dm_irq_fini(adev);
+
 	/* DC Destroy TODO: Replace destroy DAL */
 	if (adev->dm.dc)
 		dc_destroy(&adev->dm.dc);
-	/*
-	 * TODO: pageflip, vlank interrupt
-	 *
-	 * amdgpu_dm_irq_fini(adev);
-	 */
 
 	if (adev->dm.cgs_device) {
 		amdgpu_cgs_destroy_device(adev->dm.cgs_device);
@@ -1496,17 +1501,26 @@ static int dm_hw_init(struct amdgpu_ip_block *ip_block)
 	struct amdgpu_device *adev = ip_block->adev;
 	int r;
 
+	adev->dm.i2c_devres_group = devres_open_group(adev->dev, NULL, GFP_KERNEL);
+	if (!adev->dm.i2c_devres_group)
+		return -ENOMEM;
+
 	/* Create DAL display manager */
 	r = amdgpu_dm_init(adev);
 	if (r)
-		return r;
+		goto err_release_i2c;
 	amdgpu_dm_hpd_init(adev);
 
 	r = dm_oem_i2c_hw_init(adev);
 	if (r)
 		drm_info(adev_to_drm(adev), "Failed to add OEM i2c bus\n");
 
+	devres_close_group(adev->dev, adev->dm.i2c_devres_group);
 	return 0;
+
+err_release_i2c:
+	devres_release_group(adev->dev, adev->dm.i2c_devres_group);
+	return r;
 }
 
 /**
@@ -1521,9 +1535,11 @@ static int dm_hw_fini(struct amdgpu_ip_block *ip_block)
 {
 	struct amdgpu_device *adev = ip_block->adev;
 
+	if (adev->dm.i2c_devres_group)
+		devres_release_group(adev->dev, adev->dm.i2c_devres_group);
+
 	amdgpu_dm_hpd_fini(adev);
 
-	amdgpu_dm_irq_fini(adev);
 	amdgpu_dm_fini(adev);
 	return 0;
 }
@@ -1541,7 +1557,8 @@ static void dm_gpureset_toggle_interrupts(struct amdgpu_device *adev,
 		acrtc = amdgpu_dm_get_crtc_by_otg_inst(
 				adev, state->stream_status[i].primary_otg_inst);
 
-		if (acrtc && state->stream_status[i].plane_count != 0) {
+		if (acrtc && state->stream_status[i].plane_count != 0 &&
+		    amdgpu_ip_version(adev, DCE_HWIP, 0) == 0) {
 			irq_source = IRQ_TYPE_PFLIP + acrtc->otg_inst;
 			rc = dc_interrupt_set(adev->dm.dc, irq_source, enable) ? 0 : -EBUSY;
 			if (rc)
@@ -1569,6 +1586,13 @@ static void dm_gpureset_toggle_interrupts(struct amdgpu_device *adev,
 			 */
 			if (!dc_interrupt_set(adev->dm.dc, irq_source, enable))
 				drm_warn(adev_to_drm(adev), "Failed to %sable vblank interrupt\n", enable ? "en" : "dis");
+
+		} else if (acrtc && state->stream_status[i].plane_count != 0) {
+			/* DCN only needs to toggle VUPDATE_NO_LOCK */
+			rc = amdgpu_dm_crtc_set_vupdate_irq(&acrtc->base, enable);
+			if (rc)
+				drm_warn(adev_to_drm(adev), "Failed to %sable vupdate interrupt\n",
+					 enable ? "en" : "dis");
 		}
 	}
 
@@ -3522,21 +3546,9 @@ static void manage_dm_interrupts(struct amdgpu_device *adev,
 	if (acrtc_state) {
 		timing = &acrtc_state->stream->timing;
 
-		if (amdgpu_ip_version(adev, DCE_HWIP, 0) >=
-		      IP_VERSION(3, 2, 0) &&
-		      !(adev->flags & AMD_IS_APU)) {
-			/*
-			 * DGPUs NV3x and newer that support idle optimizations
-			 * experience intermittent flip-done timeouts on cursor
-			 * updates. Restore 5s offdelay behavior for now.
-			 *
-			 * Discussion on the issue:
-			 * https://lore.kernel.org/amd-gfx/20260217191632.1243826-1-sysdadmin@m1k.cloud/
-			 */
-			config.offdelay_ms = 5000;
-			config.disable_immediate = false;
-		} else if (amdgpu_ip_version(adev, DCE_HWIP, 0) <
-			     IP_VERSION(3, 5, 0)) {
+		if (amdgpu_ip_version(adev, DCE_HWIP, 0) <
+			   IP_VERSION(3, 5, 0) ||
+			   !(adev->flags & AMD_IS_APU)) {
 			/*
 			 * Older HW and DGPU have issues with instant off;
 			 * use a 2 frame offdelay.
@@ -3555,14 +3567,22 @@ static void manage_dm_interrupts(struct amdgpu_device *adev,
 
 		drm_crtc_vblank_on_config(&acrtc->base,
 					  &config);
-		/* Allow RX6xxx, RX7700, RX7800 GPUs to call amdgpu_irq_get.*/
+		/*
+		 * Since pflip_high_irq is no longer registered for DCN, grab an
+		 * extra reference to vupdate irq instead to workaround this
+		 * issue:
+		 * https://gitlab.freedesktop.org/drm/amd/-/work_items/3936
+		 *
+		 * The callbacks to drm_vblank_on/off should really take care of
+		 * this though.
+		 */
 		switch (amdgpu_ip_version(adev, DCE_HWIP, 0)) {
 		case IP_VERSION(3, 0, 0):
 		case IP_VERSION(3, 0, 2):
 		case IP_VERSION(3, 0, 3):
 		case IP_VERSION(3, 2, 0):
-			if (amdgpu_irq_get(adev, &adev->pageflip_irq, irq_type))
-				drm_err(dev, "DM_IRQ: Cannot get pageflip irq!\n");
+			if (amdgpu_irq_get(adev, &adev->vupdate_irq, irq_type))
+				drm_err(dev, "DM_IRQ: Cannot get vupdate irq!\n");
 #if defined(CONFIG_DRM_AMD_SECURE_DISPLAY)
 			if (amdgpu_irq_get(adev, &adev->vline0_irq, irq_type))
 				drm_err(dev, "DM_IRQ: Cannot get vline0 irq!\n");
@@ -3580,8 +3600,8 @@ static void manage_dm_interrupts(struct amdgpu_device *adev,
 			if (amdgpu_irq_put(adev, &adev->vline0_irq, irq_type))
 				drm_err(dev, "DM_IRQ: Cannot put vline0 irq!\n");
 #endif
-			if (amdgpu_irq_put(adev, &adev->pageflip_irq, irq_type))
-				drm_err(dev, "DM_IRQ: Cannot put pageflip irq!\n");
+			if (amdgpu_irq_put(adev, &adev->vupdate_irq, irq_type))
+				drm_err(dev, "DM_IRQ: Cannot put vupdate irq!\n");
 		}
 
 		drm_crtc_vblank_off(&acrtc->base);
@@ -3593,6 +3613,10 @@ static void dm_update_pflip_irq_state(struct amdgpu_device *adev,
 {
 	int irq_type =
 		amdgpu_display_crtc_idx_to_irq_type(adev, acrtc->crtc_id);
+
+	/* GRPH_PFLIP is not used on DCN; nothing to reapply. */
+	if (amdgpu_ip_version(adev, DCE_HWIP, 0) != 0)
+		return;
 
 	/**
 	 * This reads the current state for the IRQ and force reapplies
@@ -3927,8 +3951,12 @@ static void amdgpu_dm_handle_vrr_transition(struct amdgpu_display_manager *dm,
 					    struct dm_crtc_state *old_state,
 					    struct dm_crtc_state *new_state)
 {
+	struct amdgpu_device *adev = dm->adev;
 	bool old_vrr_active = amdgpu_dm_crtc_vrr_active(old_state);
 	bool new_vrr_active = amdgpu_dm_crtc_vrr_active(new_state);
+
+	/* Only DCE gates vupdate on VRR, keep it enabled for DCN */
+	bool vrr_gates_vupdate = amdgpu_ip_version(adev, DCE_HWIP, 0) == 0;
 
 	if (!old_vrr_active && new_vrr_active) {
 		/* Transition VRR inactive -> active:
@@ -3939,7 +3967,8 @@ static void amdgpu_dm_handle_vrr_transition(struct amdgpu_display_manager *dm,
 		 * We also need vupdate irq for the actual core vblank handling
 		 * at end of vblank.
 		 */
-		WARN_ON(amdgpu_dm_crtc_set_vupdate_irq(new_state->base.crtc, true) != 0);
+		if (vrr_gates_vupdate)
+			WARN_ON(amdgpu_dm_crtc_set_vupdate_irq(new_state->base.crtc, true) != 0);
 		WARN_ON(drm_crtc_vblank_get(new_state->base.crtc) != 0);
 		drm_dbg_driver(new_state->base.crtc->dev, "%s: crtc=%u VRR off->on: Get vblank ref\n",
 				 __func__, new_state->base.crtc->base.id);
@@ -3955,7 +3984,8 @@ static void amdgpu_dm_handle_vrr_transition(struct amdgpu_display_manager *dm,
 		/* Transition VRR active -> inactive:
 		 * Allow vblank irq disable again for fixed refresh rate.
 		 */
-		WARN_ON(amdgpu_dm_crtc_set_vupdate_irq(new_state->base.crtc, false) != 0);
+		if (vrr_gates_vupdate)
+			WARN_ON(amdgpu_dm_crtc_set_vupdate_irq(new_state->base.crtc, false) != 0);
 		drm_crtc_vblank_put(new_state->base.crtc);
 		drm_dbg_driver(new_state->base.crtc->dev, "%s: crtc=%u VRR on->off: Drop vblank ref\n",
 				 __func__, new_state->base.crtc->base.id);
@@ -4104,6 +4134,28 @@ static void amdgpu_dm_enable_self_refresh(struct amdgpu_display_manager *dm,
 	}
 }
 
+static void dm_arm_vblank_event(struct amdgpu_crtc *acrtc,
+				struct dm_crtc_state *acrtc_state,
+				bool pflip_update,
+				bool cursor_update)
+{
+	assert_spin_locked(&acrtc->base.dev->event_lock);
+
+	if (!acrtc->base.state->event || acrtc_state->active_planes == 0)
+		return;
+
+	if (pflip_update) {
+		drm_crtc_vblank_get(&acrtc->base);
+		WARN_ON(acrtc->pflip_status != AMDGPU_FLIP_NONE);
+		/* Arm flip completion handling and event delivery after programming. */
+		prepare_flip_isr(acrtc);
+	} else if (cursor_update) {
+		drm_crtc_vblank_get(&acrtc->base);
+		acrtc->event = acrtc->base.state->event;
+		acrtc->base.state->event = NULL;
+	}
+}
+
 static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 				    struct drm_device *dev,
 				    struct amdgpu_display_manager *dm,
@@ -4126,6 +4178,8 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 	bool vrr_active = amdgpu_dm_crtc_vrr_active(acrtc_state);
 	bool cursor_update = false;
 	bool pflip_present = false;
+	bool immediate_flip = false;
+	bool flip_latched_during_prog = false;
 	bool dirty_rects_changed = false;
 	bool updated_planes_and_streams = false;
 	struct {
@@ -4288,6 +4342,8 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 			acrtc_state->update_type == UPDATE_TYPE_FAST &&
 			get_mem_type(old_plane_state->fb) == get_mem_type(fb);
 
+		immediate_flip |= bundle->flip_addrs[planes_count].flip_immediate;
+
 		timestamp_ns = ktime_get_ns();
 		bundle->flip_addrs[planes_count].flip_timestamp_in_us = div_u64(timestamp_ns, 1000);
 		bundle->surface_updates[planes_count].flip_addr = &bundle->flip_addrs[planes_count];
@@ -4356,39 +4412,24 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 			usleep_range(1000, 1100);
 		}
 
-		/**
-		 * Prepare the flip event for the pageflip interrupt to handle.
-		 *
-		 * This only works in the case where we've already turned on the
-		 * appropriate hardware blocks (eg. HUBP) so in the transition case
-		 * from 0 -> n planes we have to skip a hardware generated event
-		 * and rely on sending it from software.
-		 */
-		if (acrtc_attach->base.state->event &&
-		    acrtc_state->active_planes > 0) {
-			drm_crtc_vblank_get(pcrtc);
-
-			spin_lock_irqsave(&pcrtc->dev->event_lock, flags);
-
-			WARN_ON(acrtc_attach->pflip_status != AMDGPU_FLIP_NONE);
-			prepare_flip_isr(acrtc_attach);
-
-			spin_unlock_irqrestore(&pcrtc->dev->event_lock, flags);
-		}
-
 		if (acrtc_state->stream) {
 			if (acrtc_state->freesync_vrr_info_changed)
 				bundle->stream_update.vrr_infopacket =
 					&acrtc_state->stream->vrr_infopacket;
 		}
-	} else if (cursor_update && acrtc_state->active_planes > 0) {
-		spin_lock_irqsave(&pcrtc->dev->event_lock, flags);
-		if (acrtc_attach->base.state->event) {
-			drm_crtc_vblank_get(pcrtc);
-			acrtc_attach->event = acrtc_attach->base.state->event;
-			acrtc_attach->base.state->event = NULL;
+	}
+
+	/*
+	 * DCE depends on a combination of GRPH_FLIP, VLINE0, and VUPDATE for
+	 * event delivery. Only GRPH_FLIP handler can send pflip events, and it
+	 * only fires if HW latched to the flip. Maintain legacy behavior by
+	 * arming event before programming.
+	 */
+	if (amdgpu_ip_version(dm->adev, DCE_HWIP, 0) == 0) {
+		scoped_guard(spinlock_irqsave, &pcrtc->dev->event_lock) {
+			dm_arm_vblank_event(acrtc_attach, acrtc_state,
+					pflip_present, cursor_update);
 		}
-		spin_unlock_irqrestore(&pcrtc->dev->event_lock, flags);
 	}
 
 	/* Update the planes if changed or disable if we don't have any. */
@@ -4479,6 +4520,115 @@ static void amdgpu_dm_commit_planes(struct drm_atomic_commit *state,
 	    (!updated_planes_and_streams || amdgpu_ip_version(dm->adev, DCE_HWIP, 0) == 0) &&
 	    acrtc_state->cursor_mode == DM_CURSOR_NATIVE_MODE)
 		amdgpu_dm_commit_cursors(state);
+
+	/*
+	 * DCN specific vblank handling
+	 * ============================
+	 *
+	 * With the event_lock held, arm the vblank event, and determine whether
+	 * deliver it immediately, or in VUPDATE_NO_LOCK IRQ (i.e. HW latch
+	 * point) handler. Do this *after* programming so that the IRQ handler
+	 * will not deliver the event before HW laches onto the programmed
+	 * values:
+	 *
+	 *     Commit thread      IRQ handler                       HW
+	 *     -----------------------------------------------------------------
+	 *     arm_vblank_event()
+	 *                                                          vupdate()
+	 *                        vupdate_handler()
+	 *                          cook_timestamp()
+	 *                          # prev flip already latched,
+	 *                          # so flip_latched == true.
+	 *                          if event_armed && flip_latched:
+	 *                            send_vblank_event()
+	 *                            # sent before latch, **BAD!**
+	 *     hw_program()
+	 *                                                          vupdate()
+	 *                                                          **latch**
+	 *
+	 * There's a consequence of arming after: it's possible for HW to latch
+	 * between start of HW programming and acrtc->event/pflip_status arming.
+	 * When this happens, the IRQ handler will send the event on the next
+	 * immediate latch point, even though HW has already latched. This is
+	 * handled by optimistically checking for HW latch after programming,
+	 * and if latched, send the event immediately:
+	 *
+	 *     Commit thread             IRQ handler                HW
+	 *     -----------------------------------------------------------------
+	 *     hw_program()
+	 *                                                          vupdate()
+	 *                                                          **latch**
+	 *                               vupdate_handler()
+	 *                                 cook_timestamp()
+	 *                                 # event_armed == false
+	 *                                 # **no event sent!**
+	 *     arm_vblank_event()
+	 *     if flip_latched:
+	 *       **send_vblank_event()**
+	 *       disarm_vblank_event()
+	 *
+	 * The IRQ handler is expected to cook the timestamp, but we need to
+	 * cook the timestamp before optimistic sending as well. That's because
+	 * the following sequence is possible:
+	 *
+	 *     Commit thread              IRQ handler              HW
+	 *     -----------------------------------------------------------------
+	 *     hw_program()
+	 *     arm_vblank_event()
+	 *                                                         vupdate()
+	 *                                                         **latch**
+	 *     if flip_latched:
+	 *       # Need cook before send!
+	 *       **cook_timestamp()**
+	 *       send_vblank_event()
+	 *       disarm_vblank_event()
+	 *                                vupdate_handler()
+	 *                                  cook_timestamp()
+	 *                                  # event_armed == false
+	 *                                  # no event sent!
+	 *
+	 * Cooking twice is OK, since DRM scanout accurate timestamps report A)
+	 * the previous vactive start if currently in vactive, or B) the next
+	 * vactive start if currently in vblank (see &get_vblank_counter). 'A)'
+	 * is what we want for the optimistic send, and for 'B)', we'll cook a
+	 * timestamp no later than the next IRQ handler run.
+	 *
+	 * The more correct fix is to wrap programming and arming with the
+	 * event_lock and thus serializing it with the IRQ handler. However,
+	 * there are various sleep-waits within
+	 * update_planes_and_stream_adapter() that makes spin locking illegal.
+	 * And on full updates, it can take 1-2 frame-times to return (see
+	 * commit_planes_for_stream).
+	 *
+	 * On DCE, GRPH_PFLIP IRQ is used and takes care of this.
+	 */
+	if (amdgpu_ip_version(dm->adev, DCE_HWIP, 0) != 0) {
+		spin_lock_irqsave(&pcrtc->dev->event_lock, flags);
+
+		if (updated_planes_and_streams) {
+			flip_latched_during_prog =
+				!dc_get_flip_pending_on_otg(dm->dc, acrtc_attach->otg_inst);
+		}
+
+		dm_arm_vblank_event(acrtc_attach, acrtc_state,
+				    pflip_present, cursor_update);
+
+		/*
+		 * Deliver the event immediately on immediate flip, or on a
+		 * update that has already latched.
+		 */
+		if ((immediate_flip || flip_latched_during_prog) &&
+		    acrtc_attach->pflip_status == AMDGPU_FLIP_SUBMITTED &&
+		    acrtc_attach->event) {
+			drm_crtc_accurate_vblank_count(&acrtc_attach->base);
+			drm_crtc_send_vblank_event(&acrtc_attach->base,
+						   acrtc_attach->event);
+			acrtc_attach->event = NULL;
+			drm_crtc_vblank_put(&acrtc_attach->base);
+			acrtc_attach->pflip_status = AMDGPU_FLIP_NONE;
+		}
+		spin_unlock_irqrestore(&pcrtc->dev->event_lock, flags);
+	}
 
 cleanup:
 	kfree(bundle);
@@ -5896,6 +6046,7 @@ skip_modeset:
 	/* Release extra reference */
 	if (new_stream)
 		dc_stream_release(new_stream);
+	new_stream = NULL;
 
 	/*
 	 * We want to do dc stream updates that do not require a
@@ -6610,10 +6761,15 @@ static int dm_crtc_get_cursor_mode(struct amdgpu_device *adev,
 	/* Overlay cursor not supported on HW before DCN
 	 * DCN401/420 does not have the cursor-on-scaled-plane or cursor-on-yuv-plane restrictions
 	 * as previous DCN generations, so enable native mode on DCN401/420
+	 *
+	 * Always set native cursor mode when the CRTC is disabled,
+	 * to make sure it doesn't cause atomic commits to fail when
+	 * they are trying to disable the CRTC.
 	 */
 	if (amdgpu_ip_version(adev, DCE_HWIP, 0) == IP_VERSION(4, 0, 1) ||
 	    amdgpu_ip_version(adev, DCE_HWIP, 0) == IP_VERSION(4, 2, 0) ||
-	    amdgpu_ip_version(adev, DCE_HWIP, 0) == IP_VERSION(4, 2, 1)) {
+	    amdgpu_ip_version(adev, DCE_HWIP, 0) == IP_VERSION(4, 2, 1) ||
+	    !dm_crtc_state->base.enable) {
 		*cursor_mode = DM_CURSOR_NATIVE_MODE;
 		return 0;
 	}
@@ -6645,6 +6801,31 @@ static int dm_crtc_get_cursor_mode(struct amdgpu_device *adev,
 		dm_get_plane_scale(plane_state, &new_scale_w, &new_scale_h);
 		dm_get_plane_scale(old_plane_state, &old_scale_w, &old_scale_h);
 		if (new_scale_w != old_scale_w || new_scale_h != old_scale_h) {
+			consider_mode_change = true;
+			break;
+		}
+
+		/*
+		 * A non-cursor plane moving or resizing (without a scale change)
+		 * changes how much of the CRTC it covers. This can create or
+		 * remove a hole under the cursor and thus flip the required
+		 * cursor mode (native vs overlay), so its destination rect must
+		 * be re-evaluated too.
+		 *
+		 * The cursor plane itself is deliberately excluded: the cursor
+		 * mode depends on the underlying planes' coverage, not on the
+		 * cursor's position (see the entire_crtc_covered logic below).
+		 * Triggering on cursor movement would force every legacy cursor
+		 * update off its fast path, and in a cursor-only commit - where
+		 * the underlying planes are not part of the state - the coverage
+		 * loop would see no covering plane and misevaluate the mode as
+		 * overlay, regressing flip-vs-cursor-legacy.
+		 */
+		if (plane->type != DRM_PLANE_TYPE_CURSOR &&
+		    (old_plane_state->crtc_x != plane_state->crtc_x ||
+		     old_plane_state->crtc_y != plane_state->crtc_y ||
+		     old_plane_state->crtc_w != plane_state->crtc_w ||
+		     old_plane_state->crtc_h != plane_state->crtc_h)) {
 			consider_mode_change = true;
 			break;
 		}
@@ -6804,7 +6985,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 	ret = drm_atomic_helper_check_modeset(dev, state);
 	if (ret) {
-		drm_dbg_atomic(dev, "drm_atomic_helper_check_modeset() failed\n");
+		drm_dbg_atomic(dev, "drm_atomic_helper_check_modeset() failed: %pe\n", ERR_PTR(ret));
 		goto fail;
 	}
 
@@ -6819,7 +7000,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 		new_crtc_state = drm_atomic_get_crtc_state(state, new_con_state->crtc);
 		if (IS_ERR(new_crtc_state)) {
-			drm_dbg_atomic(dev, "drm_atomic_get_crtc_state() failed\n");
+			drm_dbg_atomic(dev, "drm_atomic_get_crtc_state() failed: %pe\n", new_crtc_state);
 			ret = PTR_ERR(new_crtc_state);
 			goto fail;
 		}
@@ -6839,7 +7020,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 			if (drm_atomic_crtc_needs_modeset(new_crtc_state)) {
 				ret = add_affected_mst_dsc_crtcs(state, crtc);
 				if (ret) {
-					drm_dbg_atomic(dev, "add_affected_mst_dsc_crtcs() failed\n");
+					drm_dbg_atomic(dev, "add_affected_mst_dsc_crtcs() failed: %pe\n", ERR_PTR(ret));
 					goto fail;
 				}
 			}
@@ -6856,7 +7037,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 		ret = amdgpu_dm_verify_lut_sizes(new_crtc_state);
 		if (ret) {
-			drm_dbg_atomic(dev, "amdgpu_dm_verify_lut_sizes() failed\n");
+			drm_dbg_atomic(dev, "amdgpu_dm_verify_lut_sizes() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
@@ -6865,13 +7046,13 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 		ret = drm_atomic_add_affected_connectors(state, crtc);
 		if (ret) {
-			drm_dbg_atomic(dev, "drm_atomic_add_affected_connectors() failed\n");
+			drm_dbg_atomic(dev, "drm_atomic_add_affected_connectors() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
 		ret = drm_atomic_add_affected_planes(state, crtc);
 		if (ret) {
-			drm_dbg_atomic(dev, "drm_atomic_add_affected_planes() failed\n");
+			drm_dbg_atomic(dev, "drm_atomic_add_affected_planes() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
@@ -6910,7 +7091,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 			if (IS_ERR(new_plane_state)) {
 				ret = PTR_ERR(new_plane_state);
-				drm_dbg_atomic(dev, "new_plane_state is BAD\n");
+				drm_dbg_atomic(dev, "new_plane_state is BAD: %pe\n", new_plane_state);
 				goto fail;
 			}
 		}
@@ -6924,7 +7105,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 	 */
 	ret = drm_atomic_normalize_zpos(dev, state);
 	if (ret) {
-		drm_dbg(dev, "drm_atomic_normalize_zpos() failed\n");
+		drm_dbg(dev, "drm_atomic_normalize_zpos() failed: %pe\n", ERR_PTR(ret));
 		goto fail;
 	}
 
@@ -6938,7 +7119,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 		ret = dm_crtc_get_cursor_mode(adev, state, dm_new_crtc_state,
 					      &dm_new_crtc_state->cursor_mode);
 		if (ret) {
-			drm_dbg(dev, "Failed to determine cursor mode\n");
+			drm_dbg(dev, "Failed to determine cursor mode: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
@@ -6970,7 +7151,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 					    &lock_and_validation_needed,
 					    &is_top_most_overlay);
 		if (ret) {
-			drm_dbg_atomic(dev, "dm_update_plane_state() failed\n");
+			drm_dbg_atomic(dev, "dm_update_plane_state() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 	}
@@ -6983,7 +7164,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 					   false,
 					   &lock_and_validation_needed);
 		if (ret) {
-			drm_dbg_atomic(dev, "DISABLE: dm_update_crtc_state() failed\n");
+			drm_dbg_atomic(dev, "DISABLE: dm_update_crtc_state() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 	}
@@ -6996,7 +7177,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 					   true,
 					   &lock_and_validation_needed);
 		if (ret) {
-			drm_dbg_atomic(dev, "ENABLE: dm_update_crtc_state() failed\n");
+			drm_dbg_atomic(dev, "ENABLE: dm_update_crtc_state() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 	}
@@ -7010,7 +7191,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 					    &lock_and_validation_needed,
 					    &is_top_most_overlay);
 		if (ret) {
-			drm_dbg_atomic(dev, "dm_update_plane_state() failed\n");
+			drm_dbg_atomic(dev, "dm_update_plane_state() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 	}
@@ -7026,7 +7207,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 	/* Run this here since we want to validate the streams we created */
 	ret = drm_atomic_helper_check_planes(dev, state);
 	if (ret) {
-		drm_dbg_atomic(dev, "drm_atomic_helper_check_planes() failed\n");
+		drm_dbg_atomic(dev, "drm_atomic_helper_check_planes() failed: %pe\n", ERR_PTR(ret));
 		goto fail;
 	}
 
@@ -7164,13 +7345,13 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 	if (lock_and_validation_needed) {
 		ret = dm_atomic_get_state(state, &dm_state);
 		if (ret) {
-			drm_dbg_atomic(dev, "dm_atomic_get_state() failed\n");
+			drm_dbg_atomic(dev, "dm_atomic_get_state() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
 		ret = do_aquire_global_lock(dev, state);
 		if (ret) {
-			drm_dbg_atomic(dev, "do_aquire_global_lock() failed\n");
+			drm_dbg_atomic(dev, "do_aquire_global_lock() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
@@ -7178,7 +7359,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 		if (dc_resource_is_dsc_encoding_supported(dc)) {
 			ret = compute_mst_dsc_configs_for_state(state, dm_state->context, vars);
 			if (ret) {
-				drm_dbg_atomic(dev, "MST_DSC compute_mst_dsc_configs_for_state() failed\n");
+				drm_dbg_atomic(dev, "MST_DSC compute_mst_dsc_configs_for_state() failed: %pe\n", ERR_PTR(ret));
 				ret = -EINVAL;
 				goto fail;
 			}
@@ -7187,7 +7368,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 
 		ret = dm_update_mst_vcpi_slots_for_dsc(state, dm_state->context, vars);
 		if (ret) {
-			drm_dbg_atomic(dev, "dm_update_mst_vcpi_slots_for_dsc() failed\n");
+			drm_dbg_atomic(dev, "dm_update_mst_vcpi_slots_for_dsc() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 
@@ -7199,7 +7380,7 @@ static int amdgpu_dm_atomic_check(struct drm_device *dev,
 		 */
 		ret = drm_dp_mst_atomic_check(state);
 		if (ret) {
-			drm_dbg_atomic(dev, "MST drm_dp_mst_atomic_check() failed\n");
+			drm_dbg_atomic(dev, "MST drm_dp_mst_atomic_check() failed: %pe\n", ERR_PTR(ret));
 			goto fail;
 		}
 		status = dc_validate_global_state(dc, dm_state->context, DC_VALIDATE_MODE_ONLY);
@@ -7288,7 +7469,7 @@ fail:
 	else if (ret == -EINTR || ret == -EAGAIN || ret == -ERESTARTSYS)
 		drm_dbg_atomic(dev, "Atomic check stopped due to signal.\n");
 	else
-		drm_dbg_atomic(dev, "Atomic check failed with err: %d\n", ret);
+		drm_dbg_atomic(dev, "Atomic check failed: %pe\n", ERR_PTR(ret));
 
 	trace_amdgpu_dm_atomic_check_finish(state, ret);
 

@@ -328,7 +328,7 @@ STATIC_IFN_KUNIT int amdgpu_dm_plane_validate_dcc(struct amdgpu_device *adev,
 }
 EXPORT_IF_KUNIT(amdgpu_dm_plane_validate_dcc);
 
-STATIC_IFN_KUNIT int amdgpu_dm_plane_fill_gfx9_plane_attributes_from_modifiers(struct amdgpu_device *adev,
+STATIC_IFN_KUNIT int amdgpu_dm_plane_fill_gfx9_attrs_from_modifiers(struct amdgpu_device *adev,
 									       const struct amdgpu_framebuffer *afb,
 									       const enum surface_pixel_format format,
 									       const enum dc_rotation_angle rotation,
@@ -374,13 +374,13 @@ STATIC_IFN_KUNIT int amdgpu_dm_plane_fill_gfx9_plane_attributes_from_modifiers(s
 
 	ret = amdgpu_dm_plane_validate_dcc(adev, format, rotation, tiling_info, dcc, address, plane_size);
 	if (ret)
-		drm_dbg_kms(adev_to_drm(adev), "amdgpu_dm_plane_validate_dcc: returned error: %d\n", ret);
+		drm_dbg_kms(adev_to_drm(adev), "amdgpu_dm_plane_validate_dcc: returned error: %pe\n", ERR_PTR(ret));
 
 	return ret;
 }
-EXPORT_IF_KUNIT(amdgpu_dm_plane_fill_gfx9_plane_attributes_from_modifiers);
+EXPORT_IF_KUNIT(amdgpu_dm_plane_fill_gfx9_attrs_from_modifiers);
 
-STATIC_IFN_KUNIT int amdgpu_dm_plane_fill_gfx12_plane_attributes_from_modifiers(struct amdgpu_device *adev,
+STATIC_IFN_KUNIT int amdgpu_dm_plane_fill_gfx12_attrs_from_modifiers(struct amdgpu_device *adev,
 										const struct amdgpu_framebuffer *afb,
 										const enum surface_pixel_format format,
 										const enum dc_rotation_angle rotation,
@@ -415,11 +415,11 @@ STATIC_IFN_KUNIT int amdgpu_dm_plane_fill_gfx12_plane_attributes_from_modifiers(
 	/* TODO: This seems wrong because there is no DCC plane on GFX12. */
 	ret = amdgpu_dm_plane_validate_dcc(adev, format, rotation, tiling_info, dcc, address, plane_size);
 	if (ret)
-		drm_dbg_kms(adev_to_drm(adev), "amdgpu_dm_plane_validate_dcc: returned error: %d\n", ret);
+		drm_dbg_kms(adev_to_drm(adev), "amdgpu_dm_plane_validate_dcc: returned: %pe\n", ERR_PTR(ret));
 
 	return ret;
 }
-EXPORT_IF_KUNIT(amdgpu_dm_plane_fill_gfx12_plane_attributes_from_modifiers);
+EXPORT_IF_KUNIT(amdgpu_dm_plane_fill_gfx12_attrs_from_modifiers);
 
 static void amdgpu_dm_plane_add_gfx10_1_modifiers(const struct amdgpu_device *adev,
 						  uint64_t **mods,
@@ -927,14 +927,14 @@ int amdgpu_dm_plane_fill_plane_buffer_attributes(struct amdgpu_device *adev,
 	}
 
 	if (adev->family == AMDGPU_FAMILY_GC_12_0_0) {
-		ret = amdgpu_dm_plane_fill_gfx12_plane_attributes_from_modifiers(adev, afb, format,
+		ret = amdgpu_dm_plane_fill_gfx12_attrs_from_modifiers(adev, afb, format,
 										 rotation, plane_size,
 										 tiling_info, dcc,
 										 address);
 		if (ret)
 			return ret;
 	} else if (adev->family >= AMDGPU_FAMILY_AI) {
-		ret = amdgpu_dm_plane_fill_gfx9_plane_attributes_from_modifiers(adev, afb, format,
+		ret = amdgpu_dm_plane_fill_gfx9_attrs_from_modifiers(adev, afb, format,
 										rotation, plane_size,
 										tiling_info, dcc,
 										address);
@@ -975,13 +975,15 @@ static int amdgpu_dm_plane_helper_prepare_fb(struct drm_plane *plane,
 	adev = amdgpu_ttm_adev(rbo->tbo.bdev);
 	r = amdgpu_bo_reserve(rbo, true);
 	if (r) {
-		drm_err(adev_to_drm(adev), "fail to reserve bo (%d)\n", r);
+		drm_err(adev_to_drm(adev), "fail to reserve bo: %pe\n", ERR_PTR(r));
 		return r;
 	}
 
 	r = dma_resv_reserve_fences(rbo->tbo.base.resv, TTM_NUM_MOVE_FENCES);
-	if (r)
+	if (r) {
+		drm_err(adev_to_drm(adev), "reserving fence slot failed: %pe\n", ERR_PTR(r));
 		goto error_unlock;
+	}
 
 	if (plane->type != DRM_PLANE_TYPE_CURSOR)
 		domain = amdgpu_display_supported_domains(adev, rbo->flags);
@@ -992,13 +994,13 @@ static int amdgpu_dm_plane_helper_prepare_fb(struct drm_plane *plane,
 	r = amdgpu_bo_pin(rbo, domain);
 	if (unlikely(r != 0)) {
 		if (r != -ERESTARTSYS)
-			DRM_ERROR("Failed to pin framebuffer with error %d\n", r);
+			DRM_ERROR("Failed to pin framebuffer: %pe\n", ERR_PTR(r));
 		goto error_unlock;
 	}
 
 	r = amdgpu_ttm_alloc_gart(&rbo->tbo);
 	if (unlikely(r != 0)) {
-		DRM_ERROR("%p bind failed\n", rbo);
+		DRM_ERROR("%p bind failed: %pe\n", rbo, ERR_PTR(r));
 		goto error_unpin;
 	}
 
@@ -1058,7 +1060,7 @@ static void amdgpu_dm_plane_helper_cleanup_fb(struct drm_plane *plane,
 	rbo = gem_to_amdgpu_bo(old_state->fb->obj[0]);
 	r = amdgpu_bo_reserve(rbo, false);
 	if (unlikely(r)) {
-		DRM_ERROR("failed to reserve rbo before unpin\n");
+		DRM_ERROR("failed to reserve rbo before unpin: %pe\n", ERR_PTR(r));
 		return;
 	}
 
@@ -1254,8 +1256,8 @@ int amdgpu_dm_plane_fill_dc_scaling_info(struct amdgpu_device *adev,
 }
 EXPORT_IF_KUNIT(amdgpu_dm_plane_fill_dc_scaling_info);
 
-static int amdgpu_dm_plane_atomic_check(struct drm_plane *plane,
-					struct drm_atomic_commit *state)
+STATIC_IFN_KUNIT int amdgpu_dm_plane_atomic_check(struct drm_plane *plane,
+						  struct drm_atomic_commit *state)
 {
 	struct drm_plane_state *new_plane_state = drm_atomic_get_new_plane_state(state,
 										 plane);
@@ -1300,9 +1302,10 @@ static int amdgpu_dm_plane_atomic_check(struct drm_plane *plane,
 
 	return -EINVAL;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_plane_atomic_check);
 
-static int amdgpu_dm_plane_atomic_async_check(struct drm_plane *plane,
-					      struct drm_atomic_commit *state, bool flip)
+STATIC_IFN_KUNIT int amdgpu_dm_plane_atomic_async_check(struct drm_plane *plane,
+							struct drm_atomic_commit *state, bool flip)
 {
 	struct drm_crtc_state *new_crtc_state;
 	struct drm_plane_state *new_plane_state;
@@ -1324,6 +1327,7 @@ static int amdgpu_dm_plane_atomic_async_check(struct drm_plane *plane,
 
 	return 0;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_plane_atomic_async_check);
 
 int amdgpu_dm_plane_get_cursor_position(struct drm_plane *plane, struct drm_crtc *crtc,
 					struct dc_cursor_position *position)
@@ -1483,7 +1487,7 @@ static void amdgpu_dm_plane_atomic_async_update(struct drm_plane *plane,
 	amdgpu_dm_plane_handle_cursor_update(plane, old_state);
 }
 
-static void amdgpu_dm_plane_panic_flush(struct drm_plane *plane)
+STATIC_IFN_KUNIT void amdgpu_dm_plane_panic_flush(struct drm_plane *plane)
 {
 	struct dm_plane_state *dm_plane_state = to_dm_plane_state(plane->state);
 	struct drm_framebuffer *fb = plane->state->fb;
@@ -1496,6 +1500,7 @@ static void amdgpu_dm_plane_panic_flush(struct drm_plane *plane)
 
 	dc_plane_force_dcc_and_tiling_disable(dc_plane_state, fb->modifier ? true : false);
 }
+EXPORT_IF_KUNIT(amdgpu_dm_plane_panic_flush);
 
 static const struct drm_plane_helper_funcs dm_plane_helper_funcs = {
 	.prepare_fb = amdgpu_dm_plane_helper_prepare_fb,
@@ -1515,7 +1520,7 @@ static const struct drm_plane_helper_funcs dm_primary_plane_helper_funcs = {
 	.panic_flush = amdgpu_dm_plane_panic_flush,
 };
 
-static void amdgpu_dm_plane_drm_plane_reset(struct drm_plane *plane)
+STATIC_IFN_KUNIT void amdgpu_dm_plane_drm_plane_reset(struct drm_plane *plane)
 {
 	struct dm_plane_state *amdgpu_state;
 
@@ -1532,8 +1537,10 @@ static void amdgpu_dm_plane_drm_plane_reset(struct drm_plane *plane)
 	amdgpu_state->shaper_tf = AMDGPU_TRANSFER_FUNCTION_DEFAULT;
 	amdgpu_state->blend_tf = AMDGPU_TRANSFER_FUNCTION_DEFAULT;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_plane_drm_plane_reset);
 
-static struct drm_plane_state *amdgpu_dm_plane_drm_plane_duplicate_state(struct drm_plane *plane)
+STATIC_IFN_KUNIT struct drm_plane_state *
+amdgpu_dm_plane_drm_plane_duplicate_state(struct drm_plane *plane)
 {
 	struct dm_plane_state *dm_plane_state, *old_dm_plane_state;
 
@@ -1572,6 +1579,7 @@ static struct drm_plane_state *amdgpu_dm_plane_drm_plane_duplicate_state(struct 
 
 	return &dm_plane_state->base;
 }
+EXPORT_IF_KUNIT(amdgpu_dm_plane_drm_plane_duplicate_state);
 
 STATIC_IFN_KUNIT bool amdgpu_dm_plane_format_mod_supported(struct drm_plane *plane,
 							   uint32_t format,
@@ -1636,8 +1644,8 @@ STATIC_IFN_KUNIT bool amdgpu_dm_plane_format_mod_supported(struct drm_plane *pla
 }
 EXPORT_IF_KUNIT(amdgpu_dm_plane_format_mod_supported);
 
-static void amdgpu_dm_plane_drm_plane_destroy_state(struct drm_plane *plane,
-						    struct drm_plane_state *state)
+STATIC_IFN_KUNIT void amdgpu_dm_plane_drm_plane_destroy_state(struct drm_plane *plane,
+							      struct drm_plane_state *state)
 {
 	struct dm_plane_state *dm_plane_state = to_dm_plane_state(state);
 
@@ -1657,6 +1665,7 @@ static void amdgpu_dm_plane_drm_plane_destroy_state(struct drm_plane *plane,
 
 	drm_atomic_helper_plane_destroy_state(plane, state);
 }
+EXPORT_IF_KUNIT(amdgpu_dm_plane_drm_plane_destroy_state);
 
 #ifdef AMD_PRIVATE_COLOR
 static void
@@ -1861,8 +1870,8 @@ dm_plane_init_colorops(struct drm_plane *plane)
 	if (dc->ctx->dce_version >= DCN_VERSION_3_0) {
 		ret = amdgpu_dm_initialize_default_pipeline(plane, &pipelines[len]);
 		if (ret) {
-			drm_err(plane->dev, "Failed to create color pipeline for plane %d: %d\n",
-				plane->base.id, ret);
+			drm_err(plane->dev, "Failed to create color pipeline for plane %d: %pe\n",
+				plane->base.id, ERR_PTR(ret));
 			goto out;
 		}
 		len++;
