@@ -2340,24 +2340,22 @@ static void guc_exec_queue_suspend_timeout_ban(struct xe_exec_queue *q)
 	}
 }
 
-static int guc_exec_queue_suspend_wait(struct xe_exec_queue *q)
+/*
+ * Wait for @q's own suspend to complete: suspend_pending cleared, or the queue
+ * killed / GuC stopped. With @blocking, wait uninterruptibly and do not handle
+ * VF recovery (for callers that must complete on behalf of a possibly
+ * cross-process queue); otherwise wait interruptibly.
+ *
+ * Returns 0 on completion or -ETIME on timeout. Interruptible waits may also
+ * return -EAGAIN (VF recovery in progress, retry) or -ERESTARTSYS (aborted by a
+ * signal; suspend_pending may still be set, so callers must not resume()
+ * without re-confirming the suspend).
+ */
+static int guc_exec_queue_wait_suspend_done(struct xe_exec_queue *q, bool blocking)
 {
 	struct xe_guc *guc = exec_queue_to_guc(q);
 	struct xe_device *xe = guc_to_xe(guc);
 	int ret;
-
-	/*
-	 * In multi-queue mode the primary owns the GuC scheduling context for
-	 * the whole group, so wait on the primary's suspend to complete. All
-	 * group members share the same GuC/device, so guc, xe and timeout above
-	 * are computed from @q directly.
-	 *
-	 * A secondary's suspend is short-circuited (no GuC round-trip) and, as
-	 * its SUSPEND message precedes the primary's on the shared FIFO
-	 * submit_wq, completes before the primary's. So waiting on the primary
-	 * is sufficient.
-	 */
-	q = xe_exec_queue_multi_queue_primary(q);
 
 	/*
 	 * Likely don't need to check exec_queue_killed() as we clear
@@ -2369,73 +2367,89 @@ static int guc_exec_queue_suspend_wait(struct xe_exec_queue *q)
 	 xe_guc_read_stopped(guc))
 
 retry:
-	if (IS_SRIOV_VF(xe))
+	if (blocking) {
+		if (IS_SRIOV_VF(xe))
+			ret = wait_event_timeout(guc->ct.wq, WAIT_COND, HZ * 5);
+		else
+			ret = wait_event_timeout(q->guc->suspend_wait, WAIT_COND,
+						 HZ * 5);
+	} else if (IS_SRIOV_VF(xe)) {
 		ret = wait_event_interruptible_timeout(guc->ct.wq, WAIT_COND ||
-						       vf_recovery(guc),
-						       HZ * 5);
-	else
+						       vf_recovery(guc), HZ * 5);
+	} else {
 		ret = wait_event_interruptible_timeout(q->guc->suspend_wait,
 						       WAIT_COND, HZ * 5);
+	}
 
-	if (vf_recovery(guc) && !xe_device_wedged((guc_to_xe(guc))))
+	if (!blocking && vf_recovery(guc) && !xe_device_wedged(xe))
 		return -EAGAIN;
 
-	if (!ret) {
-		guc_exec_queue_suspend_timeout_ban(q);
+	if (!ret)
 		return -ETIME;
-	} else if (IS_SRIOV_VF(xe) && !WAIT_COND) {
+	else if (!blocking && IS_SRIOV_VF(xe) && !WAIT_COND)
 		/* Corner case on RESFIX DONE where vf_recovery() changes */
 		goto retry;
-	}
 
 #undef WAIT_COND
 
-	/*
-	 * ret < 0 (-ERESTARTSYS): the interruptible wait was aborted by a
-	 * signal. The queue is not banned - the failure is in the waiter, not
-	 * the queue. The suspend is not confirmed complete, so suspend_pending
-	 * may still be set; callers must not resume() on this error without
-	 * re-confirming the suspend.
-	 */
 	return ret < 0 ? ret : 0;
 }
 
-static int guc_exec_queue_suspend_wait_blocking(struct xe_exec_queue *q)
+static int guc_exec_queue_suspend_wait_common(struct xe_exec_queue *q, bool blocking)
 {
-	struct xe_guc *guc = exec_queue_to_guc(q);
-	struct xe_device *xe = guc_to_xe(guc);
 	int ret;
 
 	/*
-	 * Uninterruptible variant of guc_exec_queue_suspend_wait() for callers
-	 * that must complete the wait on behalf of a queue possibly owned by a
-	 * different process (e.g. cleanup/undo paths). An interruptible wait
-	 * could return -ERESTARTSYS if the calling task is signalled, leaving
-	 * that queue suspended forever (cross-process DoS).
+	 * A secondary's suspend rides the sched-message worker (short-circuited,
+	 * no GuC round-trip) and so is not synchronous with
+	 * guc_exec_queue_suspend(): its own suspend_pending may still be set
+	 * here. Waiting on the primary alone is not sufficient - if the primary
+	 * was already suspended, the forward is a refcount-only transition that
+	 * queues no new primary SUSPEND and leaves the primary's suspend_pending
+	 * clear, so the primary wait would return immediately while the
+	 * secondary's suspend is still in flight, and a later resume() would trip
+	 * the secondary's !suspend_pending assert. So first wait for the
+	 * secondary's own suspend to complete, then wait on the primary.
 	 *
-	 * A timeout is still a real per-queue fault, so it bans and cleans up
-	 * like suspend_wait(). VF recovery is deliberately not handled (no
-	 * -EAGAIN) since a blocking caller cannot retry.
+	 * A timeout on either bans the queue (being multi-queue, that tears down
+	 * the whole group). A secondary suspend has no real GuC round-trip, so
+	 * its timeout is a software scheduler stall rather than a GuC fault, but
+	 * banning is still the safe recovery: otherwise the queue is left with
+	 * suspend_pending set and a subsequent resume() trips the !suspend_pending
+	 * assert.
 	 */
-	q = xe_exec_queue_multi_queue_primary(q);
-
-#define WAIT_COND \
-	(!READ_ONCE(q->guc->suspend_pending) ||	exec_queue_killed(q) || \
-	 xe_guc_read_stopped(guc))
-
-	if (IS_SRIOV_VF(xe))
-		ret = wait_event_timeout(guc->ct.wq, WAIT_COND, HZ * 5);
-	else
-		ret = wait_event_timeout(q->guc->suspend_wait, WAIT_COND, HZ * 5);
-
-#undef WAIT_COND
-
-	if (!ret) {
-		guc_exec_queue_suspend_timeout_ban(q);
-		return -ETIME;
+	if (xe_exec_queue_is_multi_queue_secondary(q)) {
+		ret = guc_exec_queue_wait_suspend_done(q, blocking);
+		if (ret == -ETIME)
+			guc_exec_queue_suspend_timeout_ban(q);
+		if (ret)
+			return ret;
 	}
 
-	return 0;
+	q = xe_exec_queue_multi_queue_primary(q);
+	ret = guc_exec_queue_wait_suspend_done(q, blocking);
+	if (ret == -ETIME)
+		guc_exec_queue_suspend_timeout_ban(q);
+
+	return ret;
+}
+
+static int guc_exec_queue_suspend_wait(struct xe_exec_queue *q)
+{
+	return guc_exec_queue_suspend_wait_common(q, false);
+}
+
+/*
+ * Uninterruptible variant of guc_exec_queue_suspend_wait() for callers that
+ * must complete the wait on behalf of a queue possibly owned by a different
+ * process (e.g. cleanup/undo paths). An interruptible wait could return
+ * -ERESTARTSYS if the calling task is signalled, leaving that queue suspended
+ * forever (cross-process DoS). VF recovery is deliberately not handled (no
+ * -EAGAIN) since a blocking caller cannot retry.
+ */
+static int guc_exec_queue_suspend_wait_blocking(struct xe_exec_queue *q)
+{
+	return guc_exec_queue_suspend_wait_common(q, true);
 }
 
 static void guc_exec_queue_resume(struct xe_exec_queue *q)
