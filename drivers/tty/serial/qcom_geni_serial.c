@@ -1173,8 +1173,6 @@ static void qcom_geni_serial_shutdown(struct uart_port *uport)
 
 	qcom_geni_serial_cancel_tx_cmd(uport);
 	uart_port_unlock_irq(uport);
-
-	pm_runtime_put_sync(uport->dev);
 }
 
 static void qcom_geni_serial_flush_buffer(struct uart_port *uport)
@@ -1248,18 +1246,10 @@ static int qcom_geni_serial_startup(struct uart_port *uport)
 	struct qcom_geni_serial_port *port = to_dev_port(uport);
 	struct tty_port *tport = &uport->state->port;
 
-	ret = pm_runtime_resume_and_get(uport->dev);
-	if (ret < 0) {
-		dev_err(uport->dev, "Failed to resume and get %d\n", ret);
-		return ret;
-	}
-
 	if (!port->setup) {
 		ret = qcom_geni_serial_port_setup(uport);
-		if (ret) {
-			pm_runtime_put_sync(uport->dev);
+		if (ret)
 			return ret;
-		}
 	}
 
 	/*
@@ -1741,6 +1731,22 @@ static int geni_serial_resource_init(struct uart_port *uport)
 	return 0;
 }
 
+static void qcom_geni_serial_pm(struct uart_port *uport,
+		unsigned int new_state, unsigned int old_state)
+{
+
+	/* If we've never been called, treat it as off */
+	if (old_state == UART_PM_STATE_UNDEFINED)
+		old_state = UART_PM_STATE_OFF;
+
+	if (new_state == UART_PM_STATE_ON && old_state == UART_PM_STATE_OFF)
+		pm_runtime_resume_and_get(uport->dev);
+	else if (new_state == UART_PM_STATE_OFF &&
+		 old_state == UART_PM_STATE_ON)
+		pm_runtime_put_sync(uport->dev);
+
+}
+
 /**
  * qcom_geni_rs485_config - Configure RS485 settings for the UART port
  * @uport: Pointer to the UART port structure
@@ -1779,6 +1785,7 @@ static const struct uart_ops qcom_geni_console_pops = {
 	.poll_put_char	= qcom_geni_serial_poll_put_char,
 	.poll_init = qcom_geni_serial_poll_init,
 #endif
+	.pm = qcom_geni_serial_pm,
 };
 
 static const struct uart_ops qcom_geni_uart_pops = {
@@ -1795,6 +1802,7 @@ static const struct uart_ops qcom_geni_uart_pops = {
 	.type = qcom_geni_serial_get_type,
 	.set_mctrl = qcom_geni_serial_set_mctrl,
 	.get_mctrl = qcom_geni_serial_get_mctrl,
+	.pm = qcom_geni_serial_pm,
 };
 
 static int qcom_geni_serial_probe(struct platform_device *pdev)
@@ -1927,13 +1935,6 @@ static int qcom_geni_serial_probe(struct platform_device *pdev)
 	}
 
 	devm_pm_runtime_enable(port->se.dev);
-
-	PM_RUNTIME_ACQUIRE_IF_ENABLED(uport->dev, pm);
-	ret = PM_RUNTIME_ACQUIRE_ERR(&pm);
-	if (ret < 0) {
-		dev_err(uport->dev, "Failed to resume and get %d\n", ret);
-		goto error;
-	}
 
 	ret = uart_add_one_port(drv, uport);
 	if (ret)
