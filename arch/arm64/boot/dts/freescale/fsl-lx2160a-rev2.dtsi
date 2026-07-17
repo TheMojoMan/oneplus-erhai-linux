@@ -6,5 +6,6 @@
 
 /dts-v1/;
 
-#include "fsl-lx2160a.dtsi"
+#include "fsl-lx216x.dtsi"
 #include "fsl-lx216xa-pcie-gen3.dtsi"
+#include "fsl-lx2160a-serdes.dtsi"
