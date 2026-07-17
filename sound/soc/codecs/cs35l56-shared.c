@@ -811,14 +811,10 @@ int cs35l56_runtime_resume_common(struct cs35l56_base *cs35l56_base, bool is_sou
 	if (!cs35l56_base->init_done)
 		return 0;
 
-	if (!cs35l56_base->can_hibernate)
-		goto out_sync;
-
-	/* Must be done before releasing cache-only */
-	if (!is_soundwire)
+	/* Hibernate wake must be done before releasing cache-only */
+	if (cs35l56_base->can_hibernate && !is_soundwire)
 		cs35l56_issue_wake_event(cs35l56_base);
 
-out_sync:
 	ret = cs35l56_wait_for_firmware_boot(cs35l56_base);
 	if (ret) {
 		dev_err(cs35l56_base->dev, "Hibernate wake failed: %d\n", ret);
