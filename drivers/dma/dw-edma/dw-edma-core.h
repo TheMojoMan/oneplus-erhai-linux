@@ -9,8 +9,10 @@
 #ifndef _DW_EDMA_CORE_H
 #define _DW_EDMA_CORE_H
 
+#include <linux/atomic.h>
 #include <linux/msi.h>
 #include <linux/dma/edma.h>
+#include <linux/workqueue.h>
 
 #include "../virt-dma.h"
 
@@ -80,6 +82,9 @@ struct dw_edma_chan {
 
 	struct dma_slave_config		config;
 	bool				non_ll;
+
+	struct work_struct		irq_work;
+	atomic_t			irq_pending;
 };
 
 struct dw_edma_irq {
@@ -102,6 +107,12 @@ struct dw_edma {
 	int				nr_irqs;
 
 	struct dw_edma_chan		*chan;
+
+	/*
+	 * WQ_HIGHPRI keeps completion processing responsive under heavy load;
+	 * WQ_UNBOUND lets different channels run on different CPUs.
+	 */
+	struct workqueue_struct		*wq;
 
 	raw_spinlock_t			lock;		/* Protect v0 shared registers */
 
