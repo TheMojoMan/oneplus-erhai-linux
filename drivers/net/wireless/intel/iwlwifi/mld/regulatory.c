@@ -524,6 +524,8 @@ void iwl_mld_init_ap_type_tables(struct iwl_mld *mld)
 	if (ret)
 		IWL_ERR(mld, "failed to send MCC_ALLOWED_AP_TYPE_CMD (%d)\n",
 			ret);
+	else
+		IWL_DEBUG_RADIO(mld, "MCC_ALLOWED_AP_TYPE_CMD sent to FW\n");
 }
 
 void iwl_mld_init_tas(struct iwl_mld *mld)
