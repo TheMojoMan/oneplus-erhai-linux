@@ -10,6 +10,8 @@
 
 #define XE_RAS_NUM_COUNTERS			16
 #define XE_RAS_NUM_ERROR_ARR			3
+/* Error bits in IEH global error status register */
+#define XE_RAS_SOC_IEH_PUNIT			BIT(1)
 
 /**
  * enum xe_ras_recovery_action - RAS recovery actions
@@ -175,6 +177,52 @@ struct xe_ras_compute_error {
 	u32 log_header;
 	/** @reserved: Reserved */
 	u32 reserved[15];
+} __packed;
+
+/**
+ * struct xe_ras_soc_error_source - Source of SoC error
+ */
+struct xe_ras_soc_error_source {
+	/** @csc: CSC */
+	u32 csc:1;
+	/** @ieh: IEH (Integrated Error Handler) */
+	u32 ieh:1;
+	/** @reserved: Reserved for future use */
+	u32 reserved:30;
+} __packed;
+
+/**
+ * struct xe_ras_soc_error - Error details of SoC internal error
+ */
+struct xe_ras_soc_error {
+	/** @source: Error source */
+	struct xe_ras_soc_error_source source;
+	/** @details: Error details specific to the error source */
+	u32 details[15];
+} __packed;
+
+/**
+ * struct xe_ras_csc_error - CSC error details
+ */
+struct xe_ras_csc_error {
+	/** @reserved: Reserved for future use */
+	u32 reserved;
+	/** @hec_fw_error: CSC firmware error */
+	u32 hec_fw_error;
+} __packed;
+
+/**
+ * struct xe_ras_ieh_error - IEH (Integrated Error Handler) error details
+ */
+struct xe_ras_ieh_error {
+	/** @reserved: Reserved for future use */
+	u32 reserved;
+	/** @global_error_status: Global error status */
+	u32 global_error_status;
+	/** @reserved1: Reserved for future use */
+	u32 reserved1[2];
+	/** @info: Additional information */
+	u32 info[10];
 } __packed;
 
 /**
