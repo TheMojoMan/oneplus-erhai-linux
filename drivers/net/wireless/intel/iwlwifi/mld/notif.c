@@ -298,7 +298,8 @@ CMD_VERSIONS(channel_survey_notif,
 CMD_VERSIONS(mfuart_notif,
 	     CMD_VER_ENTRY(2, iwl_mfuart_load_notif))
 CMD_VERSIONS(update_mcc,
-	     CMD_VER_ENTRY(1, iwl_mcc_chub_notif))
+	     CMD_VER_ENTRY(1, iwl_mcc_chub_notif)
+	     CMD_VER_ENTRY(2, iwl_mcc_chub_notif))
 CMD_VERSIONS(session_prot_notif,
 	     CMD_VER_ENTRY(3, iwl_session_prot_notif))
 CMD_VERSIONS(missed_beacon_notif,

@@ -411,7 +411,10 @@ struct iwl_mcc_chub_notif {
 	__le16 mcc;
 	u8 source_id;
 	u8 reserved1;
-} __packed; /* LAR_MCC_NOTIFY_S */
+} __packed;
+/* LAR_MCC_NOTIFY_S_VER_1
+ * LAR_MCC_NOTIFY_S_VER_2
+ */
 
 enum iwl_mcc_update_status {
 	MCC_RESP_NEW_CHAN_PROFILE,
