@@ -84,6 +84,9 @@ void iwl_mld_get_bios_tables(struct iwl_mld *mld)
 	iwl_uefi_get_uneb_table(mld->trans, &mld->fwrt);
 
 	iwl_bios_get_phy_filters(&mld->fwrt);
+
+	iwl_uefi_get_sgom_table(mld->trans, &mld->fwrt);
+	iwl_uefi_get_puncturing(&mld->fwrt);
 }
 
 static int iwl_mld_geo_sar_init(struct iwl_mld *mld)
