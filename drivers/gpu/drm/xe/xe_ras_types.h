@@ -12,6 +12,10 @@
 #define XE_RAS_NUM_ERROR_ARR			3
 /* Error bits in IEH global error status register */
 #define XE_RAS_SOC_IEH_PUNIT			BIT(1)
+/* Device memory error categories */
+#define XE_RAS_MEMORY_DB_ECC			BIT(1)
+#define XE_RAS_MEMORY_POISON			BIT(2)
+#define XE_RAS_MEMORY_DATA_PARITY		BIT(5)
 
 /**
  * enum xe_ras_recovery_action - RAS recovery actions
@@ -223,6 +227,22 @@ struct xe_ras_ieh_error {
 	u32 reserved1[2];
 	/** @info: Additional information */
 	u32 info[10];
+} __packed;
+
+/**
+ * struct xe_ras_memory_error - Device memory error details
+ */
+struct xe_ras_memory_error {
+	/** @category: Device memory error category */
+	u8 category;
+	/** @reserved: Reserved for future use */
+	u8 reserved[7];
+	/** @reserved1: Reserved for future use */
+	u64 reserved1;
+	/** @sw_address: Software address where error occurred */
+	u64 sw_address;
+	/** @reserved2: Reserved for future use */
+	u32 reserved2[10];
 } __packed;
 
 /**

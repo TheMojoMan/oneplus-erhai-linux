@@ -276,6 +276,36 @@ static u8 handle_soc_internal_errors(struct xe_device *xe, struct xe_ras_error_a
 	return XE_RAS_RECOVERY_ACTION_RESET;
 }
 
+static u8 handle_device_memory_errors(struct xe_device *xe, struct xe_ras_error_array *arr)
+{
+	struct xe_ras_memory_error *info = (void *)arr->details;
+
+	/*
+	 * For memory errors, the recovery action depends on the error category
+	 *
+	 * TODO: Double-bit ECC errors: Page offlining
+	 * Poison and data parity errors: Log only
+	 * For any other memory errors, request a reset as recovery mechanism
+	 */
+	switch (info->category) {
+	case XE_RAS_MEMORY_POISON:
+		xe_info(xe, "[RAS]: Poison error detected\n");
+		break;
+	case XE_RAS_MEMORY_DATA_PARITY:
+		xe_info(xe, "[RAS]: Data parity error detected\n");
+		break;
+	case XE_RAS_MEMORY_DB_ECC:
+		xe_info(xe, "[RAS]: Double-bit ECC error detected at sw address 0x%llx\n",
+			info->sw_address);
+		/* TODO: Add page offlining for Double-bit ECC error */
+		fallthrough;
+	default:
+		return XE_RAS_RECOVERY_ACTION_RESET;
+	}
+
+	return XE_RAS_RECOVERY_ACTION_RECOVERED;
+}
+
 void xe_ras_counter_threshold_crossed(struct xe_device *xe,
 				      struct xe_sysctrl_event_response *response)
 {
@@ -401,6 +431,9 @@ enum xe_ras_recovery_action xe_ras_process_errors(struct xe_device *xe)
 				break;
 			case XE_RAS_COMP_SOC_INTERNAL:
 				action = handle_soc_internal_errors(xe, arr);
+				break;
+			case XE_RAS_COMP_DEVICE_MEMORY:
+				action = handle_device_memory_errors(xe, arr);
 				break;
 			default:
 				/* For any other component, reset */
