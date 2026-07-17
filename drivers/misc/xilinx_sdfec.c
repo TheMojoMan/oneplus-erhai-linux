@@ -1390,10 +1390,8 @@ static int xsdfec_probe(struct platform_device *pdev)
 		err = devm_request_threaded_irq(dev, xsdfec->irq, NULL,
 						xsdfec_irq_thread, IRQF_ONESHOT,
 						"xilinx-sdfec16", xsdfec);
-		if (err < 0) {
-			dev_err(dev, "unable to request IRQ%d", xsdfec->irq);
+		if (err < 0)
 			goto err_xsdfec_dev;
-		}
 	}
 
 	err = ida_alloc(&dev_nrs, GFP_KERNEL);
