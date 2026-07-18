@@ -3485,15 +3485,28 @@ static struct cgroup *tg_cgrp(struct task_group *tg)
 		return &cgrp_dfl_root.cgrp;
 }
 
-#define SCX_INIT_TASK_ARGS_CGROUP(tg)		.cgroup = tg_cgrp(tg),
+#define SCX_INIT_TASK_ARGS_CGROUP(cgrp)		.cgroup = (cgrp),
 
 #else	/* CONFIG_EXT_GROUP_SCHED */
 
-#define SCX_INIT_TASK_ARGS_CGROUP(tg)
+#define SCX_INIT_TASK_ARGS_CGROUP(cgrp)
 
 #endif	/* CONFIG_EXT_GROUP_SCHED */
 
-int __scx_init_task(struct scx_sched *sch, struct task_struct *p, bool fork)
+/**
+ * __scx_init_task - Initialize a task for a sched
+ * @sch: sched to initialize @p for
+ * @p: task of interest
+ * @cgrp: cgroup @p is joining, %NULL for @p's current task_group's cgroup
+ * @fork: %true if @p is being forked
+ *
+ * Pre-commit cgroup migration passes @cgrp explicitly as @p's task_group
+ * still reflects the source.
+ *
+ * Return 0 on success, -errno on failure.
+ */
+int __scx_init_task(struct scx_sched *sch, struct task_struct *p,
+		    struct cgroup *cgrp, bool fork)
 {
 	int ret;
 
@@ -3501,7 +3514,7 @@ int __scx_init_task(struct scx_sched *sch, struct task_struct *p, bool fork)
 
 	if (SCX_HAS_OP(sch, init_task)) {
 		struct scx_init_task_args args = {
-			SCX_INIT_TASK_ARGS_CGROUP(task_group(p))
+			SCX_INIT_TASK_ARGS_CGROUP(cgrp ?: tg_cgrp(task_group(p)))
 			.fork = fork,
 		};
 
@@ -3747,7 +3760,7 @@ int scx_fork(struct task_struct *p, struct kernel_clone_args *kargs)
 		struct scx_sched *sch = scx_root;
 #endif
 		scx_set_task_state(p, SCX_TASK_INIT_BEGIN);
-		ret = __scx_init_task(sch, p, true);
+		ret = __scx_init_task(sch, p, NULL, true);
 		if (unlikely(ret)) {
 			scx_set_task_state(p, SCX_TASK_NONE);
 			return ret;
@@ -5969,8 +5982,8 @@ static void scx_root_disable(struct scx_sched *sch)
 	WRITE_ONCE(scx_switching_all, false);
 
 	/*
-	 * Shut down cgroup support before tasks so that the cgroup attach path
-	 * doesn't race against scx_disable_and_exit_task().
+	 * Shut down cgroup support before tasks so that the cgroup attach and
+	 * migration paths don't race against scx_disable_and_exit_task().
 	 */
 	scx_cgroup_lock();
 	scx_cgroup_enabled = false;
@@ -7263,7 +7276,7 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 		scx_set_task_state(p, SCX_TASK_INIT_BEGIN);
 		scx_task_iter_unlock(&sti);
 
-		ret = __scx_init_task(sch, p, false);
+		ret = __scx_init_task(sch, p, NULL, false);
 
 		scx_task_iter_relock(&sti, p);
 

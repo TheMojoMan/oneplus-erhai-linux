@@ -1920,7 +1920,8 @@ void scx_flush_dispatch_buf(struct scx_sched *sch, struct rq *rq);
 void scx_kick_cpu(struct scx_sched *sch, s32 cpu, u64 flags);
 void schedule_dsq_reenq(struct scx_sched *sch, struct scx_dispatch_q *dsq,
 			u64 reenq_flags, struct rq *locked_rq);
-int __scx_init_task(struct scx_sched *sch, struct task_struct *p, bool fork);
+int __scx_init_task(struct scx_sched *sch, struct task_struct *p,
+		    struct cgroup *cgrp, bool fork);
 void scx_enable_task(struct scx_sched *sch, struct task_struct *p);
 void __scx_disable_and_exit_task(struct scx_sched *sch, struct task_struct *p);
 void scx_sub_init_cancel_task(struct scx_sched *sch, struct task_struct *p);

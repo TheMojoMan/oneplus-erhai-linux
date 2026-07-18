@@ -906,7 +906,7 @@ void scx_sub_disable(struct scx_sched *sch)
 		 * parent. A child can't directly affect the parent through its
 		 * own failures.
 		 */
-		ret = __scx_init_task(parent, p, false);
+		ret = __scx_init_task(parent, p, NULL, false);
 		if (ret) {
 			scx_fail_parent(sch, p, ret);
 			put_task_struct(p);
@@ -1212,7 +1212,7 @@ void scx_sub_enable_workfn(struct kthread_work *work)
 		 * As $p is still on $parent, it can't be transitioned to INIT.
 		 * Let's worry about task state later. Use __scx_init_task().
 		 */
-		ret = __scx_init_task(sch, p, false);
+		ret = __scx_init_task(sch, p, NULL, false);
 		if (ret)
 			goto abort;
 
@@ -1336,6 +1336,99 @@ err_disable:
 	cmd->ret = 0;
 }
 
+/**
+ * scx_cgroup_task_migrating - Prepare a task for a cgroup migration
+ * @ctx: migration being prepared
+ *
+ * A task's sched must match its cgroup's owner, so a migration that crosses a
+ * sched boundary re-homes the task once committed. Run the fallible part here,
+ * before the migration commits: initialize the task for the destination sched.
+ * A rejection fails the cgroup.procs write.
+ */
+static s32 scx_cgroup_task_migrating(struct cgroup_task_migrate_ctx *ctx)
+{
+	struct task_struct *p = ctx->task;
+	struct scx_sched *to;
+	int ret;
+
+	/*
+	 * Cleared under scx_cgroup_lock() before root disable starts tearing
+	 * down tasks. As cgroup_mutex is held, a set flag guarantees that the
+	 * teardown loop is not running concurrently.
+	 */
+	if (!scx_cgroup_enabled)
+		return NOTIFY_OK;
+
+	to = ctx->dst_dcgrp->scx_sched;
+	if (scx_task_on_sched(to, p))
+		return NOTIFY_OK;
+
+	ret = __scx_init_task(to, p, ctx->dst_dcgrp, false);
+	if (ret)
+		return notifier_from_errno(ret);
+
+	return NOTIFY_OK;
+}
+
+/**
+ * scx_cgroup_task_migrated - Re-home a task that changed cgroups
+ * @ctx: committed migration
+ *
+ * Move the task to its new cgroup's sched, which scx_cgroup_task_migrating()
+ * already initialized it for. Can't fail.
+ *
+ * This is safe against all phases of the destination sched's destruction. A
+ * disable resets cgroup ownership to the parent and re-homes tasks in one
+ * scx_cgroup_lock() section. If that section already ran, the destination would
+ * be the parent. Otherwise, the re-home loop is still ahead and guaranteed to
+ * visit the task, now in the destination cgroup.
+ */
+static void scx_cgroup_task_migrated(struct cgroup_task_migrate_ctx *ctx)
+{
+	struct task_struct *p = ctx->task;
+	struct scx_sched *to;
+	struct rq *rq;
+	struct rq_flags rf;
+
+	if (!scx_cgroup_enabled)
+		return;
+
+	to = ctx->dst_dcgrp->scx_sched;
+	if (scx_task_on_sched(to, p))
+		return;
+
+	rq = task_rq_lock(p, &rf);
+	scx_rehome_task(to, p);
+	task_rq_unlock(rq, p, &rf);
+}
+
+/**
+ * scx_cgroup_task_migrate_canceled - Undo migration preparation
+ * @ctx: canceled migration
+ *
+ * The migration failed after scx_cgroup_task_migrating() initialized the task
+ * for the destination sched. The task stays on its current sched in the source
+ * cgroup. Undo the destination's init.
+ */
+static void scx_cgroup_task_migrate_canceled(struct cgroup_task_migrate_ctx *ctx)
+{
+	struct task_struct *p = ctx->task;
+	struct scx_sched *to;
+	struct rq *rq;
+	struct rq_flags rf;
+
+	if (!scx_cgroup_enabled)
+		return;
+
+	to = ctx->dst_dcgrp->scx_sched;
+	if (scx_task_on_sched(to, p))
+		return;
+
+	rq = task_rq_lock(p, &rf);
+	scx_sub_init_cancel_task(to, p);
+	task_rq_unlock(rq, p, &rf);
+}
+
 static s32 scx_cgroup_lifetime_notify(struct notifier_block *nb,
 				      unsigned long action, void *data)
 {
@@ -1367,12 +1460,42 @@ static struct notifier_block scx_cgroup_lifetime_nb = {
 	.notifier_call = scx_cgroup_lifetime_notify,
 };
 
-static s32 __init scx_cgroup_lifetime_notifier_init(void)
+static s32 scx_cgroup_task_notify(struct notifier_block *nb,
+				  unsigned long action, void *data)
 {
-	return blocking_notifier_chain_register(&cgroup_lifetime_notifier,
-						&scx_cgroup_lifetime_nb);
+	struct cgroup_task_migrate_ctx *ctx = data;
+
+	switch (action) {
+	case CGROUP_TASK_MIGRATING:
+		return scx_cgroup_task_migrating(ctx);
+	case CGROUP_TASK_MIGRATED:
+		scx_cgroup_task_migrated(ctx);
+		break;
+	case CGROUP_TASK_MIGRATE_CANCELED:
+		scx_cgroup_task_migrate_canceled(ctx);
+		break;
+	}
+
+	return NOTIFY_OK;
 }
-core_initcall(scx_cgroup_lifetime_notifier_init);
+
+static struct notifier_block scx_cgroup_task_nb = {
+	.notifier_call = scx_cgroup_task_notify,
+};
+
+static s32 __init scx_cgroup_notifier_init(void)
+{
+	s32 ret;
+
+	ret = blocking_notifier_chain_register(&cgroup_lifetime_notifier,
+					       &scx_cgroup_lifetime_nb);
+	if (ret)
+		return ret;
+
+	return blocking_notifier_chain_register(&cgroup_task_notifier,
+						&scx_cgroup_task_nb);
+}
+core_initcall(scx_cgroup_notifier_init);
 
 static void scx_pstack_recursion(struct bpf_prog *prog, const char *op)
 {
