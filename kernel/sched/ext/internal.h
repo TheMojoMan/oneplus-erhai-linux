@@ -649,6 +649,11 @@ struct sched_ext_ops {
 	 * when the BPF scheduler is being loaded or when @cgrp is created. This
 	 * operation may block.
 	 *
+	 * Cgroup handovers also generate these ops: an enabling sub-scheduler
+	 * receives ops.cgroup_init() for every cgroup in its subtree while the
+	 * previous sched receives ops.cgroup_exit(), and disabling reverses the
+	 * two.
+	 *
 	 * When the BPF scheduler is being loaded or cgroups are being handed
 	 * over, @cgrp may already have been removed by userspace: a removed
 	 * cgroup stays schedulable until its dying tasks finish their final
@@ -1722,6 +1727,7 @@ enum scx_kick_flags {
 enum scx_tg_flags {
 	SCX_TG_ONLINE		= 1U << 0,
 	SCX_TG_INITED		= 1U << 1,
+	SCX_TG_SUB_INIT		= 1U << 2,	/* see scx_cgroup_claim_subtree() */
 };
 
 enum scx_enable_state {

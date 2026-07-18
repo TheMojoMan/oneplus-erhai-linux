@@ -298,6 +298,19 @@ static inline bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask) { retur
 
 struct scx_task_group {
 #ifdef CONFIG_EXT_GROUP_SCHED
+	/*
+	 * The sched this tg is on, NULL if none. SCX_TG_INITED tracks whether
+	 * ops.cgroup_init() succeeded on it. When a child sched exits and its
+	 * tgs move to the parent, a failed init leaves the tg on the parent
+	 * with INITED clear (see scx_cgroup_return_subtree()).
+	 *
+	 * This is tracked separately from cgrp->scx_sched because the tg
+	 * hierarchy can diverge from the cgroup2 hierarchy in both lifetime and
+	 * shape. A tg stays online past its cgroup's removal while the
+	 * cgrp->scx_sched rewrites visit only live cgroups, leaving a removed
+	 * cgroup's pointer stale. The cpu controller can also be mounted on
+	 * cgroup1.
+	 */
 	struct scx_sched	*sched;
 
 	u32			flags;		/* SCX_TG_* */

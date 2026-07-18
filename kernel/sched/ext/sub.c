@@ -836,6 +836,191 @@ static void scx_fail_parent(struct scx_sched *sch,
 	scx_task_iter_stop(&sti);
 }
 
+#ifdef CONFIG_EXT_GROUP_SCHED
+/**
+ * scx_cgroup_claim_subtree - Claim the subtree's cgroups for an enabling sub
+ * @sch: sub-scheduler being enabled
+ *
+ * Called while enabling @sch, after the subtree's cgrp->scx_sched's are pointed
+ * at @sch and before any task is claimed. This mirrors root enable's
+ * cgroups-before-tasks order. The ops.init_task() args are task_group-granular
+ * and can still reference a cgroup outside the handed-over set when the cpu
+ * controller is coarser than the sub topology or mounted on cgroup1.
+ *
+ * First init each of the parent sched's subtree cgroups on @sch, and only then
+ * exit them from the parent, so that a failed init can be unwound with the
+ * parent untouched. The both-inited transient is invisible outside
+ * scx_cgroup_lock(). %SCX_TG_SUB_INIT tracks the first pass's progress.
+ * %SCX_TG_INITED stays set throughout, except for a task_group whose
+ * ops.cgroup_init() failed on the parent (see scx_cgroup_return_subtree()):
+ * there is nothing to exit from the parent and %SCX_TG_INITED is set back with
+ * the transfer.
+ *
+ * Dying but not yet offlined task_groups are included: a removed cgroup keeps
+ * hosting scheduling events until its dying tasks finish their final context
+ * switches, so it still needs to be inited on a sched, and its offline-time
+ * ops.cgroup_exit() follows the last of those events.
+ *
+ * Return 0 on success, -errno on failure. On failure, @sch has been
+ * scx_error()'d and is left with no cgroups.
+ */
+static s32 scx_cgroup_claim_subtree(struct scx_sched *sch)
+{
+	struct cgroup *sub_cgrp = sch_cgroup(sch);
+	struct cgroup_subsys_state *ecss = cgroup_e_css(sub_cgrp, &cpu_cgrp_subsys);
+	struct scx_sched *parent = scx_parent(sch);
+	struct cgroup_subsys_state *css;
+	int ret;
+
+	css_for_each_descendant_pre(css, ecss) {
+		struct task_group *tg = css_tg(css);
+		struct scx_cgroup_init_args args = {
+			.weight = tg->scx.weight,
+			.bw_period_us = tg->scx.bw_period_us,
+			.bw_quota_us = tg->scx.bw_quota_us,
+			.bw_burst_us = tg->scx.bw_burst_us,
+		};
+
+		if (tg->scx.sched != parent ||
+		    !cgroup_is_descendant(css->cgroup, sub_cgrp))
+			continue;
+
+		if (SCX_HAS_OP(sch, cgroup_init)) {
+			ret = SCX_CALL_OP_RET(sch, cgroup_init, NULL, css->cgroup, &args);
+			if (ret) {
+				scx_error(sch, "ops.cgroup_init() failed (%d)", ret);
+				goto err;
+			}
+		}
+		tg->scx.flags |= SCX_TG_SUB_INIT;
+	}
+
+	css_for_each_descendant_post(css, ecss) {
+		struct task_group *tg = css_tg(css);
+
+		/*
+		 * SUB_INIT is pass 1's progress mark: pass 2 and the err path
+		 * must visit exactly the tgs pass 1 inited.
+		 */
+		if (!(tg->scx.flags & SCX_TG_SUB_INIT))
+			continue;
+
+		/* skip the exit if the parent's ops.cgroup_init() failed */
+		if ((tg->scx.flags & SCX_TG_INITED) && SCX_HAS_OP(parent, cgroup_exit))
+			SCX_CALL_OP(parent, cgroup_exit, NULL, css->cgroup);
+		tg->scx.sched = sch;
+		tg->scx.flags |= SCX_TG_INITED;
+		tg->scx.flags &= ~SCX_TG_SUB_INIT;
+	}
+
+	return 0;
+
+err:
+	css_for_each_descendant_post(css, ecss) {
+		struct task_group *tg = css_tg(css);
+
+		if (!(tg->scx.flags & SCX_TG_SUB_INIT))
+			continue;
+
+		if (SCX_HAS_OP(sch, cgroup_exit))
+			SCX_CALL_OP(sch, cgroup_exit, NULL, css->cgroup);
+		tg->scx.flags &= ~SCX_TG_SUB_INIT;
+	}
+	return ret;
+}
+
+/**
+ * scx_cgroup_return_subtree - Return the subtree's cgroups to the parent sched
+ * @sch: sub-scheduler being disabled
+ *
+ * Called while disabling @sch, after the subtree's cgrp->scx_sched's are reset
+ * to the parent sched and before tasks are re-homed, mirroring root disable's
+ * cgroups-before-tasks teardown order. The reverse of
+ * scx_cgroup_claim_subtree(): exit @sch's cgroups from @sch, then init them on
+ * the parent with the current tg->scx.* values, resyncing settings that changed
+ * while @sch had them.
+ *
+ * When an init on the parent fails, the parent is failed - the same policy as
+ * task re-homing. The remaining task_groups are punted: they move to the parent
+ * anyway with %SCX_TG_INITED cleared, as ops.cgroup_init() failed or never ran
+ * for them. A punted task_group gets no cgroup ops. The dying parent's own
+ * disable moves it one sched up, initing it there. Root ends the chain: root
+ * teardown drops cgroup ops entirely and the next enable's bulk init re-inits
+ * every online task_group.
+ *
+ * The task re-home that follows still delivers ops.init_task() to the dying
+ * parent, including for tasks in punted cgroups it never inited - tolerated
+ * like the downstream failures of task punting (see scx_punt_task()).
+ */
+static void scx_cgroup_return_subtree(struct scx_sched *sch)
+{
+	struct cgroup *sub_cgrp = sch_cgroup(sch);
+	struct cgroup_subsys_state *ecss = cgroup_e_css(sub_cgrp, &cpu_cgrp_subsys);
+	struct scx_sched *parent = scx_parent(sch);
+	struct cgroup_subsys_state *css;
+	bool parent_failed = false;
+	int ret;
+
+	css_for_each_descendant_post(css, ecss) {
+		struct task_group *tg = css_tg(css);
+
+		if (tg->scx.sched != sch ||
+		    !cgroup_is_descendant(css->cgroup, sub_cgrp))
+			continue;
+
+		/* skip the exit if @sch's ops.cgroup_init() failed for the tg */
+		if ((tg->scx.flags & SCX_TG_INITED) && SCX_HAS_OP(sch, cgroup_exit))
+			SCX_CALL_OP(sch, cgroup_exit, NULL, css->cgroup);
+		tg->scx.sched = parent;
+		tg->scx.flags |= SCX_TG_SUB_INIT;
+	}
+
+	css_for_each_descendant_pre(css, ecss) {
+		struct task_group *tg = css_tg(css);
+		struct scx_cgroup_init_args args = {
+			.weight = tg->scx.weight,
+			.bw_period_us = tg->scx.bw_period_us,
+			.bw_quota_us = tg->scx.bw_quota_us,
+			.bw_burst_us = tg->scx.bw_burst_us,
+		};
+
+		/* the first pass must have transferred everything */
+		WARN_ON_ONCE(tg->scx.sched == sch);
+
+		/*
+		 * SUB_INIT distinguishes the tgs pass 1 moved. The sched test
+		 * can't: a tg punted to the parent by an earlier failure would
+		 * also match.
+		 */
+		if (!(tg->scx.flags & SCX_TG_SUB_INIT))
+			continue;
+		tg->scx.flags &= ~(SCX_TG_SUB_INIT | SCX_TG_INITED);
+
+		/*
+		 * A re-init on $parent failed. The task_groups from here on are
+		 * punted: they stay on the dying $parent with INITED clear and
+		 * move onward when it disables.
+		 */
+		if (parent_failed)
+			continue;
+
+		if (SCX_HAS_OP(parent, cgroup_init)) {
+			ret = SCX_CALL_OP_RET(parent, cgroup_init, NULL, css->cgroup, &args);
+			if (ret) {
+				scx_error(parent, "ops.cgroup_init() failed (%d) while disabling a sub-scheduler",
+					  ret);
+				parent_failed = true;
+				continue;
+			}
+		}
+		tg->scx.flags |= SCX_TG_INITED;
+	}
+}
+#else
+static inline s32 scx_cgroup_claim_subtree(struct scx_sched *sch) { return 0; }
+static inline void scx_cgroup_return_subtree(struct scx_sched *sch) {}
+#endif
+
 void scx_sub_disable(struct scx_sched *sch)
 {
 	struct scx_sched *parent = scx_parent(sch);
@@ -870,6 +1055,12 @@ void scx_sub_disable(struct scx_sched *sch)
 		goto dump;
 
 	set_cgroup_sched(sch_cgroup(sch), parent);
+
+	/*
+	 * Return the subtree's cgroups before re-homing tasks so that any
+	 * ops.init_task() on $parent only sees cgroups it has initialized.
+	 */
+	scx_cgroup_return_subtree(sch);
 
 	scx_task_iter_start(&sti, sch->cgrp);
 	while ((p = scx_task_iter_next_locked(&sti))) {
@@ -1171,6 +1362,14 @@ void scx_sub_enable_workfn(struct kthread_work *work)
 		scx_error(sch, "cgroup is not online");
 		goto err_unlock_and_disable;
 	}
+
+	/*
+	 * Take over the subtree's cgroups before any task is claimed,
+	 * mirroring root enable's cgroups-before-tasks order.
+	 */
+	ret = scx_cgroup_claim_subtree(sch);
+	if (ret)
+		goto err_unlock_and_disable;
 
 	/*
 	 * Initialize tasks for the new child $sch without exiting them for

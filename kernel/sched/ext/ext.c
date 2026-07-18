@@ -4347,6 +4347,11 @@ void scx_tg_init(struct task_group *tg)
  * isn't inited. An autogroup tg has no cgroup of its own and resolves to the
  * root sched.
  *
+ * When a child sched exits, its task_groups are moved to the parent and
+ * re-inited on it. A failed re-init fails the parent in turn and leaves the
+ * task_group without a sched it's inited on, resolving to %NULL. See
+ * scx_cgroup_return_subtree().
+ *
  * Safe for callers read-locking the ops rwsem. tg->scx.sched rewrites
  * write-lock it, and tg on/offline can't overlap such callers as a css's files
  * are created after online and drained before offline.
@@ -4358,7 +4363,8 @@ static struct scx_sched *scx_tg_sched(struct task_group *tg)
 
 	if (!tg->css.cgroup)
 		tg = &root_task_group;
-	return tg->scx.sched;
+	/* INITED means ops.cgroup_init() succeeded on @tg->scx.sched */
+	return (tg->scx.flags & SCX_TG_INITED) ? tg->scx.sched : NULL;
 }
 
 /**
@@ -4369,6 +4375,9 @@ static struct scx_sched *scx_tg_sched(struct task_group *tg)
  * parent task_group's sched, which equals @tg's own sched everywhere except
  * at a sub-scheduler attach point, where the sub's parent sched receives
  * them.
+ *
+ * Return %NULL if the parent task_group has no sched. That can happen when the
+ * parent's ops.cgroup_init() fails while a sub-scheduler is being disabled.
  *
  * The callers sit in @tg's cgroup file writes holding the ops rwsem read
  * side. That extends scx_tg_sched()'s file-write argument to the parent's
@@ -4386,12 +4395,24 @@ static struct scx_sched *scx_tg_knob_sched(struct task_group *tg)
 
 int scx_tg_online(struct task_group *tg)
 {
-	struct scx_sched *sch = scx_root;
 	int ret = 0;
 
 	WARN_ON_ONCE(tg->scx.flags & (SCX_TG_ONLINE | SCX_TG_INITED));
 
 	if (scx_cgroup_enabled) {
+		struct scx_sched *sch;
+
+		/*
+		 * The cgroup lifetime notifier populates cgrp->scx_sched before
+		 * css_online, but only on the default hierarchy. Sub-scheds are
+		 * attached to the cgroup2 hierarchy, so a cgroup1 task_group
+		 * always belongs to the root sched.
+		 */
+		if (cgroup_on_dfl(tg->css.cgroup))
+			sch = tg->css.cgroup->scx_sched;
+		else
+			sch = scx_tg_sched(&root_task_group);
+
 		if (SCX_HAS_OP(sch, cgroup_init)) {
 			struct scx_cgroup_init_args args =
 				{ .weight = tg->scx.weight,
@@ -4547,7 +4568,7 @@ void scx_group_set_weight(struct task_group *tg, unsigned long weight)
 	percpu_down_read(&scx_cgroup_ops_rwsem);
 	sch = scx_tg_knob_sched(tg);
 
-	if (scx_cgroup_enabled && SCX_HAS_OP(sch, cgroup_set_weight) &&
+	if (scx_cgroup_enabled && sch && SCX_HAS_OP(sch, cgroup_set_weight) &&
 	    tg->scx.weight != weight)
 		SCX_CALL_OP(sch, cgroup_set_weight, NULL, tg_cgrp(tg), weight);
 
@@ -4563,7 +4584,7 @@ void scx_group_set_idle(struct task_group *tg, bool idle)
 	percpu_down_read(&scx_cgroup_ops_rwsem);
 	sch = scx_tg_knob_sched(tg);
 
-	if (scx_cgroup_enabled && SCX_HAS_OP(sch, cgroup_set_idle))
+	if (scx_cgroup_enabled && sch && SCX_HAS_OP(sch, cgroup_set_idle))
 		SCX_CALL_OP(sch, cgroup_set_idle, NULL, tg_cgrp(tg), idle);
 
 	/* Update the task group's idle state */
@@ -4580,7 +4601,7 @@ void scx_group_set_bandwidth(struct task_group *tg,
 	percpu_down_read(&scx_cgroup_ops_rwsem);
 	sch = scx_tg_knob_sched(tg);
 
-	if (scx_cgroup_enabled && SCX_HAS_OP(sch, cgroup_set_bandwidth) &&
+	if (scx_cgroup_enabled && sch && SCX_HAS_OP(sch, cgroup_set_bandwidth) &&
 	    (tg->scx.bw_period_us != period_us ||
 	     tg->scx.bw_quota_us != quota_us ||
 	     tg->scx.bw_burst_us != burst_us))
@@ -4788,15 +4809,13 @@ static void scx_cgroup_exit(struct scx_sched *sch)
 	css_for_each_descendant_post(css, &root_task_group.css) {
 		struct task_group *tg = css_tg(css);
 
-		if (!(tg->scx.flags & SCX_TG_INITED))
-			continue;
+		/* also clear the sched of tgs whose ops.cgroup_init() failed */
 		tg->scx.sched = NULL;
-		tg->scx.flags &= ~SCX_TG_INITED;
-
-		if (!sch->ops.cgroup_exit)
-			continue;
-
-		SCX_CALL_OP(sch, cgroup_exit, NULL, css->cgroup);
+		if (tg->scx.flags & SCX_TG_INITED) {
+			tg->scx.flags &= ~SCX_TG_INITED;
+			if (sch->ops.cgroup_exit)
+				SCX_CALL_OP(sch, cgroup_exit, NULL, css->cgroup);
+		}
 	}
 }
 
