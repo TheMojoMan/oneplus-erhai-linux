@@ -7952,14 +7952,14 @@ static struct sched_ext_ops_cid __bpf_ops_sched_ext_ops_cid = {
 	.enable			= sched_ext_ops__enable,
 	.disable		= sched_ext_ops__disable,
 #ifdef CONFIG_EXT_GROUP_SCHED
-	.cgroup_init		= sched_ext_ops__cgroup_init,
-	.cgroup_exit		= sched_ext_ops__cgroup_exit,
-	.cgroup_prep_move	= sched_ext_ops__cgroup_prep_move,
-	.cgroup_move		= sched_ext_ops__cgroup_move,
-	.cgroup_cancel_move	= sched_ext_ops__cgroup_cancel_move,
-	.cgroup_set_weight	= sched_ext_ops__cgroup_set_weight,
-	.cgroup_set_bandwidth	= sched_ext_ops__cgroup_set_bandwidth,
-	.cgroup_set_idle	= sched_ext_ops__cgroup_set_idle,
+	.cpuctl_init		= sched_ext_ops__cgroup_init,
+	.cpuctl_exit		= sched_ext_ops__cgroup_exit,
+	.cpuctl_prep_move	= sched_ext_ops__cgroup_prep_move,
+	.cpuctl_move		= sched_ext_ops__cgroup_move,
+	.cpuctl_cancel_move	= sched_ext_ops__cgroup_cancel_move,
+	.cpuctl_set_weight	= sched_ext_ops__cgroup_set_weight,
+	.cpuctl_set_bandwidth	= sched_ext_ops__cgroup_set_bandwidth,
+	.cpuctl_set_idle	= sched_ext_ops__cgroup_set_idle,
 #endif
 	.sub_attach		= sched_ext_ops__sub_attach,
 	.sub_detach		= sched_ext_ops__sub_detach,
@@ -10479,22 +10479,22 @@ static int __init scx_init(void)
 	CID_OFFSET_MATCH(init_cids, init_cids);
 	CID_OFFSET_MATCH(init, init);
 	CID_OFFSET_MATCH(exit, exit);
-#ifdef CONFIG_EXT_GROUP_SCHED
-	CID_OFFSET_MATCH(cgroup_init, cgroup_init);
-	CID_OFFSET_MATCH(cgroup_exit, cgroup_exit);
-	CID_OFFSET_MATCH(cgroup_prep_move, cgroup_prep_move);
-	CID_OFFSET_MATCH(cgroup_move, cgroup_move);
-	CID_OFFSET_MATCH(cgroup_cancel_move, cgroup_cancel_move);
-	CID_OFFSET_MATCH(cgroup_set_weight, cgroup_set_weight);
-	CID_OFFSET_MATCH(cgroup_set_bandwidth, cgroup_set_bandwidth);
-	CID_OFFSET_MATCH(cgroup_set_idle, cgroup_set_idle);
-#endif
 	/* renamed callbacks must occupy the same slot as their cpu-form sibling */
 	CID_OFFSET_MATCH(select_cpu, select_cid);
 	CID_OFFSET_MATCH(set_cpumask, set_cmask);
 	CID_OFFSET_MATCH(cpu_online, cid_online);
 	CID_OFFSET_MATCH(cpu_offline, cid_offline);
 	CID_OFFSET_MATCH(dump_cpu, dump_cid);
+#ifdef CONFIG_EXT_GROUP_SCHED
+	CID_OFFSET_MATCH(cgroup_init, cpuctl_init);
+	CID_OFFSET_MATCH(cgroup_exit, cpuctl_exit);
+	CID_OFFSET_MATCH(cgroup_prep_move, cpuctl_prep_move);
+	CID_OFFSET_MATCH(cgroup_move, cpuctl_move);
+	CID_OFFSET_MATCH(cgroup_cancel_move, cpuctl_cancel_move);
+	CID_OFFSET_MATCH(cgroup_set_weight, cpuctl_set_weight);
+	CID_OFFSET_MATCH(cgroup_set_bandwidth, cpuctl_set_bandwidth);
+	CID_OFFSET_MATCH(cgroup_set_idle, cpuctl_set_idle);
+#endif
 	/* @priv tail must align since both share the same data block */
 	CID_OFFSET_MATCH(priv, priv);
 	/*

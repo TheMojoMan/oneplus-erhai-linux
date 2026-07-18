@@ -70,7 +70,7 @@ const char help_fmt[] =
 "  -i SEC        Stats interval, seconds (default 5)\n"
 "  -R MS         Round-robin period for time-shared cpus, ms (default 200)\n"
 "  -J MODE       Fault injection (wrong-cid: dispatch to a cid not held,\n"
-"                init-fail/cgrp-init-fail: fail init_task/cgroup_init for\n"
+"                init-fail/cgrp-init-fail: fail init_task/cpuctl_init for\n"
 "                \"qmfail*\" comms/cgroups)\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";

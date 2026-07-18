@@ -992,6 +992,7 @@ struct sched_ext_ops {
  *   - cpu_online       -> cid_online
  *   - cpu_offline      -> cid_offline
  *   - dump_cpu         -> dump_cid
+ *   - cgroup_*         -> cpuctl_* (they track the cgroup cpu controller)
  *   - cpu_acquire/cpu_release  -> not present (deprecated in sched_ext_ops)
  *
  * BPF schedulers using this type cannot call cpu-form scx_bpf_* kfuncs;
@@ -1027,19 +1028,17 @@ struct sched_ext_ops_cid {
 	void (*dump_cid)(struct scx_dump_ctx *ctx, s32 cid, bool idle);
 	void (*dump_task)(struct scx_dump_ctx *ctx, struct task_struct *p);
 #ifdef CONFIG_EXT_GROUP_SCHED
-	s32 (*cgroup_init)(struct cgroup *cgrp,
-			    struct scx_cgroup_init_args *args);
-	void (*cgroup_exit)(struct cgroup *cgrp);
-	s32 (*cgroup_prep_move)(struct task_struct *p,
-				 struct cgroup *from, struct cgroup *to);
-	void (*cgroup_move)(struct task_struct *p,
-			     struct cgroup *from, struct cgroup *to);
-	void (*cgroup_cancel_move)(struct task_struct *p,
-				    struct cgroup *from, struct cgroup *to);
-	void (*cgroup_set_weight)(struct cgroup *cgrp, u32 weight);
-	void (*cgroup_set_bandwidth)(struct cgroup *cgrp,
-				      u64 period_us, u64 quota_us, u64 burst_us);
-	void (*cgroup_set_idle)(struct cgroup *cgrp, bool idle);
+	s32 (*cpuctl_init)(struct cgroup *cgrp, struct scx_cgroup_init_args *args);
+	void (*cpuctl_exit)(struct cgroup *cgrp);
+	s32 (*cpuctl_prep_move)(struct task_struct *p, struct cgroup *from,
+				struct cgroup *to);
+	void (*cpuctl_move)(struct task_struct *p, struct cgroup *from, struct cgroup *to);
+	void (*cpuctl_cancel_move)(struct task_struct *p, struct cgroup *from,
+				   struct cgroup *to);
+	void (*cpuctl_set_weight)(struct cgroup *cgrp, u32 weight);
+	void (*cpuctl_set_bandwidth)(struct cgroup *cgrp, u64 period_us, u64 quota_us,
+				     u64 burst_us);
+	void (*cpuctl_set_idle)(struct cgroup *cgrp, bool idle);
 #endif	/* CONFIG_EXT_GROUP_SCHED */
 	s32 (*sub_attach)(struct scx_sub_attach_args *args);
 	void (*sub_detach)(struct scx_sub_detach_args *args);

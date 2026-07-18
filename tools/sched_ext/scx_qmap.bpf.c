@@ -1014,7 +1014,7 @@ void BPF_STRUCT_OPS(qmap_dump_task, struct scx_dump_ctx *dctx, struct task_struc
 		     taskc->force_local, taskc->core_sched_seq);
 }
 
-s32 BPF_STRUCT_OPS(qmap_cgroup_init, struct cgroup *cgrp, struct scx_cgroup_init_args *args)
+s32 BPF_STRUCT_OPS(qmap_cpuctl_init, struct cgroup *cgrp, struct scx_cgroup_init_args *args)
 {
 	QMAP_TOUCH_ARENA();
 
@@ -1036,7 +1036,7 @@ s32 BPF_STRUCT_OPS(qmap_cgroup_init, struct cgroup *cgrp, struct scx_cgroup_init
 
 static void redistribute(void);
 
-void BPF_STRUCT_OPS(qmap_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
+void BPF_STRUCT_OPS(qmap_cpuctl_set_weight, struct cgroup *cgrp, u32 weight)
 {
 	u64 cgid = cgrp->kn->id;
 	s32 i;
@@ -1062,16 +1062,16 @@ void BPF_STRUCT_OPS(qmap_cgroup_set_weight, struct cgroup *cgrp, u32 weight)
 	}
 }
 
-void BPF_STRUCT_OPS(qmap_cgroup_set_bandwidth, struct cgroup *cgrp,
-		    u64 period_us, u64 quota_us, u64 burst_us)
+void BPF_STRUCT_OPS(qmap_cpuctl_set_bandwidth, struct cgroup *cgrp, u64 period_us,
+		    u64 quota_us, u64 burst_us)
 {
 	if (print_msgs)
 		bpf_printk("CGRP SET %llu period=%lu quota=%ld burst=%lu",
 			   cgrp->kn->id, period_us, quota_us, burst_us);
 }
 
-void BPF_STRUCT_OPS(qmap_cgroup_move, struct task_struct *p,
-		    struct cgroup *from, struct cgroup *to)
+void BPF_STRUCT_OPS(qmap_cpuctl_move, struct task_struct *p, struct cgroup *from,
+		    struct cgroup *to)
 {
 	if (print_msgs)
 		bpf_printk("CGRP MOVE %d %llu -> %llu",
@@ -1890,7 +1890,7 @@ void BPF_STRUCT_OPS(qmap_exit, struct scx_exit_info *ei)
 
 /*
  * Seed a new sub slot with the cgroup's current weight. The kernel delivers
- * ops.cgroup_set_weight() only on value-changing writes, so a weight set
+ * ops.cpuctl_set_weight() only on value-changing writes, so a weight set
  * before the sub attached would otherwise go unnoticed.
  */
 static u32 cgrp_cur_weight(u64 cgid)
@@ -1989,10 +1989,10 @@ SCX_OPS_CID_DEFINE(qmap_ops,
 	       .dump			= (void *)qmap_dump,
 	       .dump_cid		= (void *)qmap_dump_cid,
 	       .dump_task		= (void *)qmap_dump_task,
-	       .cgroup_init		= (void *)qmap_cgroup_init,
-	       .cgroup_set_weight	= (void *)qmap_cgroup_set_weight,
-	       .cgroup_set_bandwidth	= (void *)qmap_cgroup_set_bandwidth,
-	       .cgroup_move		= (void *)qmap_cgroup_move,
+	       .cpuctl_init		= (void *)qmap_cpuctl_init,
+	       .cpuctl_set_weight	= (void *)qmap_cpuctl_set_weight,
+	       .cpuctl_set_bandwidth	= (void *)qmap_cpuctl_set_bandwidth,
+	       .cpuctl_move		= (void *)qmap_cpuctl_move,
 	       .sub_attach		= (void *)qmap_sub_attach,
 	       .sub_detach		= (void *)qmap_sub_detach,
 	       .sub_caps_updated	= (void *)qmap_sub_caps_updated,
