@@ -64,6 +64,8 @@ struct qmap_fifo {
 enum qmap_inject {
 	QMAP_INJ_OFF		= 0,
 	QMAP_INJ_WRONG_CID	= 1,	/* dispatch to a cid we don't hold */
+	QMAP_INJ_INIT_FAIL	= 2,	/* fail init_task for "qmfail*" comms */
+	QMAP_INJ_CGRP_INIT_FAIL	= 3,	/* fail cgroup_init for "qmfail*" cgroups */
 };
 
 /*

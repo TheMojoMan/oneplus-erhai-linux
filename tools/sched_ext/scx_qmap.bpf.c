@@ -888,6 +888,10 @@ s32 BPF_STRUCT_OPS_SLEEPABLE(qmap_init_task, struct task_struct *p,
 	struct task_ctx_stor_val *v;
 	task_ctx_t *taskc;
 
+	if (qa.inject_mode == QMAP_INJ_INIT_FAIL &&
+	    !bpf_strncmp(p->comm, 6, "qmfail"))
+		return -ENOMEM;
+
 	if (p->tgid == disallow_tgid)
 		p->scx.disallow = true;
 
@@ -1012,10 +1016,21 @@ void BPF_STRUCT_OPS(qmap_dump_task, struct scx_dump_ctx *dctx, struct task_struc
 
 s32 BPF_STRUCT_OPS(qmap_cgroup_init, struct cgroup *cgrp, struct scx_cgroup_init_args *args)
 {
+	QMAP_TOUCH_ARENA();
+
 	if (print_msgs)
 		bpf_printk("CGRP INIT %llu weight=%u period=%lu quota=%ld burst=%lu",
 			   cgrp->kn->id, args->weight, args->bw_period_us,
 			   args->bw_quota_us, args->bw_burst_us);
+
+	if (qa.inject_mode == QMAP_INJ_CGRP_INIT_FAIL) {
+		char name[7] = {};
+
+		bpf_probe_read_kernel_str(name, sizeof(name), cgrp->kn->name);
+		if (!bpf_strncmp(name, 6, "qmfail"))
+			return -ENOMEM;
+	}
+
 	return 0;
 }
 

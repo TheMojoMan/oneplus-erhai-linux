@@ -69,7 +69,9 @@ const char help_fmt[] =
 "  -C MODE       cid-override test (shuffle|bad-dup|bad-range|bad-mono)\n"
 "  -i SEC        Stats interval, seconds (default 5)\n"
 "  -R MS         Round-robin period for time-shared cpus, ms (default 200)\n"
-"  -J MODE       Fault injection (wrong-cid: dispatch to a cid not held)\n"
+"  -J MODE       Fault injection (wrong-cid: dispatch to a cid not held,\n"
+"                init-fail/cgrp-init-fail: fail init_task/cgroup_init for\n"
+"                \"qmfail*\" comms/cgroups)\n"
 "  -v            Print libbpf debug messages\n"
 "  -h            Display this help and exit\n";
 
@@ -391,6 +393,10 @@ restart:
 		case 'J':
 			if (!strcmp(optarg, "wrong-cid"))
 				inject_mode = QMAP_INJ_WRONG_CID;
+			else if (!strcmp(optarg, "init-fail"))
+				inject_mode = QMAP_INJ_INIT_FAIL;
+			else if (!strcmp(optarg, "cgrp-init-fail"))
+				inject_mode = QMAP_INJ_CGRP_INIT_FAIL;
 			else
 				inject_mode = strtoul(optarg, NULL, 0);
 			break;
