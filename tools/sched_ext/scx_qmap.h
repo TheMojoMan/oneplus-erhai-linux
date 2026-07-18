@@ -90,7 +90,7 @@ struct task_ctx;
 /* per-direct-child state for the sub-scheduler */
 struct sub_sched_ctx {
 	u64 cgroup_id;
-	u32 weight;			/* cpu.weight, fed by userspace */
+	u32 weight;			/* cpu.weight, seeded at attach, then set_weight */
 	u64 nr_dsps;
 	struct qmap_cmask granted_cids;	/* cids granted excl to this child */
 	struct qmap_cmask prev_granted;	/* last grant, for delta calculation */
@@ -147,7 +147,6 @@ struct qmap_arena {
 
 	struct sub_sched_ctx sub_sched_ctxs[MAX_SUB_SCHEDS]; /* per-child context */
 	u64 nr_sub_scheds;		/* number of attached children */
-	u32 self_weight;		/* this node's cpu.weight, fed by userspace */
 
 	/* bpf-internal per-cid state */
 	u8 cid_shared[SCX_QMAP_MAX_CPUS]; /* per cid: 1 if held shared (ENQ_IMMED-only) */

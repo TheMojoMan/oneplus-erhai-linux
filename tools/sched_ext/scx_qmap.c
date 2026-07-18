@@ -24,11 +24,6 @@
 #include "scx_qmap.h"
 #include "scx_qmap.bpf.skel.h"
 
-/* kernfs file-handle type for open_by_handle_at(), from linux/exportfs.h */
-#ifndef FILEID_KERNFS
-#define FILEID_KERNFS	0xfe
-#endif
-
 const char help_fmt[] =
 "A simple five-level FIFO queue sched_ext scheduler.\n"
 "\n"
@@ -72,7 +67,7 @@ const char help_fmt[] =
 "  -I            Turn on SCX_OPS_ALWAYS_ENQ_IMMED\n"
 "  -F COUNT      IMMED stress: force every COUNT'th enqueue to a busy local DSQ (use with -I)\n"
 "  -C MODE       cid-override test (shuffle|bad-dup|bad-range|bad-mono)\n"
-"  -i SEC        Stats and weight-refresh interval, seconds (default 5)\n"
+"  -i SEC        Stats interval, seconds (default 5)\n"
 "  -R MS         Round-robin period for time-shared cpus, ms (default 200)\n"
 "  -J MODE       Fault injection (wrong-cid: dispatch to a cid not held)\n"
 "  -v            Print libbpf debug messages\n"
@@ -91,83 +86,6 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 static void sigint_handler(int dummy)
 {
 	exit_req = 1;
-}
-
-/*
- * Open a cgroup directory directly from its id. In cgroup2 the cgroup id is the
- * kernfs node id, so a FILEID_KERNFS handle built from the id resolves to the
- * directory via open_by_handle_at() against the cgroup mount.
- */
-static int open_cgroup_by_id(u64 cgid)
-{
-	static int mnt_fd = -1;
-	struct {
-		struct file_handle fh;
-		u64 id;
-	} h;
-
-	if (mnt_fd < 0) {
-		mnt_fd = open("/sys/fs/cgroup", O_RDONLY | O_DIRECTORY);
-		if (mnt_fd < 0)
-			return -1;
-	}
-	h.fh.handle_bytes = sizeof(h.id);
-	h.fh.handle_type = FILEID_KERNFS;
-	h.id = cgid;
-	return open_by_handle_at(mnt_fd, &h.fh, O_RDONLY | O_DIRECTORY);
-}
-
-/* read a cgroup's cpu.weight (1-10000) by id, 0 if unavailable */
-static u32 read_cgroup_weight(u64 cgid)
-{
-	char buf[32];
-	int dfd, wfd;
-	u32 w = 0;
-	ssize_t n;
-
-	dfd = open_cgroup_by_id(cgid);
-	if (dfd < 0)
-		return 0;
-	wfd = openat(dfd, "cpu.weight", O_RDONLY);
-	close(dfd);
-	if (wfd < 0)
-		return 0;
-	n = read(wfd, buf, sizeof(buf) - 1);
-	close(wfd);
-	if (n > 0) {
-		buf[n] = '\0';
-		w = strtoul(buf, NULL, 10);
-	}
-	return w;
-}
-
-/* read each direct child's cpu.weight into the arena, true if any changed */
-static bool feed_weights(struct qmap_arena *qa)
-{
-	bool changed = false;
-	int i;
-
-	for (i = 0; i < MAX_SUB_SCHEDS; i++) {
-		u64 cgid = qa->sub_sched_ctxs[i].cgroup_id;
-		u32 w;
-
-		if (!cgid)
-			continue;
-		/* racy against slot reuse but weight is advisory and self-corrects */
-		w = read_cgroup_weight(cgid);
-		if (w && w != qa->sub_sched_ctxs[i].weight) {
-			qa->sub_sched_ctxs[i].weight = w;
-			changed = true;
-		}
-	}
-	return changed;
-}
-
-static void invoke_repartition(struct scx_qmap *skel)
-{
-	LIBBPF_OPTS(bpf_test_run_opts, opts);
-
-	bpf_prog_test_run_opts(bpf_program__fd(skel->progs.repartition), &opts);
 }
 
 static void invoke_flush_alloc(struct scx_qmap *skel)
@@ -281,7 +199,7 @@ static void print_hier(struct qmap_arena *qa, struct hier_prev *prev, u64 own_cg
 
 	format_cid_ranges(qa, CID_SELF, ranges, sizeof(ranges));
 	printf("hier   : %-4s %10llu %4u %6.2f %8s  %s\n", "self",
-	       (unsigned long long)own_cgid, qa->self_weight,
+	       (unsigned long long)own_cgid, 100,
 	       secs > 0 ? (qa->self_alloc_ns - prev->self_alloc_ns) / (secs * 1e9) : 0.0,
 	       "-", ranges);
 	prev->self_alloc_ns = qa->self_alloc_ns;
@@ -505,8 +423,6 @@ restart:
 	while (!exit_req && !UEI_EXITED(skel, uei)) {
 		long nr_enqueued = qa->nr_enqueued;
 		long nr_dispatched = qa->nr_dispatched;
-		u32 self_weight;
-		bool repart;
 
 		printf("---- %s ----\n",
 		       tstamp(tbuf, sizeof(tbuf)));
@@ -530,20 +446,6 @@ restart:
 			       qa->cpuperf_target_min,
 			       qa->cpuperf_target_avg,
 			       qa->cpuperf_target_max);
-
-		self_weight = own_cgid ? read_cgroup_weight(own_cgid) : 100;
-		if (!self_weight)
-			self_weight = 100;
-
-		repart = feed_weights(qa);
-
-		if (self_weight != qa->self_weight) {
-			qa->self_weight = self_weight;
-			repart = true;
-		}
-
-		if (repart)
-			invoke_repartition(skel);
 
 		invoke_flush_alloc(skel);
 		print_hier(qa, &hprev, own_cgid);
