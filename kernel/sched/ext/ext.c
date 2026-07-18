@@ -81,6 +81,14 @@ DEFINE_STATIC_KEY_FALSE(__scx_switched_all);
 static DEFINE_STATIC_KEY_FALSE(__scx_tid_to_task_enabled);
 
 /*
+ * Gates cgroup ops delivery. Set at the end of the cgroup init phase of root
+ * enable and cleared before root disable starts tearing down tasks, both under
+ * scx_cgroup_lock(). Holding cgroup_lock() and seeing %true guarantees no race
+ * against root tearing down tasks.
+ */
+bool scx_cgroup_enabled;
+
+/*
  * True once SCX_OPS_TID_TO_TASK has been negotiated with the root scheduler
  * and the tid->task table is live. Wraps the static key so callers don't
  * take the address, and hints "likely enabled" for the common case where
@@ -4309,7 +4317,6 @@ bool scx_can_stop_tick(struct rq *rq)
 #ifdef CONFIG_EXT_GROUP_SCHED
 
 DEFINE_STATIC_PERCPU_RWSEM(scx_cgroup_ops_rwsem);
-static bool scx_cgroup_enabled;
 
 void scx_tg_init(struct task_group *tg)
 {
@@ -4689,8 +4696,6 @@ static void scx_cgroup_exit(struct scx_sched *sch)
 {
 	struct cgroup_subsys_state *css;
 
-	scx_cgroup_enabled = false;
-
 	/*
 	 * scx_tg_on/offline() are excluded through cgroup_lock(). If we walk
 	 * cgroups and exit all the inited ones, all online cgroups are exited.
@@ -4744,9 +4749,6 @@ static int scx_cgroup_init(struct scx_sched *sch)
 		}
 		tg->scx.flags |= SCX_TG_INITED;
 	}
-
-	WARN_ON_ONCE(scx_cgroup_enabled);
-	scx_cgroup_enabled = true;
 
 	return 0;
 }
@@ -5971,6 +5973,7 @@ static void scx_root_disable(struct scx_sched *sch)
 	 * doesn't race against scx_disable_and_exit_task().
 	 */
 	scx_cgroup_lock();
+	scx_cgroup_enabled = false;
 	scx_cgroup_exit(sch);
 	scx_cgroup_unlock();
 
@@ -7233,6 +7236,9 @@ static void scx_root_enable_workfn(struct kthread_work *work)
 	ret = scx_cgroup_init(sch);
 	if (ret)
 		goto err_disable_unlock_all;
+
+	WARN_ON_ONCE(scx_cgroup_enabled);
+	scx_cgroup_enabled = true;
 
 	scx_task_iter_start(&sti, NULL);
 	while ((p = scx_task_iter_next_locked(&sti))) {

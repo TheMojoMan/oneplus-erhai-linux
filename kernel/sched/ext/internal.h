@@ -1949,6 +1949,7 @@ __printf(3, 0) s32 scx_bstr_format(struct scx_sched *sch, struct scx_bstr_buf *b
 extern raw_spinlock_t scx_sched_lock;
 extern struct mutex scx_enable_mutex;
 extern struct percpu_rw_semaphore scx_fork_rwsem;
+extern bool scx_cgroup_enabled;
 extern raw_spinlock_t scx_exit_bstr_buf_lock;
 extern struct scx_bstr_buf scx_exit_bstr_buf;
 #ifdef CONFIG_EXT_SUB_SCHED
