@@ -4339,6 +4339,51 @@ void scx_tg_init(struct task_group *tg)
 	tg->scx.idle = false;
 }
 
+/**
+ * scx_tg_sched - Resolve a task_group's sched
+ * @tg: task_group of interest
+ *
+ * Return the sched that @tg's ops.cgroup_init() succeeded on, %NULL if @tg
+ * isn't inited. An autogroup tg has no cgroup of its own and resolves to the
+ * root sched.
+ *
+ * Safe for callers read-locking the ops rwsem. tg->scx.sched rewrites
+ * write-lock it, and tg on/offline can't overlap such callers as a css's files
+ * are created after online and drained before offline.
+ */
+static struct scx_sched *scx_tg_sched(struct task_group *tg)
+{
+	lockdep_assert(lockdep_is_held(&cgroup_mutex) ||
+		       lockdep_is_held(&scx_cgroup_ops_rwsem));
+
+	if (!tg->css.cgroup)
+		tg = &root_task_group;
+	return tg->scx.sched;
+}
+
+/**
+ * scx_tg_knob_sched - Resolve the sched receiving a task_group's knob updates
+ * @tg: task_group of interest
+ *
+ * Knobs of a cgroup belong to the parent. Deliver the set_* ops to the
+ * parent task_group's sched, which equals @tg's own sched everywhere except
+ * at a sub-scheduler attach point, where the sub's parent sched receives
+ * them.
+ *
+ * The callers sit in @tg's cgroup file writes holding the ops rwsem read
+ * side. That extends scx_tg_sched()'s file-write argument to the parent's
+ * sched read: a parent css outlives its children's files.
+ */
+static struct scx_sched *scx_tg_knob_sched(struct task_group *tg)
+{
+	lockdep_assert(lockdep_is_held(&cgroup_mutex) ||
+		       lockdep_is_held(&scx_cgroup_ops_rwsem));
+
+	if (!tg->css.cgroup || !tg->css.parent)
+		return scx_tg_sched(&root_task_group);
+	return scx_tg_sched(css_tg(tg->css.parent));
+}
+
 int scx_tg_online(struct task_group *tg)
 {
 	struct scx_sched *sch = scx_root;
@@ -4359,8 +4404,10 @@ int scx_tg_online(struct task_group *tg)
 			if (ret)
 				ret = scx_ops_sanitize_err(sch, "cgroup_init", ret);
 		}
-		if (ret == 0)
+		if (ret == 0) {
+			tg->scx.sched = sch;
 			tg->scx.flags |= SCX_TG_ONLINE | SCX_TG_INITED;
+		}
 	} else {
 		tg->scx.flags |= SCX_TG_ONLINE;
 	}
@@ -4370,19 +4417,30 @@ int scx_tg_online(struct task_group *tg)
 
 void scx_tg_offline(struct task_group *tg)
 {
-	struct scx_sched *sch = scx_root;
+	struct scx_sched *sch = tg->scx.sched;
 
 	WARN_ON_ONCE(!(tg->scx.flags & SCX_TG_ONLINE));
 
-	if (scx_cgroup_enabled && SCX_HAS_OP(sch, cgroup_exit) &&
-	    (tg->scx.flags & SCX_TG_INITED))
+	/* INITED implies non-NULL @sch, test before SCX_HAS_OP() derefs */
+	if (scx_cgroup_enabled && (tg->scx.flags & SCX_TG_INITED) &&
+	    SCX_HAS_OP(sch, cgroup_exit))
 		SCX_CALL_OP(sch, cgroup_exit, NULL, tg->css.cgroup);
+	tg->scx.sched = NULL;
 	tg->scx.flags &= ~(SCX_TG_ONLINE | SCX_TG_INITED);
+}
+
+/*
+ * @p's sched for the cgroup migration paths. Stable as re-homes happen either
+ * at CGROUP_TASK_MIGRATED of the same migration or under scx_cgroup_lock(),
+ * both while holding cgroup_mutex.
+ */
+static struct scx_sched *scx_cgroup_task_sched(struct task_struct *p)
+{
+	return rcu_dereference_protected(p->scx.sched, lockdep_is_held(&cgroup_mutex));
 }
 
 int scx_cgroup_can_attach(struct cgroup_taskset *tset)
 {
-	struct scx_sched *sch = scx_root;
 	struct cgroup_subsys_state *css;
 	struct task_struct *p;
 	int ret;
@@ -4391,6 +4449,7 @@ int scx_cgroup_can_attach(struct cgroup_taskset *tset)
 		return 0;
 
 	cgroup_taskset_for_each(p, css, tset) {
+		struct scx_sched *sch = scx_cgroup_task_sched(p);
 		struct cgroup *from = tg_cgrp(task_group(p));
 		struct cgroup *to = tg_cgrp(css_tg(css));
 
@@ -4404,11 +4463,22 @@ int scx_cgroup_can_attach(struct cgroup_taskset *tset)
 		if (from == to)
 			continue;
 
+		/*
+		 * The cgroup_move ops are delivered to @p's sched, and only for
+		 * moves that don't re-home @p. A re-homing move changes the dfl
+		 * cgroup's sched and is reported through the
+		 * exit_task/init_task pair that the re-homing generates.
+		 */
+		if (!sch || sch != task_css_set(p)->mg_dst_cset->dfl_cgrp->scx_sched)
+			continue;
+
 		if (SCX_HAS_OP(sch, cgroup_prep_move)) {
 			ret = SCX_CALL_OP_RET(sch, cgroup_prep_move, NULL,
 					      p, from, css->cgroup);
-			if (ret)
+			if (ret) {
+				ret = scx_ops_sanitize_err(sch, "cgroup_prep_move", ret);
 				goto err;
+			}
 		}
 
 		p->scx.cgrp_moving_from = from;
@@ -4418,41 +4488,41 @@ int scx_cgroup_can_attach(struct cgroup_taskset *tset)
 
 err:
 	cgroup_taskset_for_each(p, css, tset) {
-		if (SCX_HAS_OP(sch, cgroup_cancel_move) &&
-		    p->scx.cgrp_moving_from)
+		struct scx_sched *sch = scx_cgroup_task_sched(p);
+
+		/* cgrp_moving_from implies non-NULL @sch, test it first */
+		if (p->scx.cgrp_moving_from && SCX_HAS_OP(sch, cgroup_cancel_move))
 			SCX_CALL_OP(sch, cgroup_cancel_move, NULL,
 				    p, p->scx.cgrp_moving_from, css->cgroup);
 		p->scx.cgrp_moving_from = NULL;
 	}
 
-	return scx_ops_sanitize_err(sch, "cgroup_prep_move", ret);
+	return ret;
 }
 
 void scx_cgroup_move_task(struct task_struct *p)
 {
-	struct scx_sched *sch = scx_root;
+	struct scx_sched *sch;
 
 	if (!scx_cgroup_enabled)
 		return;
 
 	/*
-	 * scx_cgroup_can_attach() sets cgrp_moving_from only when the task's
-	 * cgroup changes. Migration keys off css rather than cgroup identity,
-	 * so it can hand an unchanged-cgroup task here with cgrp_moving_from
-	 * NULL. Nothing to report to the BPF scheduler then, so skip it and
-	 * keep prep_move and move paired. Cgroup ops run on the root sched,
-	 * dispatch on the explicit @sch.
+	 * Migration keys off css rather than cgroup identity, so it can hand an
+	 * unchanged-cgroup task here with cgrp_moving_from NULL. Nothing to
+	 * report to the BPF scheduler then, so skip it and keep prep_move and
+	 * move paired.
 	 */
-	if (SCX_HAS_OP(sch, cgroup_move) && p->scx.cgrp_moving_from)
-		__SCX_CALL_OP_TASK(sch, ops, cgroup_move, task_rq(p),
-				   p, p->scx.cgrp_moving_from,
-				   tg_cgrp(task_group(p)));
+	sch = scx_cgroup_task_sched(p);
+	if (p->scx.cgrp_moving_from && SCX_HAS_OP(sch, cgroup_move))
+		SCX_CALL_OP_TASK(sch, cgroup_move, task_rq(p),
+				 p, p->scx.cgrp_moving_from,
+				 tg_cgrp(task_group(p)));
 	p->scx.cgrp_moving_from = NULL;
 }
 
 void scx_cgroup_cancel_attach(struct cgroup_taskset *tset)
 {
-	struct scx_sched *sch = scx_root;
 	struct cgroup_subsys_state *css;
 	struct task_struct *p;
 
@@ -4460,8 +4530,10 @@ void scx_cgroup_cancel_attach(struct cgroup_taskset *tset)
 		return;
 
 	cgroup_taskset_for_each(p, css, tset) {
-		if (SCX_HAS_OP(sch, cgroup_cancel_move) &&
-		    p->scx.cgrp_moving_from)
+		struct scx_sched *sch = scx_cgroup_task_sched(p);
+
+		/* cgrp_moving_from implies non-NULL @sch, test it first */
+		if (p->scx.cgrp_moving_from && SCX_HAS_OP(sch, cgroup_cancel_move))
 			SCX_CALL_OP(sch, cgroup_cancel_move, NULL,
 				    p, p->scx.cgrp_moving_from, css->cgroup);
 		p->scx.cgrp_moving_from = NULL;
@@ -4473,7 +4545,7 @@ void scx_group_set_weight(struct task_group *tg, unsigned long weight)
 	struct scx_sched *sch;
 
 	percpu_down_read(&scx_cgroup_ops_rwsem);
-	sch = scx_root;
+	sch = scx_tg_knob_sched(tg);
 
 	if (scx_cgroup_enabled && SCX_HAS_OP(sch, cgroup_set_weight) &&
 	    tg->scx.weight != weight)
@@ -4489,7 +4561,7 @@ void scx_group_set_idle(struct task_group *tg, bool idle)
 	struct scx_sched *sch;
 
 	percpu_down_read(&scx_cgroup_ops_rwsem);
-	sch = scx_root;
+	sch = scx_tg_knob_sched(tg);
 
 	if (scx_cgroup_enabled && SCX_HAS_OP(sch, cgroup_set_idle))
 		SCX_CALL_OP(sch, cgroup_set_idle, NULL, tg_cgrp(tg), idle);
@@ -4506,7 +4578,7 @@ void scx_group_set_bandwidth(struct task_group *tg,
 	struct scx_sched *sch;
 
 	percpu_down_read(&scx_cgroup_ops_rwsem);
-	sch = scx_root;
+	sch = scx_tg_knob_sched(tg);
 
 	if (scx_cgroup_enabled && SCX_HAS_OP(sch, cgroup_set_bandwidth) &&
 	    (tg->scx.bw_period_us != period_us ||
@@ -4718,6 +4790,7 @@ static void scx_cgroup_exit(struct scx_sched *sch)
 
 		if (!(tg->scx.flags & SCX_TG_INITED))
 			continue;
+		tg->scx.sched = NULL;
 		tg->scx.flags &= ~SCX_TG_INITED;
 
 		if (!sch->ops.cgroup_exit)
@@ -4738,28 +4811,26 @@ static int scx_cgroup_init(struct scx_sched *sch)
 	 */
 	css_for_each_descendant_pre(css, &root_task_group.css) {
 		struct task_group *tg = css_tg(css);
-		struct scx_cgroup_init_args args = {
-			.weight = tg->scx.weight,
-			.bw_period_us = tg->scx.bw_period_us,
-			.bw_quota_us = tg->scx.bw_quota_us,
-			.bw_burst_us = tg->scx.bw_burst_us,
-		};
 
-		if ((tg->scx.flags &
-		     (SCX_TG_ONLINE | SCX_TG_INITED)) != SCX_TG_ONLINE)
+		if ((tg->scx.flags & (SCX_TG_ONLINE | SCX_TG_INITED)) != SCX_TG_ONLINE)
 			continue;
 
-		if (!sch->ops.cgroup_init) {
-			tg->scx.flags |= SCX_TG_INITED;
-			continue;
+		if (sch->ops.cgroup_init) {
+			struct scx_cgroup_init_args args = {
+				.weight = tg->scx.weight,
+				.bw_period_us = tg->scx.bw_period_us,
+				.bw_quota_us = tg->scx.bw_quota_us,
+				.bw_burst_us = tg->scx.bw_burst_us,
+			};
+
+			ret = SCX_CALL_OP_RET(sch, cgroup_init, NULL, css->cgroup, &args);
+			if (ret) {
+				scx_error(sch, "ops.cgroup_init() failed (%d)", ret);
+				return ret;
+			}
 		}
 
-		ret = SCX_CALL_OP_RET(sch, cgroup_init, NULL,
-				      css->cgroup, &args);
-		if (ret) {
-			scx_error(sch, "ops.cgroup_init() failed (%d)", ret);
-			return ret;
-		}
+		tg->scx.sched = sch;
 		tg->scx.flags |= SCX_TG_INITED;
 	}
 

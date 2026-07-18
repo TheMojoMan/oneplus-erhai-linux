@@ -298,6 +298,8 @@ static inline bool scx_rcu_cpu_stall(const struct cpumask *stalled_mask) { retur
 
 struct scx_task_group {
 #ifdef CONFIG_EXT_GROUP_SCHED
+	struct scx_sched	*sched;
+
 	u32			flags;		/* SCX_TG_* */
 	u32			weight;
 	u64			bw_period_us;
