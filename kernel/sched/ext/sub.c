@@ -758,6 +758,57 @@ void drain_descendants(struct scx_sched *sch)
 	wait_event(scx_unlink_waitq, list_empty(&sch->children));
 }
 
+/**
+ * scx_rehome_task - Move a task to a sched it has been initialized for
+ * @to: sched taking over @p, @p's init on it already complete
+ * @p: task to re-home
+ *
+ * Exit @p from its current sched and switch it over to @to, overriding the
+ * state to %SCX_TASK_READY to account for the already completed init. A task
+ * on a non-ext class, possible under an %SCX_OPS_SWITCH_PARTIAL root, stays
+ * %READY and is enabled by switching_to_scx() if it switches over.
+ */
+static void scx_rehome_task(struct scx_sched *to, struct task_struct *p)
+{
+	lockdep_assert_held(&p->pi_lock);
+	lockdep_assert_rq_held(task_rq(p));
+
+	scoped_guard (sched_change, p, DEQUEUE_SAVE | DEQUEUE_MOVE) {
+		scx_disable_and_exit_task(scx_task_sched(p), p);
+		scx_set_task_state(p, SCX_TASK_INIT_BEGIN);
+		scx_set_task_state(p, SCX_TASK_INIT);
+		scx_set_task_sched(p, to);
+		scx_set_task_state(p, SCX_TASK_READY);
+		if (p->sched_class == &ext_sched_class)
+			scx_enable_task(to, p);
+	}
+}
+
+/**
+ * scx_punt_task - Hand a task to a failed sched without initialization
+ * @to: failed and bypassed sched taking custody of @p
+ * @p: task to punt
+ *
+ * Take @p off its current sched and put it on @to at %SCX_TASK_NONE. @to is
+ * dying and its teardown will re-home @p properly.
+ *
+ * Used when @to must take over @p but failed to initialize it. Bypass keeps
+ * scheduling decisions away from @to but @p can still trigger its task ops,
+ * which may confuse the BPF side. @to is dying anyway. The exit paths skip
+ * %NONE tasks (see __scx_disable_and_exit_task() and switched_from_scx()).
+ */
+static void scx_punt_task(struct scx_sched *to, struct task_struct *p)
+{
+	lockdep_assert_held(&p->pi_lock);
+	lockdep_assert_rq_held(task_rq(p));
+	WARN_ON_ONCE(!READ_ONCE(to->bypass_depth));
+
+	scoped_guard (sched_change, p, DEQUEUE_SAVE | DEQUEUE_MOVE) {
+		scx_disable_and_exit_task(scx_task_sched(p), p);
+		scx_set_task_sched(p, to);
+	}
+}
+
 static void scx_fail_parent(struct scx_sched *sch,
 			    struct task_struct *failed, s32 fail_code)
 {
@@ -769,9 +820,9 @@ static void scx_fail_parent(struct scx_sched *sch,
 		  fail_code, failed->comm, failed->pid);
 
 	/*
-	 * Once $parent is bypassed, it's safe to put SCX_TASK_NONE tasks into
-	 * it. This may cause downstream failures on the BPF side but $parent is
-	 * dying anyway.
+	 * Once $parent is bypassed, tasks can be punted into it. This may
+	 * cause downstream failures on the BPF side but $parent is dying
+	 * anyway.
 	 */
 	scx_bypass(parent, true);
 
@@ -780,10 +831,7 @@ static void scx_fail_parent(struct scx_sched *sch,
 		if (scx_task_on_sched(parent, p))
 			continue;
 
-		scoped_guard (sched_change, p, DEQUEUE_SAVE | DEQUEUE_MOVE) {
-			scx_disable_and_exit_task(sch, p);
-			scx_set_task_sched(p, parent);
-		}
+		scx_punt_task(parent, p);
 	}
 	scx_task_iter_stop(&sti);
 }
@@ -881,27 +929,7 @@ void scx_sub_disable(struct scx_sched *sch)
 			continue;
 		}
 
-		scoped_guard (sched_change, p, DEQUEUE_SAVE | DEQUEUE_MOVE) {
-			/*
-			 * $p is initialized for $parent and still attached to
-			 * @sch. Disable and exit for @sch, switch over to
-			 * $parent and override the state to READY to account
-			 * for $p having already been initialized.
-			 */
-			scx_disable_and_exit_task(sch, p);
-			scx_set_task_state(p, SCX_TASK_INIT_BEGIN);
-			scx_set_task_state(p, SCX_TASK_INIT);
-			scx_set_task_sched(p, parent);
-			scx_set_task_state(p, SCX_TASK_READY);
-
-			/*
-			 * A task on a non-ext class, possible under an
-			 * %SCX_OPS_SWITCH_PARTIAL root, stays READY and is
-			 * enabled by switching_to_scx() if it switches over.
-			 */
-			if (p->sched_class == &ext_sched_class)
-				scx_enable_task(parent, p);
-		}
+		scx_rehome_task(parent, p);
 
 		task_rq_unlock(rq, p, &rf);
 		put_task_struct(p);
