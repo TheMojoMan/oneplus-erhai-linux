@@ -3511,6 +3511,9 @@ int __scx_init_task(struct scx_sched *sch, struct task_struct *p, bool fork)
 		} else if (unlikely(fork)) {
 			scx_error(sch, "ops.init_task() set task->scx.disallow for %s[%d] during fork",
 				  p->comm, p->pid);
+		} else if (unlikely(scx_enable_state() != SCX_ENABLING)) {
+			scx_error(sch, "ops.init_task() set task->scx.disallow for %s[%d] outside the enable path",
+				  p->comm, p->pid);
 		} else {
 			struct rq *rq;
 			struct rq_flags rf;
@@ -3870,6 +3873,17 @@ static void reweight_task_scx(struct rq *rq, struct task_struct *p,
 	lockdep_assert_rq_held(task_rq(p));
 
 	if (task_dead_and_done(p))
+		return;
+
+	/*
+	 * When switching sched_class away from SCX, reweight_task_scx()
+	 * is called _after_ scx_disable_task(). Skip calling ops.set_weight()
+	 * since the BPF scheduler may have already forgotten the task in
+	 * ops.disable().
+	 * p->scx.weight will be recalculated in scx_enable_task() if the task
+	 * ever returns to SCX class.
+	 */
+	if (scx_get_task_state(p) != SCX_TASK_ENABLED)
 		return;
 
 	p->scx.weight = sched_weight_to_cgroup(scale_load_down(lw->weight));
@@ -4495,20 +4509,25 @@ static struct cgroup *root_cgroup(void)
 	return &cgrp_dfl_root.cgrp;
 }
 
+/*
+ * cgroup_lock() must nest outside the rwsem write side: a writer waiting
+ * for cgroup_mutex deadlocks with cgroup teardown, which holds it while
+ * draining a set_* file write blocked on the rwsem behind the writer.
+ */
 void scx_cgroup_lock(void)
 {
+	cgroup_lock();
 #ifdef CONFIG_EXT_GROUP_SCHED
 	percpu_down_write(&scx_cgroup_ops_rwsem);
 #endif
-	cgroup_lock();
 }
 
 void scx_cgroup_unlock(void)
 {
-	cgroup_unlock();
 #ifdef CONFIG_EXT_GROUP_SCHED
 	percpu_up_write(&scx_cgroup_ops_rwsem);
 #endif
+	cgroup_unlock();
 }
 #else	/* CONFIG_EXT_GROUP_SCHED || CONFIG_EXT_SUB_SCHED */
 static inline struct cgroup *root_cgroup(void) { return NULL; }
