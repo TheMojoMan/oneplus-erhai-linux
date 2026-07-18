@@ -251,7 +251,7 @@ int main(int argc, char **argv)
 	}
 restart:
 	optind = 1;
-	skel = SCX_OPS_OPEN(qmap_ops, scx_qmap);
+	skel = SCX_OPS_CID_OPEN(qmap_ops, scx_qmap);
 
 	skel->rodata->slice_ns = __COMPAT_ENUM_OR_ZERO("scx_public_consts", "SCX_SLICE_DFL");
 	skel->rodata->max_tasks = 16384;
