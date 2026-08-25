@@ -41,6 +41,10 @@ struct msm_dsi {
 
 	struct drm_bridge *next_bridge;
 
+	/* drm_encoder this DSI (and its bonded peer) drives; used to match a
+	 * seamless-dfps crtc to its DSI host(s). Stored for both links. */
+	struct drm_encoder *encoder;
+
 	struct device *phy_dev;
 	bool phy_enabled;
 
@@ -78,6 +82,9 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 int msm_dsi_host_power_off(struct mipi_dsi_host *host);
 int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
 				  const struct drm_display_mode *mode);
+/* Seamless dfps: re-run video timing setup (porches) on a LIVE host without
+ * touching clocks/PLL/PHY. Caller must have updated msm_host->mode first. */
+void msm_dsi_host_seamless_timing(struct mipi_dsi_host *host, bool is_bonded_dsi);
 enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,
 					    const struct drm_display_mode *mode);
 unsigned long msm_dsi_host_get_mode_flags(struct mipi_dsi_host *host);

@@ -212,6 +212,8 @@ int msm_atomic_init_pending_timer(struct msm_pending_timer *timer,
 void msm_atomic_destroy_pending_timer(struct msm_pending_timer *timer);
 void msm_atomic_commit_tail(struct drm_atomic_commit *state);
 int msm_atomic_check(struct drm_device *dev, struct drm_atomic_commit *state);
+bool msm_crtc_is_seamless_dfps(const struct drm_crtc_state *old_state,
+			       const struct drm_crtc_state *new_state);
 struct drm_atomic_commit *msm_atomic_state_alloc(struct drm_device *dev);
 
 int msm_crtc_enable_vblank(struct drm_crtc *crtc);
@@ -303,6 +305,9 @@ bool msm_dsi_is_master_dsi(struct msm_dsi *msm_dsi);
 bool msm_dsi_wide_bus_enabled(struct msm_dsi *msm_dsi);
 struct drm_dsc_config *msm_dsi_get_dsc_config(struct msm_dsi *msm_dsi);
 const char *msm_dsi_get_te_source(struct msm_dsi *msm_dsi);
+void msm_dsi_seamless_timing_update(struct msm_dsi *msm_dsi,
+				    u32 encoder_mask, bool is_bonded_dsi,
+				    const struct drm_display_mode *mode);
 #else
 static inline void __init msm_dsi_register(void)
 {
@@ -344,6 +349,11 @@ static inline struct drm_dsc_config *msm_dsi_get_dsc_config(struct msm_dsi *msm_
 static inline const char *msm_dsi_get_te_source(struct msm_dsi *msm_dsi)
 {
 	return NULL;
+}
+static inline void msm_dsi_seamless_timing_update(struct msm_dsi *msm_dsi,
+				    u32 encoder_mask, bool is_bonded_dsi,
+				    const struct drm_display_mode *mode)
+{
 }
 #endif
 
