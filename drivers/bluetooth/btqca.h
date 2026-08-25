@@ -74,6 +74,13 @@ enum qca_baudrate {
 	QCA_BAUDRATE_1600000,
 	QCA_BAUDRATE_3200000,
 	QCA_BAUDRATE_3500000,
+	/*
+	 * WCN7880/BRAHMA: the OnePlus firmware validates only code 0x15 for the
+	 * EDL fast-download baud (Android userial_vendor_set_baud 21 ->
+	 * "Current Baudrate = 8000000 bps"). The enum's 0x13/0x14 gaps are
+	 * unused by this SoC; 0x15 == 8 Mbps.
+	 */
+	QCA_BAUDRATE_8000000	= 0x15,
 	QCA_BAUDRATE_AUTO	= 0xFE,
 	QCA_BAUDRATE_RESERVED
 };
