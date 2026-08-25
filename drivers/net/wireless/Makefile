@@ -25,3 +25,9 @@ obj-$(CONFIG_WLAN_VENDOR_TI) += ti/
 obj-$(CONFIG_WLAN_VENDOR_ZYDAS) += zydas/
 
 obj-$(CONFIG_WLAN) += virtual/
+
+# Qualcomm CNSS platform driver (OnePlus Pad 3 / WCN7880)
+obj-$(CONFIG_WCNSS_MEM_PRE_ALLOC)	+= cnss_prealloc/
+obj-y					+= cnss_utils/
+obj-$(CONFIG_CNSS_GENL)			+= cnss_genl/
+obj-$(CONFIG_CNSS2)			+= cnss2/
