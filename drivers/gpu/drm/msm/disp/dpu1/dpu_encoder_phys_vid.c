@@ -133,9 +133,16 @@ static void drm_mode_to_intf_timing_params(
 		/*
 		 * TODO: replace drm_dsc_get_bpp_int with logic to handle
 		 * fractional part if there is fraction
+		 *
+		 * DIV_ROUND_UP the compressed INTF width (e.g. 566 not 565
+		 * pclks/line for the XN242): the DSI pclk path rounds up too, so
+		 * a truncating division here would run the INTF one pclk/line
+		 * short of the DSI byte clock and desync the panel DSC decoder
+		 * partway down the frame.
 		 */
-		timing->width = timing->width * drm_dsc_get_bpp_int(dsc) /
-				(dsc->bits_per_component * 3);
+		timing->width = DIV_ROUND_UP(
+			timing->width * drm_dsc_get_bpp_int(dsc),
+			dsc->bits_per_component * 3);
 		timing->xres = timing->width;
 		timing->dce_bytes_per_line = msm_dsc_get_bytes_per_line(dsc);
 	}
@@ -330,6 +337,25 @@ static void dpu_encoder_phys_vid_setup_timing_engine(
 	spin_unlock_irqrestore(phys_enc->enc_spinlock, lock_flags);
 
 	programmable_fetch_config(phys_enc, &timing_params);
+}
+
+/*
+ * Seamless dynamic-fps timing update. Refreshes the cached mode and re-runs the
+ * timing-generator setup (porches + programmable fetch) on a LIVE, streaming
+ * encoder. The INTF timing-generator F0 registers latch at the next vsync, so the
+ * refresh rate changes without disabling the timing engine or touching any clock,
+ * PLL or PHY. Companion DSI-host timing is reprogrammed in parallel from the commit
+ * tail (msm_dsi_seamless_timing_update).
+ */
+static void dpu_encoder_phys_vid_seamless_mode_set(
+		struct dpu_encoder_phys *phys_enc,
+		const struct drm_display_mode *mode)
+{
+	if (!phys_enc || !mode)
+		return;
+
+	phys_enc->cached_mode = *mode;
+	dpu_encoder_phys_vid_setup_timing_engine(phys_enc);
 }
 
 static void dpu_encoder_phys_vid_vblank_irq(void *arg)
@@ -570,9 +596,23 @@ static void dpu_encoder_phys_vid_prepare_for_kickoff(
 	if (rc) {
 		DPU_ERROR_VIDENC(phys_enc, "ctl %d reset failure: %d\n",
 				ctl->idx, rc);
-		msm_disp_snapshot_state(drm_enc->dev);
-		dpu_core_irq_unregister_callback(phys_enc->dpu_kms,
-				phys_enc->irq[INTR_IDX_VSYNC]);
+		/*
+		 * The SM8750 DP datapath hw-initiates a CTL reset (the expected
+		 * condition this check is meant to wait out) that does not
+		 * auto-clear on the first flipped buffer. Mirror the downstream
+		 * SDE driver: instead of permanently unregistering the vsync IRQ
+		 * (which kills frame-done completion forever and freezes the
+		 * output), request a hw ctl reset before the flush.
+		 * dpu_encoder_prepare_for_kickoff() consumes this flag in the
+		 * same kickoff via dpu_encoder_helper_hw_reset(). Snapshot only
+		 * on the first failure to avoid a devcoredump storm while
+		 * recovery settles over a few frames.
+		 */
+		if (!phys_enc->error_count++)
+			msm_disp_snapshot_state(drm_enc->dev);
+		phys_enc->enable_state = DPU_ENC_ERR_NEEDS_HW_RESET;
+	} else {
+		phys_enc->error_count = 0;
 	}
 }
 
@@ -752,6 +792,7 @@ static void dpu_encoder_phys_vid_init_ops(struct dpu_encoder_phys_ops *ops)
 	ops->needs_single_flush = dpu_encoder_phys_vid_needs_single_flush;
 	ops->get_line_count = dpu_encoder_phys_vid_get_line_count;
 	ops->get_frame_count = dpu_encoder_phys_vid_get_frame_count;
+	ops->seamless_mode_set = dpu_encoder_phys_vid_seamless_mode_set;
 }
 
 /**
