@@ -217,6 +217,23 @@ config BATTERY_QCOM_BATTMGR
 	  which is used on modern Qualcomm platforms to provide battery and
 	  power supply information.
 
+config ERHAI_OTG_GLINK
+	tristate "erhai (OnePlus Pad 3) USB-OTG arming over PMIC GLINK"
+	depends on QCOM_PMIC_GLINK
+	select AUXILIARY_BUS
+	help
+	  Binds the otherwise-unbound "pmic_glink.power-supply" aux device on
+	  the OnePlus Pad 3 (erhai / SM8750) and arms USB-OTG by sending the
+	  OnePlus battery_charger USB_OTG_AP_ENABLE + USB_OTG_SWITCH properties
+	  to the ADSP once the charger protection domain is up. Without this,
+	  the ADSP never sources OTG VBUS. It also raises the boost current
+	  limit, flips the dwc3 data-role to host, and enforces a max-SoC
+	  charge limit against the bq27z561 gauge.
+
+	  This targets the same single pmic_glink "power-supply" aux device as
+	  BATTERY_QCOM_BATTMGR, so only one of the two can own it; enable this
+	  when USB-OTG host support is wanted.
+
 config BATTERY_OLPC
 	tristate "One Laptop Per Child battery"
 	depends on OLPC_EC
@@ -1201,5 +1218,16 @@ config MACSMC_POWER
 	  power supply framework.
 
 	  Say Y or M here if you have an Apple Silicon based Mac.
+
+config CHARGER_SC8547A
+	tristate "Southchip SC8547A charge pump / VOOC PHY"
+	depends on I2C
+	help
+	  Say Y to enable support for the Southchip SC8547A divide-by-2
+	  charge pump with integrated VOOC/SVOOC serial PHY, as used for
+	  OnePlus SuperVOOC fast charging (e.g. OnePlus Pad 3 / erhai,
+	  which carries a master + slave SC8547A pair). This driver owns
+	  the charge-pump hardware and the VOOC serial-protocol register
+	  primitives; the adapter-identify state machine lives elsewhere.
 
 endif # POWER_SUPPLY
