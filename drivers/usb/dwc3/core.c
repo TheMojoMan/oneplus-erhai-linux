@@ -1502,8 +1502,18 @@ int dwc3_core_init(struct dwc3 *dwc)
 
 	dwc3_config_threshold(dwc);
 
+	/*
+	 * Extend FORCE_GEN1 to DWC_usb32. Mainline gates this to DWC31, so on
+	 * the SM8750 (usb32) host `maximum-speed = "super-speed"` was a silent
+	 * no-op. The reverse Type-C + DP-altmode case (2-lane pin-assignment-D,
+	 * where USB3 shares the SS lanes with DP) needs the host SS link forced
+	 * to Gen1: left at Gen2 the SS LTSSM Gen2 training corrupts the shared
+	 * USB2-HS enumeration on a dock, starving the DP->HDMI bridge DDC. The
+	 * bit is opt-in via DT `maximum-speed = "super-speed"`, so generic usb32
+	 * boards that don't cap maximum-speed are unaffected.
+	 */
 	if (hw_mode != DWC3_GHWPARAMS0_MODE_GADGET &&
-	    (DWC3_IP_IS(DWC31)) &&
+	    (DWC3_IP_IS(DWC31) || DWC3_IP_IS(DWC32)) &&
 	    dwc->maximum_speed == USB_SPEED_SUPER) {
 		int i;
 

@@ -60,12 +60,20 @@ static void *typec_switch_match(const struct fwnode_handle *fwnode,
 	if (!dev)
 		return ERR_PTR(-EPROBE_DEFER);
 
-	/* Skip duplicates */
-	for (i = 0; i < TYPEC_MUX_MAX_DEVS; i++)
-		if (to_typec_switch_dev(dev) == sw_devs[i]) {
-			put_device(dev);
-			return NULL;
-		}
+	/*
+	 * Skip duplicates. Only meaningful once the switch was actually found:
+	 * struct typec_switch_dev embeds its struct device first, so
+	 * to_typec_switch_dev(NULL) is NULL and would alias an empty slot,
+	 * turning the "not registered yet" case into a silent NULL instead of
+	 * the -EPROBE_DEFER below.
+	 */
+	if (dev) {
+		for (i = 0; i < TYPEC_MUX_MAX_DEVS; i++)
+			if (to_typec_switch_dev(dev) == sw_devs[i]) {
+				put_device(dev);
+				return NULL;
+			}
+	}
 
 	return to_typec_switch_dev(dev);
 }
@@ -90,6 +98,8 @@ struct typec_switch *fwnode_typec_switch_get(struct fwnode_handle *fwnode)
 	sw = kzalloc_obj(*sw);
 	if (!sw)
 		return ERR_PTR(-ENOMEM);
+
+	memset(sw_devs, 0, sizeof(sw_devs));
 
 	count = fwnode_connection_find_matches(fwnode, "orientation-switch",
 					       (void **)sw_devs,

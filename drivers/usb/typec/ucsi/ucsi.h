@@ -510,6 +510,14 @@ struct ucsi {
 
 /* USB4 connection can imply that USB communcation is supported */
 #define UCSI_USB4_IMPLIES_USB	BIT(2)
+
+/*
+ * The Type-C muxes are driven out-of-band (pmic_glink_altmode on Qualcomm
+ * glink platforms), so UCSI must not push the plain USB state at them: a
+ * connector change after alt-mode entry would otherwise tear the DP routing
+ * back to USB behind the alt-mode driver's back.
+ */
+#define UCSI_NO_USB_MUX_STATE	BIT(3)
 };
 
 #define UCSI_MAX_DATA_LENGTH(u) (((u)->version < UCSI_VERSION_2_0) ? 0x10 : 0xff)
