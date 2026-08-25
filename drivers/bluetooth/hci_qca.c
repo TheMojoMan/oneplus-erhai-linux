@@ -22,6 +22,7 @@
 #include <linux/delay.h>
 #include <linux/devcoredump.h>
 #include <linux/device.h>
+#include <linux/firmware.h>
 #include <linux/gpio/consumer.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -69,6 +70,50 @@
 #define QCA_LAST_SEQUENCE_NUM		0xFFFF
 #define QCA_CRASHBYTE_PACKET_LEN	1096
 #define QCA_MEMDUMP_BYTE		0xFB
+
+/*
+ * OnePlus Pad 3 (WCN7880/BRAHMA) PERI/TME-L bring-up.
+ *
+ * This SoC gates its Bluetooth subsystem behind a shared TME-L security
+ * coprocessor that must be patched before the normal type-0x01 firmware
+ * download will finalize. The vendor HAL does that over a non-standard
+ * raw-UART sub-protocol: TX frames use type byte 0x31, replies come back as
+ * type 0x34, neither of which the HCI H4 layer can frame -- so the bytes are
+ * written straight to the serdev and the 0x34 replies are diverted in
+ * qca_recv(). The full sequence (PeriSocInit then TmelSocInit) runs from
+ * qca_setup() for QCA_WCN7850 before the standard flow.
+ *
+ * TX frame: 31 00 <marker LE> <cmd> <sub> <flag> [payload...].
+ * RX frame: 34 <evt> <marker> <plen> <plen bytes>  (total length = buf[3] + 4).
+ */
+#define QCA_PERI_TX_TYPE		0x31
+#define QCA_PERI_RX_TYPE		0x34
+#define QCA_PERI_MARKER_TMEL		0xfff0	/* tmel_peach_20.elf */
+#define QCA_PERI_MARKER_PERI		0xfff1	/* BRAHMA peri patch/NVM */
+#define QCA_PERI_FLAG			0x03	/* buf[6]: log-enabled */
+#define QCA_PERI_RX_MAX			256
+#define QCA_PERI_RX_TIMEOUT_MS		500
+#define QCA_PERI_DL_CMPL_MS		3000	/* async patch-complete 0x34 */
+#define QCA_PERI_POSTSTREAM_MS		2000	/* grace for stream completion 0x34 */
+
+#define QCA_TMEL_FW_NAME	"qca/tmel_peach_20.elf"
+#define QCA_PERI_FW_NAME	"qca/brhperifw20.mbn"	/* BRAHMA v2.0 PERI patch */
+#define QCA_PERI_NVM_FW_NAME	"qca/brhperinv20.bin"	/* BRAHMA v2.0 PERI NVM */
+#define QCA_TMEL_CHUNK_MAX	243	/* HAL paylen cap (0xF3) */
+
+/*
+ * Hold hci0 registration back until the setup firmware is reachable. On a build
+ * without a firmware initrd /lib/firmware only shows up a few seconds into boot
+ * while this serdev probes almost immediately: hci_core's power-on work would
+ * open the freshly registered hdev, qca_setup() would fail on
+ * request_firmware(-ENOENT), and the controller would be left UNCONFIGURED with
+ * the chip's junk BD address -- which bluetoothd latches as the adapter
+ * identity, losing every existing pairing. Defer until the blobs are readable so
+ * the first setup is the real one; self-release after QCA_FW_DEFER_MAX_MS so a
+ * genuinely absent file degrades to the old behaviour instead of losing the
+ * controller (the driver core drops a device still deferring at its timeout).
+ */
+#define QCA_FW_DEFER_MAX_MS	8000
 
 enum qca_flags {
 	QCA_IBS_DISABLED,
@@ -168,6 +213,13 @@ struct qca_data {
 
 	u16 fw_version;
 	u16 controller_id;
+
+	/* WCN7880 PERI/TME-L: type-0x34 async response capture */
+	struct completion peri_rx_comp;
+	u8 peri_rx_buf[QCA_PERI_RX_MAX];
+	int peri_rx_len;
+	bool peri_expecting;
+
 	/* For debugging purpose */
 	u64 ibs_sent_wacks;
 	u64 ibs_sent_slps;
@@ -205,6 +257,9 @@ struct qca_device_data {
 	struct qca_vreg *vregs;
 	size_t num_vregs;
 	uint32_t capabilities;
+	/* Controller shares a TME-L security coprocessor that has to be patched
+	 * over the PERI sub-protocol before the BT firmware will run. */
+	bool tmel_patch;
 };
 
 /*
@@ -229,6 +284,7 @@ struct qca_serdev {
 	u32 oper_speed;
 	bool bdaddr_property_broken;
 	bool support_hfp_hw_offload;
+	bool tmel_patch;
 	const char *firmware_name[2];
 };
 
@@ -609,6 +665,7 @@ static int qca_open(struct hci_uart *hu)
 
 	qca->hu = hu;
 	init_completion(&qca->drop_ev_comp);
+	init_completion(&qca->peri_rx_comp);
 
 	/* Assume we start with both sides asleep -- extra wakes OK */
 	qca->tx_ibs_state = HCI_IBS_TX_ASLEEP;
@@ -1277,12 +1334,39 @@ static const struct h4_recv_pkt qca_recv_pkts[] = {
 	{ QCA_IBS_SLEEP_IND_EVENT, .recv = qca_ibs_sleep_ind },
 };
 
+/*
+ * Accumulate a type-0x34 PERI/TME-L event while the bring-up sequence is
+ * waiting on one. The PERI channel uses a non-HCI type byte that h4_recv_buf()
+ * cannot frame, so it is diverted here. A frame is complete once we have
+ * buf[3] + 4 bytes.
+ */
+static int qca_peri_recv(struct qca_data *qca, const void *data, int count)
+{
+	int n = min(count, QCA_PERI_RX_MAX - qca->peri_rx_len);
+
+	if (n > 0) {
+		memcpy(qca->peri_rx_buf + qca->peri_rx_len, data, n);
+		qca->peri_rx_len += n;
+	}
+
+	if (qca->peri_rx_len >= 4 &&
+	    qca->peri_rx_len >= qca->peri_rx_buf[3] + 4) {
+		WRITE_ONCE(qca->peri_expecting, false);
+		complete(&qca->peri_rx_comp);
+	}
+
+	return count;
+}
+
 static int qca_recv(struct hci_uart *hu, const void *data, int count)
 {
 	struct qca_data *qca = hu->priv;
 
 	if (!test_bit(HCI_UART_REGISTERED, &hu->flags))
 		return -EUNATCH;
+
+	if (READ_ONCE(qca->peri_expecting))
+		return qca_peri_recv(qca, data, count);
 
 	qca->rx_skb = h4_recv_buf(hu, qca->rx_skb, data, count,
 				  qca_recv_pkts, ARRAY_SIZE(qca_recv_pkts));
@@ -1334,6 +1418,8 @@ static uint8_t qca_get_baudrate_value(int speed)
 		return QCA_BAUDRATE_3200000;
 	case 3500000:
 		return QCA_BAUDRATE_3500000;
+	case 8000000:
+		return QCA_BAUDRATE_8000000;
 	default:
 		return QCA_BAUDRATE_115200;
 	}
@@ -1346,7 +1432,7 @@ static int qca_set_baudrate(struct hci_dev *hdev, uint8_t baudrate)
 	struct sk_buff *skb;
 	u8 cmd[] = { 0x01, 0x48, 0xFC, 0x01, 0x00 };
 
-	if (baudrate > QCA_BAUDRATE_3200000)
+	if (baudrate > QCA_BAUDRATE_8000000)
 		return -EINVAL;
 
 	cmd[4] = baudrate;
@@ -1908,6 +1994,469 @@ static int qca_configure_hfp_offload(struct hci_dev *hdev)
 	return 0;
 }
 
+/*
+ * Arm the type-0x34 RX capture, TX an already-built type-0x31 frame, and wait
+ * for the reply. serdev_device_write() only accepts the bytes into the tty/UART
+ * buffer; drain with wait_until_sent() before waiting for the reply so the whole
+ * frame is physically on the wire. No pre-write flush: that is a DISCARD and
+ * would drop any un-drained tail of a prior TX (see qca_tmel_download_stream).
+ */
+static int qca_peri_xfer(struct hci_uart *hu, const u8 *buf, int len)
+{
+	struct qca_data *qca = hu->priv;
+	int ret;
+
+	qca->peri_rx_len = 0;
+	reinit_completion(&qca->peri_rx_comp);
+	WRITE_ONCE(qca->peri_expecting, true);
+
+	ret = serdev_device_write(hu->serdev, buf, len, CMD_TRANS_TIMEOUT);
+	if (ret < 0 || ret != len) {
+		WRITE_ONCE(qca->peri_expecting, false);
+		bt_dev_err(hu->hdev, "QCA-PERI: TX failed (%d/%d)", ret, len);
+		return ret < 0 ? ret : -EIO;
+	}
+	serdev_device_wait_until_sent(hu->serdev, CMD_TRANS_TIMEOUT);
+
+	if (!wait_for_completion_timeout(&qca->peri_rx_comp,
+				msecs_to_jiffies(QCA_PERI_RX_TIMEOUT_MS))) {
+		WRITE_ONCE(qca->peri_expecting, false);
+		bt_dev_warn(hu->hdev, "QCA-PERI: no type-0x34 reply (timeout)");
+		return -ETIMEDOUT;
+	}
+
+	return qca->peri_rx_len;
+}
+
+/*
+ * Build + TX one standard type-0x31 PERI/TME-L command and wait for the
+ * type-0x34 reply. Frame: 31 00 <marker LE> <cmd> <sub> <flag> [payload...].
+ */
+static int qca_peri_send(struct hci_uart *hu, u16 marker, u8 cmd, u8 sub,
+			 const u8 *payload, int paylen)
+{
+	u8 buf[QCA_PERI_RX_MAX];
+	int len = 0;
+
+	if (paylen < 0 || paylen > (int)sizeof(buf) - 7)
+		return -EINVAL;
+
+	buf[len++] = QCA_PERI_TX_TYPE;
+	buf[len++] = 0x00;
+	buf[len++] = marker & 0xff;
+	buf[len++] = (marker >> 8) & 0xff;
+	buf[len++] = cmd;
+	buf[len++] = sub;
+	buf[len++] = QCA_PERI_FLAG;
+	if (paylen) {
+		memcpy(buf + len, payload, paylen);
+		len += paylen;
+	}
+
+	return qca_peri_xfer(hu, buf, len);
+}
+
+/*
+ * Validate that a reply is a well-formed type-0x34 event echoing the marker.
+ * TMEL (0xFFF0) replies carry the marker at buf[7..8]; shorter PERI (0xFFF1)
+ * notifications carry it at buf[8..9] -- accept either. Download chunks are
+ * additionally status-gated by the caller (buf[9] == 0).
+ */
+static int qca_peri_check_reply(struct hci_uart *hu, int ret, u16 marker,
+				const char *what)
+{
+	struct qca_data *qca = hu->priv;
+
+	if (ret < 0) {
+		bt_dev_err(hu->hdev, "QCA-TMEL: %s send failed (%d)", what, ret);
+		return ret;
+	}
+	if (ret < 10 || qca->peri_rx_buf[0] != QCA_PERI_RX_TYPE ||
+	    !((qca->peri_rx_buf[7] == (marker & 0xff) &&
+	       qca->peri_rx_buf[8] == (marker >> 8)) ||
+	      (qca->peri_rx_buf[8] == (marker & 0xff) &&
+	       qca->peri_rx_buf[9] == (marker >> 8)))) {
+		bt_dev_err(hu->hdev, "QCA-TMEL: %s bad reply len=%d: %*ph",
+			   what, ret, min(ret, 16), qca->peri_rx_buf);
+		return -EPROTO;
+	}
+	return 0;
+}
+
+/* WakeUpSoC (PeriSocInit step 1): raw IBS WAKE_IND (0xfd) to wake the SoC. */
+static void qca_peri_wakeup_soc(struct hci_uart *hu)
+{
+	static const u8 wake = HCI_IBS_WAKE_IND;	/* 0xfd */
+
+	serdev_device_write_flush(hu->serdev);
+	serdev_device_write(hu->serdev, &wake, 1, CMD_TRANS_TIMEOUT);
+	msleep(20);
+}
+
+/*
+ * SetPeriBaudRateReq + host baud switch. The HAL raises the whole PeriSocInit to
+ * its 8 Mbaud operating baud (ConfigUart code 0x15) with 4-wire HW flow control
+ * before the patch download. Enable flow control first (the download needs it),
+ * send the fire-and-forget baud command, then switch the host to match.
+ */
+static void qca_peri_set_baud(struct hci_uart *hu)
+{
+	u8 frame[7] = {
+		QCA_PERI_TX_TYPE, 0x00,
+		QCA_PERI_MARKER_PERI & 0xff, QCA_PERI_MARKER_PERI >> 8,
+		0x02, 0x02, 0x15,
+	};
+
+	/* false == "un-flow" cleared == turn HW CRTSCTS on */
+	hci_uart_set_flow_control(hu, false);
+
+	serdev_device_write_flush(hu->serdev);
+	serdev_device_write(hu->serdev, frame, sizeof(frame), CMD_TRANS_TIMEOUT);
+	msleep(20);
+
+	host_set_baudrate(hu, 8000000);
+	msleep(20);
+}
+
+/* ActivateSS (marker 0xFFF1): frame 31 00 F1 FF 03 00 01 <act>. */
+static int qca_peri_activate_ss(struct hci_uart *hu, u8 act)
+{
+	u8 frame[8] = {
+		QCA_PERI_TX_TYPE, 0x00,
+		QCA_PERI_MARKER_PERI & 0xff, QCA_PERI_MARKER_PERI >> 8,
+		0x03, 0x00, 0x01, act,
+	};
+	int ret = qca_peri_xfer(hu, frame, sizeof(frame));
+
+	return qca_peri_check_reply(hu, ret, QCA_PERI_MARKER_PERI, "ActivateSS");
+}
+
+/* TMEArbitrate (cmd 0x03 sub 0x08). */
+static int qca_tmel_arbitrate(struct hci_uart *hu)
+{
+	static const u8 pl[] = { 0x00 };
+	int ret = qca_peri_send(hu, QCA_PERI_MARKER_TMEL, 0x03, 0x08,
+				pl, sizeof(pl));
+
+	return qca_peri_check_reply(hu, ret, QCA_PERI_MARKER_TMEL, "TMEArbitrate");
+}
+
+/* TMEPatchVerReq (cmd 0x02 sub 0x05). */
+static int qca_tmel_ver_req(struct hci_uart *hu)
+{
+	int ret = qca_peri_send(hu, QCA_PERI_MARKER_TMEL, 0x02, 0x05, NULL, 0);
+
+	if (qca_peri_check_reply(hu, ret, QCA_PERI_MARKER_TMEL, "TMEPatchVerReq"))
+		return ret < 0 ? ret : -EPROTO;
+	return 0;
+}
+
+/*
+ * Fire-and-forward streaming download: write every chunk back-to-back (HW flow
+ * control paces the host at 8 Mbaud), peek for an async error after each, then
+ * wait once for the completion 0x34. The chip is silent on each accepted chunk
+ * and only emits a type-0x34 on an error or the final completion.
+ */
+static int qca_tmel_download_stream(struct hci_uart *hu, const char *what,
+				    const u8 *payload, size_t len)
+{
+	struct qca_data *qca = hu->priv;
+	u8 frame[7 + 1 + QCA_TMEL_CHUNK_MAX];
+	size_t off = 0;
+	int idx = 0, ret;
+	bool got_cmpl = false;
+
+	qca->peri_rx_len = 0;
+	reinit_completion(&qca->peri_rx_comp);
+	WRITE_ONCE(qca->peri_expecting, true);
+
+	while (off < len) {
+		u8 pl = min_t(size_t, QCA_TMEL_CHUNK_MAX, len - off);
+		int flen = 0;
+
+		frame[flen++] = QCA_PERI_TX_TYPE;
+		frame[flen++] = 0x00;
+		frame[flen++] = QCA_PERI_MARKER_TMEL & 0xff;
+		frame[flen++] = QCA_PERI_MARKER_TMEL >> 8;
+		frame[flen++] = pl + 3;
+		frame[flen++] = 0x06;
+		frame[flen++] = QCA_PERI_FLAG;
+		frame[flen++] = pl;
+		memcpy(frame + flen, payload + off, pl);
+		flen += pl;
+
+		/*
+		 * No pre-write flush: serdev_device_write_flush() is a DISCARD,
+		 * and serdev_device_write() returns once the bytes are merely
+		 * accepted into the tty/UART buffer -- not once they are on the
+		 * wire. A pre-flush on the next iteration would discard the
+		 * un-drained tail of this chunk, yielding short/garbled frames
+		 * the chip cannot assemble into the patch (it then goes silent).
+		 * Drain each frame fully before the next.
+		 */
+		ret = serdev_device_write(hu->serdev, frame, flen,
+					  CMD_TRANS_TIMEOUT);
+		if (ret != flen) {
+			WRITE_ONCE(qca->peri_expecting, false);
+			bt_dev_err(hu->hdev, "QCA-%s: chunk %d short TX %d/%d",
+				   what, idx, ret, flen);
+			return ret < 0 ? ret : -EIO;
+		}
+		serdev_device_wait_until_sent(hu->serdev, CMD_TRANS_TIMEOUT);
+
+		/* A mid-stream type-0x34 is an error (status != 0) or progress. */
+		if (try_wait_for_completion(&qca->peri_rx_comp)) {
+			u8 st = qca->peri_rx_len > 9 ? qca->peri_rx_buf[9] : 0xff;
+
+			if (st != 0) {
+				WRITE_ONCE(qca->peri_expecting, false);
+				bt_dev_err(hu->hdev,
+					   "QCA-%s: chunk %d NAK status=%#x",
+					   what, idx, st);
+				return -EIO;
+			}
+			got_cmpl = true;
+			qca->peri_rx_len = 0;
+			reinit_completion(&qca->peri_rx_comp);
+			WRITE_ONCE(qca->peri_expecting, true);
+		}
+
+		off += pl;
+		idx++;
+	}
+
+	/*
+	 * The chip auto-completes once it has all data_length bytes (from the
+	 * patch header in chunk 0) and emits a download-complete 0x34: status 0
+	 * = OK, non-zero = hard error. Silence is tolerated -- the HAL proceeds
+	 * to GET_BOARD_ID regardless, whose reply is the real validation.
+	 */
+	if (!got_cmpl &&
+	    wait_for_completion_timeout(&qca->peri_rx_comp,
+					msecs_to_jiffies(QCA_PERI_POSTSTREAM_MS))) {
+		u8 st = qca->peri_rx_len > 9 ? qca->peri_rx_buf[9] : 0xff;
+
+		if (st != 0) {
+			WRITE_ONCE(qca->peri_expecting, false);
+			bt_dev_err(hu->hdev, "QCA-%s: stream NAK status=%#x",
+				   what, st);
+			return -EIO;
+		}
+	}
+
+	WRITE_ONCE(qca->peri_expecting, false);
+	return 0;
+}
+
+/*
+ * Download @payload as sub=0x06 chunks. @stream selects the fire-and-forward
+ * path (patch/TMEL ELF); the NVM (brhperinv20.bin) is sent per-segment with a
+ * per-chunk 0x34 ACK whose status (buf[9]) must be 0.
+ */
+static int qca_tmel_download(struct hci_uart *hu, const char *what,
+			     const u8 *payload, size_t len, bool stream)
+{
+	struct qca_data *qca = hu->priv;
+	u8 chunk[1 + QCA_TMEL_CHUNK_MAX];
+	size_t off = 0;
+	int idx = 0, ret;
+
+	if (stream)
+		return qca_tmel_download_stream(hu, what, payload, len);
+
+	while (off < len) {
+		u8 pl = min_t(size_t, QCA_TMEL_CHUNK_MAX, len - off);
+
+		chunk[0] = pl;
+		memcpy(chunk + 1, payload + off, pl);
+		ret = qca_peri_send(hu, QCA_PERI_MARKER_TMEL, pl + 3, 0x06,
+				    chunk, 1 + pl);
+		if (qca_peri_check_reply(hu, ret, QCA_PERI_MARKER_TMEL, "TlvDnldChunk")) {
+			bt_dev_err(hu->hdev, "QCA-%s: chunk %d bad at %zu/%zu",
+				   what, idx, off, len);
+			return ret < 0 ? ret : -EPROTO;
+		}
+		if (qca->peri_rx_buf[9] != 0x00) {
+			bt_dev_err(hu->hdev, "QCA-%s: chunk %d NAK status=%#x",
+				   what, idx, qca->peri_rx_buf[9]);
+			return -EIO;
+		}
+		off += pl;
+		idx++;
+	}
+	return 0;
+}
+
+/*
+ * Wait for a spontaneous type-0x34 VSE the chip emits after a command's
+ * immediate reply ("Peri Patching Completed", "TME-L Patching Completed",
+ * "Activate complete"). Best-effort.
+ */
+static int qca_peri_wait_async(struct hci_uart *hu, const char *what, int ms)
+{
+	struct qca_data *qca = hu->priv;
+
+	qca->peri_rx_len = 0;
+	reinit_completion(&qca->peri_rx_comp);
+	WRITE_ONCE(qca->peri_expecting, true);
+
+	if (!wait_for_completion_timeout(&qca->peri_rx_comp, msecs_to_jiffies(ms))) {
+		WRITE_ONCE(qca->peri_expecting, false);
+		bt_dev_warn(hu->hdev, "QCA-PERI: no async '%s' (timeout)", what);
+		return -ETIMEDOUT;
+	}
+	WRITE_ONCE(qca->peri_expecting, false);
+	return qca->peri_rx_len;
+}
+
+/*
+ * GetBoardIdReq (marker FFF0): a LEN=1 command (byte[4]=0x01 is the length of
+ * the block that follows, opcode 0x0A, NO trailing flag byte). Wire = 31 00 F0
+ * FF 01 0A. qca_peri_send() cannot express this (it always appends the flag).
+ */
+static void qca_peri_get_board_id(struct hci_uart *hu)
+{
+	static const u8 f[] = {
+		QCA_PERI_TX_TYPE, 0x00,
+		QCA_PERI_MARKER_TMEL & 0xff, QCA_PERI_MARKER_TMEL >> 8,
+		0x01, 0x0a,
+	};
+	int ret = qca_peri_xfer(hu, f, sizeof(f));
+
+	qca_peri_check_reply(hu, ret, QCA_PERI_MARKER_TMEL, "GetBoardId");
+}
+
+/* GetBuildInfoReq (marker FFF0, cmd 0x02 sub 0x09): logs the SU build string. */
+static void qca_peri_get_build_info(struct hci_uart *hu)
+{
+	int ret = qca_peri_send(hu, QCA_PERI_MARKER_TMEL, 0x02, 0x09, NULL, 0);
+
+	qca_peri_check_reply(hu, ret, QCA_PERI_MARKER_TMEL, "GetBuildInfo");
+}
+
+/*
+ * PeriReset (marker FFF1): a LEN=1 command (byte[4]=0x01, opcode 0x03, NO flag).
+ * Wire = 31 00 F1 FF 01 03. Finalizes the PERI patch; the chip replies, then
+ * emits the async "Peri Patching Completed" VSE.
+ */
+static void qca_peri_reset(struct hci_uart *hu)
+{
+	static const u8 f[] = {
+		QCA_PERI_TX_TYPE, 0x00,
+		QCA_PERI_MARKER_PERI & 0xff, QCA_PERI_MARKER_PERI >> 8,
+		0x01, 0x03,
+	};
+	int ret = qca_peri_xfer(hu, f, sizeof(f));
+
+	qca_peri_check_reply(hu, ret, QCA_PERI_MARKER_PERI, "PeriReset");
+	qca_peri_wait_async(hu, "Peri Patching Completed", QCA_PERI_DL_CMPL_MS);
+}
+
+/* Stream the PERI NVM (brhperinv20.bin) on the same FFF0 channel as the patch. */
+static void qca_peri_nvm_download(struct hci_uart *hu)
+{
+	const struct firmware *fw = NULL;
+	int ret;
+
+	ret = request_firmware(&fw, QCA_PERI_NVM_FW_NAME, &hu->hdev->dev);
+	if (ret) {
+		bt_dev_warn(hu->hdev, "QCA-PERI: NVM %s missing (%d), skipping",
+			    QCA_PERI_NVM_FW_NAME, ret);
+		return;
+	}
+	/* NVM is per-segment (a CC per segment), not streamed. */
+	qca_tmel_download(hu, "PERI-NVM", fw->data, fw->size, false);
+	release_firmware(fw);
+}
+
+/*
+ * PeriSocInit: GETVER -> SetBaud(8M) -> Arbitrate -> stream brhperifw20.mbn ->
+ * GET_BOARD_ID -> stream brhperinv20.bin -> GET_BUILD_INFO -> PERI_RESET ->
+ * async "Peri Patching Completed". Finalizes the Peripheral subsystem.
+ */
+static void qca_peri_patch_download(struct hci_uart *hu)
+{
+	struct hci_dev *hdev = hu->hdev;
+	const struct firmware *fw = NULL;
+	int ret;
+
+	ret = request_firmware(&fw, QCA_PERI_FW_NAME, &hdev->dev);
+	if (ret) {
+		bt_dev_err(hdev, "QCA-PERI: request_firmware(%s) failed (%d)",
+			   QCA_PERI_FW_NAME, ret);
+		return;
+	}
+
+	qca_tmel_ver_req(hu);			/* PeriPatchGetVer (@115200) */
+	qca_peri_set_baud(hu);			/* -> 8M + HW flow control */
+	qca_tmel_arbitrate(hu);
+
+	if (qca_tmel_download(hu, "PERI", fw->data, fw->size, true) != 0)
+		goto out_fw;
+
+	qca_peri_get_board_id(hu);
+	qca_peri_nvm_download(hu);
+	qca_peri_get_build_info(hu);
+	qca_peri_reset(hu);			/* + async completion */
+
+out_fw:
+	release_firmware(fw);
+}
+
+/*
+ * Top-level bring-up: full PeriSocInit + TmelSocInit in Android HAL order. After
+ * this the chip's BT subsystem is patched + activated + at 8 Mbaud, so the
+ * normal mainline type-0x01 main download (brhbtfw20.tlv) finalizes -- which it
+ * cannot do standalone (the chip streams the whole rampatch but stays silent,
+ * no final CC, without this activation).
+ */
+static void qca_tmel_patch_seq(struct hci_uart *hu)
+{
+	struct hci_dev *hdev = hu->hdev;
+	const struct firmware *fw = NULL;
+	u8 *payload;
+
+	/*
+	 * PeriSocInit raises both ends to 8M (SetPeriBaudRate) and enables HW
+	 * flow control; everything below runs at 8M.
+	 */
+	qca_peri_wakeup_soc(hu);
+	qca_peri_patch_download(hu);
+
+	/*
+	 * TmelSocInit: Arbitrate -> GETVER -> stream tmel_peach_20.elf -> async
+	 * "TME-L Patching Completed" -> ActivateSS(1) -> async "Activate complete".
+	 */
+	if (qca_tmel_arbitrate(hu))
+		return;
+	if (qca_tmel_ver_req(hu))
+		return;
+
+	if (request_firmware(&fw, QCA_TMEL_FW_NAME, &hdev->dev)) {
+		bt_dev_err(hdev, "QCA-TMEL: request_firmware(%s) failed",
+			   QCA_TMEL_FW_NAME);
+		return;
+	}
+
+	/* The HAL streams the whole ELF verbatim; the patch header in chunk 0
+	 * carries the data length that arms the downloader. */
+	payload = kmemdup(fw->data, fw->size, GFP_KERNEL);
+	if (!payload)
+		goto out_fw;
+
+	if (qca_tmel_download(hu, "TMEL", payload, fw->size, true) != 0)
+		goto out_payload;
+
+	qca_peri_wait_async(hu, "TME-L Patching Completed", QCA_PERI_DL_CMPL_MS);
+	qca_peri_activate_ss(hu, 1);
+	qca_peri_wait_async(hu, "Activate complete", QCA_PERI_DL_CMPL_MS);
+
+out_payload:
+	kfree(payload);
+out_fw:
+	release_firmware(fw);
+}
+
 static int qca_setup(struct hci_uart *hu)
 {
 	struct hci_dev *hdev = hu->hdev;
@@ -1977,6 +2526,14 @@ retry:
 
 	clear_bit(QCA_SSR_TRIGGERED, &qca->flags);
 
+	/*
+	 * WCN7880/BRAHMA: patch + activate the shared TME-L coprocessor over the
+	 * type-0x31 sub-protocol before the standard flow, otherwise the main
+	 * type-0x01 firmware download never finalizes (see qca_tmel_patch_seq).
+	 */
+	if (qcadev && qcadev->tmel_patch)
+		qca_tmel_patch_seq(hu);
+
 	switch (soc_type) {
 	case QCA_WCN3950:
 	case QCA_WCN3988:
@@ -2003,11 +2560,19 @@ retry:
 	/* Setup user speed if needed */
 	speed = qca_get_speed(hu, QCA_OPER_SPEED);
 	if (speed) {
-		ret = qca_set_speed(hu, QCA_OPER_SPEED);
-		if (ret)
-			goto out;
-
 		qca_baudrate = qca_get_baudrate_value(speed);
+
+		/*
+		 * WCN7880 route-B already raised both ends to the operating baud
+		 * (SetPeriBaudRate) and enabled flow control, and Android's
+		 * SocInit sends no further baud command post-ActivateSS --
+		 * re-issuing the EDL 0xFC48 here would desync the chip.
+		 */
+		if (!qcadev || !qcadev->tmel_patch) {
+			ret = qca_set_speed(hu, QCA_OPER_SPEED);
+			if (ret)
+				goto out;
+		}
 	}
 
 	switch (soc_type) {
@@ -2219,6 +2784,27 @@ static const struct qca_device_data qca_soc_data_wcn7850 __maybe_unused = {
 			QCA_CAP_HFP_HW_OFFLOAD,
 };
 
+/*
+ * The WCN7880 is a WCN7850 that shares its TME-L security coprocessor with the
+ * rest of the SoC: the coprocessor has to be patched and activated over the
+ * PERI sub-protocol before the Bluetooth firmware download will finalize.
+ */
+static const struct qca_device_data qca_soc_data_wcn7880 __maybe_unused = {
+	.soc_type = QCA_WCN7850,
+	.vregs = (struct qca_vreg []) {
+		{ "vddio", 5000 },
+		{ "vddaon", 26000 },
+		{ "vdddig", 126000 },
+		{ "vddrfa0p8", 102000 },
+		{ "vddrfa1p2", 257000 },
+		{ "vddrfa1p9", 302000 },
+	},
+	.num_vregs = 6,
+	.capabilities = QCA_CAP_WIDEBAND_SPEECH | QCA_CAP_VALID_LE_STATES |
+			QCA_CAP_HFP_HW_OFFLOAD,
+	.tmel_patch = true,
+};
+
 static void qca_power_off(struct hci_uart *hu)
 {
 	struct qca_serdev *qcadev;
@@ -2389,6 +2975,49 @@ static int qca_init_regulators(struct qca_power *qca,
 	return 0;
 }
 
+static bool qca_fw_file_present(struct device *dev, const char *name,
+				bool add_prefix)
+{
+	const struct firmware *fw;
+	char path[80];
+
+	if (!name)
+		return true;
+
+	if (add_prefix)
+		snprintf(path, sizeof(path), "qca/%s", name);
+	else
+		strscpy(path, name, sizeof(path));
+
+	if (firmware_request_nowarn(&fw, path, dev))
+		return false;
+
+	release_firmware(fw);
+	return true;
+}
+
+/*
+ * Are all the blobs qca_setup() will ask for readable yet? See
+ * QCA_FW_DEFER_MAX_MS for why this gates registration.
+ */
+static bool qca_setup_fw_present(struct serdev_device *serdev,
+				 struct qca_serdev *qcadev)
+{
+	struct device *dev = &serdev->dev;
+
+	if (!qca_fw_file_present(dev, qcadev->firmware_name[0], true) ||
+	    !qca_fw_file_present(dev, qcadev->firmware_name[1], true))
+		return false;
+
+	if (qcadev->tmel_patch &&
+	    (!qca_fw_file_present(dev, QCA_TMEL_FW_NAME, false) ||
+	     !qca_fw_file_present(dev, QCA_PERI_FW_NAME, false) ||
+	     !qca_fw_file_present(dev, QCA_PERI_NVM_FW_NAME, false)))
+		return false;
+
+	return true;
+}
+
 static int qca_serdev_probe(struct serdev_device *serdev)
 {
 	struct qca_serdev *qcadev;
@@ -2414,10 +3043,12 @@ static int qca_serdev_probe(struct serdev_device *serdev)
 	qcadev->bdaddr_property_broken = device_property_read_bool(&serdev->dev,
 			"qcom,local-bd-address-broken");
 
-	if (data)
+	if (data) {
 		qcadev->btsoc_type = data->soc_type;
-	else
+		qcadev->tmel_patch = data->tmel_patch;
+	} else {
 		qcadev->btsoc_type = QCA_ROME;
+	}
 
 	switch (qcadev->btsoc_type) {
 	case QCA_QCA6390:
@@ -2538,7 +3169,25 @@ static int qca_serdev_probe(struct serdev_device *serdev)
 			return PTR_ERR(qcadev->susclk);
 		}
 	}
-	
+
+	if (!qca_setup_fw_present(serdev, qcadev)) {
+		static unsigned long defer_deadline;
+
+		if (!defer_deadline)
+			defer_deadline = jiffies +
+				msecs_to_jiffies(QCA_FW_DEFER_MAX_MS);
+
+		if (time_before(jiffies, defer_deadline)) {
+			dev_info(&serdev->dev,
+				 "setup firmware not reachable yet, deferring probe\n");
+			return -EPROBE_DEFER;
+		}
+
+		dev_warn(&serdev->dev,
+			 "setup firmware still missing after %d ms, registering anyway\n",
+			 QCA_FW_DEFER_MAX_MS);
+	}
+
 	err = hci_uart_register_device(&qcadev->serdev_hu, &qca_proto);
 	if (err) {
 		BT_ERR("serdev registration failed");
@@ -2785,6 +3434,7 @@ static const struct of_device_id qca_bluetooth_of_match[] = {
 	{ .compatible = "qcom,wcn6750-bt", .data = &qca_soc_data_wcn6750},
 	{ .compatible = "qcom,wcn6855-bt", .data = &qca_soc_data_wcn6855},
 	{ .compatible = "qcom,wcn7850-bt", .data = &qca_soc_data_wcn7850},
+	{ .compatible = "qcom,wcn7880-bt", .data = &qca_soc_data_wcn7880},
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, qca_bluetooth_of_match);
