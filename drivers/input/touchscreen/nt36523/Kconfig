@@ -1,0 +1,13 @@
+#
+# Novatek NT36xxx (NT36536) no-flash SPI touchscreen driver configuration
+#
+config TOUCHSCREEN_NT36523_SPI
+	tristate "Novatek NT36xxx no-flash SPI touchscreen driver (erhai NT36536)"
+	depends on SPI
+	default n
+	help
+	  Say Y here if you have a Novatek NT36xxx no-flash touchscreen
+	  connected over SPI. This is the OnePlus Pad 3 (erhai) NT36536
+	  in-cell controller port (host-downloads firmware every boot).
+
+	  If unsure, say N.
