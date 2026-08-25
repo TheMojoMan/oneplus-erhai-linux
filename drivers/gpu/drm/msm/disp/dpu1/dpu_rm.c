@@ -525,9 +525,19 @@ static int _dpu_rm_dsc_alloc(struct dpu_rm *rm,
 	int pp_idx = 0;
 	int dsc_idx;
 	int ret;
+	/*
+	 * v118 (QUADPIPE_3DMERGE, num_lm=4 + num_dsc=2): MERGE_3D combines LM
+	 * pairs into DSC inputs, so only even-indexed PingPongs carry standalone
+	 * streams (the odd ones are MERGE_3D inputs). Use stride 2 so we pick
+	 * DSC_0 -> PP_0 and DSC_2 -> PP_2 (one DSC per DCE, one per INTF)
+	 * instead of DSC_0 -> PP_0 and DSC_1 -> PP_1, which would put both DSCs
+	 * in DCE_0 and starve the right half of the panel. When num_lm ==
+	 * num_dsc (no MERGE_3D), stride stays 1.
+	 */
+	int stride = (top->num_lm == 2 * top->num_dsc) ? 2 : 1;
 
 	for (dsc_idx = 0; dsc_idx < ARRAY_SIZE(rm->dsc_blks) &&
-	     num_dsc < top->num_dsc; dsc_idx++) {
+	     num_dsc < top->num_dsc; dsc_idx += stride) {
 		if (!rm->dsc_blks[dsc_idx])
 			continue;
 
@@ -544,7 +554,7 @@ static int _dpu_rm_dsc_alloc(struct dpu_rm *rm,
 
 		global_state->dsc_to_crtc_id[dsc_idx] = crtc_id;
 		num_dsc++;
-		pp_idx++;
+		pp_idx += stride;
 	}
 
 	if (num_dsc < top->num_dsc) {
@@ -621,17 +631,25 @@ static int _dpu_rm_reserve_dsc(struct dpu_rm *rm,
 		return 0;
 
 	/*
-	 * Facts:
-	 * 1) no pingpong split (two layer mixers shared one pingpong)
-	 * 2) DSC pair starts from even index, such as index(0,1), (2,3), etc
-	 * 3) even PINGPONG connects to even DSC
-	 * 4) odd PINGPONG connects to odd DSC
-	 * 5) pair: encoder +--> pp_idx_0 --> dsc_idx_0
-	 *                  +--> pp_idx_1 --> dsc_idx_1
+	 * Hardware facts:
+	 * 1) no pingpong split (two layer mixers share one pingpong)
+	 * 2) DSC engines pair up inside a DCE (e.g. SM8750: DCE_0 = DSC_0+DSC_1,
+	 *    DCE_1 = DSC_2+DSC_3, ...). Pairs start at an even index.
+	 * 3) even PINGPONG connects to even DSC, odd to odd.
+	 * 4) When num_dsc > num_intf, the panel needs more than one DSC per
+	 *    INTF — the two engines in each DCE multiplex inside the block, so
+	 *    each pair (e.g. DSC_0+DSC_1) feeds one INTF.
+	 *
+	 * Topology mapping for the OnePlus Pad 3 XN242 panel (confirmed
+	 * 2026-05-19 from Android-side rm_status):
+	 *     num_lm=4, num_dsc=4, num_intf=2, num_merge_3d=0
+	 *     → (LM_0,LM_1) → (PP_0,PP_1) → (DSC_0,DSC_1) DCE_0 → INTF_1 (DSI0)
+	 *     → (LM_2,LM_3) → (PP_2,PP_3) → (DSC_2,DSC_3) DCE_1 → INTF_2 (DSI1)
+	 * No MERGE_3D blocks are reserved — the merge happens inside the DCEs.
 	 */
 
 	/* num_dsc should be either 1, 2 or 4 */
-	if (top->num_dsc > top->num_intf)	/* merge mode */
+	if (top->num_dsc > top->num_intf)	/* DCE-pair multiplex mode */
 		return _dpu_rm_dsc_alloc_pair(rm, global_state, crtc_id, top);
 	else
 		return _dpu_rm_dsc_alloc(rm, global_state, crtc_id, top);

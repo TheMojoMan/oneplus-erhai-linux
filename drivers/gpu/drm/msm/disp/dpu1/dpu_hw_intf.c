@@ -114,13 +114,22 @@ static void dpu_hw_intf_setup_timing_engine(struct dpu_hw_intf *intf,
 	u32 active_hctl, display_hctl, hsync_ctl;
 	u32 polarity_ctl, den_polarity;
 	u32 panel_format;
-	u32 intf_cfg, intf_cfg2 = 0;
+	u32 intf_cfg, intf_cfg2;
 	u32 display_data_hctl = 0, active_data_hctl = 0;
 	u32 data_width;
 	bool dp_intf = false;
 
 	/* read interface_cfg */
 	intf_cfg = DPU_REG_READ(c, INTF_CONFIG);
+
+	/*
+	 * RMW INTF_CONFIG2 to preserve bits set by the UEFI display (e.g. BIT(8)
+	 * on the SM8750 DSI INTFs, which upstream has no name for). Mask off
+	 * only the bits we manage so they can be re-derived below.
+	 */
+	intf_cfg2 = DPU_REG_READ(c, INTF_CONFIG2);
+	intf_cfg2 &= ~(INTF_CFG2_DATABUS_WIDEN | INTF_CFG2_DATA_HCTL_EN |
+		       INTF_CFG2_DCE_DATA_COMPRESS);
 
 	if (intf->cap->type == INTF_DP)
 		dp_intf = true;
@@ -138,31 +147,49 @@ static void dpu_hw_intf_setup_timing_engine(struct dpu_hw_intf *intf,
 	hsync_start_x = p->h_back_porch + p->hsync_pulse_width;
 	hsync_end_x = hsync_period - p->h_front_porch - 1;
 
-	if (p->width != p->xres) { /* border fill added */
+	/*
+	 * The SM8750 DSI INTF needs the active region programmed
+	 * unconditionally: the vendor sets ACTIVE_HCTL and the ACTIVE_H/V_EN
+	 * bits regardless of border fill. Upstream's "skip when width==xres"
+	 * heuristic leaves them clear, which desyncs the compressed panel. Keep
+	 * that heuristic for DP (forcing the active window there stalls the DP
+	 * timing engine), force it for DSI.
+	 */
+	if (dp_intf) {
+		if (p->width != p->xres) { /* border fill added */
+			active_h_start = hsync_start_x;
+			active_h_end = active_h_start + p->xres - 1;
+		} else {
+			active_h_start = 0;
+			active_h_end = 0;
+		}
+
+		if (p->height != p->yres) { /* border fill added */
+			active_v_start = display_v_start;
+			active_v_end = active_v_start + (p->yres * hsync_period) - 1;
+		} else {
+			active_v_start = 0;
+			active_v_end = 0;
+		}
+
+		if (active_h_end) {
+			active_hctl = (active_h_end << 16) | active_h_start;
+			intf_cfg |= INTF_CFG_ACTIVE_H_EN;
+		} else {
+			active_hctl = 0;
+		}
+
+		if (active_v_end)
+			intf_cfg |= INTF_CFG_ACTIVE_V_EN;
+	} else {
 		active_h_start = hsync_start_x;
 		active_h_end = active_h_start + p->xres - 1;
-	} else {
-		active_h_start = 0;
-		active_h_end = 0;
-	}
-
-	if (p->height != p->yres) { /* border fill added */
 		active_v_start = display_v_start;
 		active_v_end = active_v_start + (p->yres * hsync_period) - 1;
-	} else {
-		active_v_start = 0;
-		active_v_end = 0;
-	}
 
-	if (active_h_end) {
 		active_hctl = (active_h_end << 16) | active_h_start;
-		intf_cfg |= INTF_CFG_ACTIVE_H_EN;
-	} else {
-		active_hctl = 0;
+		intf_cfg |= INTF_CFG_ACTIVE_H_EN | INTF_CFG_ACTIVE_V_EN;
 	}
-
-	if (active_v_end)
-		intf_cfg |= INTF_CFG_ACTIVE_V_EN;
 
 	hsync_ctl = (hsync_period << 16) | p->hsync_pulse_width;
 	display_hctl = (hsync_end_x << 16) | hsync_start_x;

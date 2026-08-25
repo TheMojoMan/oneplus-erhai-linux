@@ -1771,7 +1771,14 @@ static struct gdsc mdss_int2_gdsc = {
 		.name = "mdss_int2_gdsc",
 	},
 	.pwrsts = PWRSTS_OFF_ON,
-	.flags = POLL_CFG_GDSCR | HW_CTRL | RETAIN_FF_ENABLE,
+	/*
+	 * No HW_CTRL: handing this domain to hardware trigger mode right after
+	 * enabling it lets it collapse again before its consumer's core clock
+	 * (MDP1_CLK) is running, and enabling a clock behind a collapsed GDSC
+	 * never completes. Software control keeps it up for as long as the
+	 * display subsystem is runtime-resumed, which is what it needs.
+	 */
+	.flags = POLL_CFG_GDSCR | RETAIN_FF_ENABLE,
 };
 
 static struct clk_regmap *disp_cc_sm8750_clocks[] = {

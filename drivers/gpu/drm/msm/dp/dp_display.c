@@ -32,6 +32,15 @@ static bool psr_enabled = false;
 module_param(psr_enabled, bool, 0);
 MODULE_PARM_DESC(psr_enabled, "enable PSR for eDP and DP displays");
 
+/*
+ * In the reverse Type-C orientation a DP-altmode entry makes the USB hub
+ * re-attach its upstream link, blacking out the AUX channel for a few hundred
+ * ms exactly while we read sink caps / EDID. The hub keeps DP-HPD asserted, so
+ * no fresh plug event follows -- retry the sink-caps read until AUX recovers.
+ */
+#define DP_HPD_EDID_RETRIES	15
+#define DP_HPD_EDID_RETRY_MS	150
+
 #define HPD_STRING_SIZE 30
 
 enum {
@@ -269,16 +278,31 @@ static int msm_dp_display_process_hpd_high(struct msm_dp_display_private *dp)
 	int rc = 0;
 	u8 dpcd[DP_RECEIVER_CAP_SIZE];
 	const struct drm_edid *drm_edid = NULL;
+	int tries = 0;
 
+read_caps:
 	rc = drm_dp_read_dpcd_caps(dp->aux, dpcd);
 	if (rc)
-		goto end;
+		goto retry;
 
 	dp->link->lttpr_count = msm_dp_display_lttpr_init(dp, dpcd);
 
 	rc = msm_dp_panel_read_link_caps(dp->panel, connector);
-	if (rc)
+retry:
+	if (rc) {
+		/*
+		 * AUX may be transiently down due to a reverse-orientation USB
+		 * re-attach; retry until the link recovers.
+		 */
+		if (tries++ < DP_HPD_EDID_RETRIES) {
+			drm_dbg_dp(dp->drm_dev,
+				   "sink-caps read failed (%d), retry %d/%d\n",
+				   rc, tries, DP_HPD_EDID_RETRIES);
+			msleep(DP_HPD_EDID_RETRY_MS);
+			goto read_caps;
+		}
 		goto end;
+	}
 
 	drm_edid = drm_edid_read_ddc(connector, &dp->aux->ddc);
 	drm_edid_connector_update(connector, drm_edid);

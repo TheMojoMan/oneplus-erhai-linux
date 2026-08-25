@@ -462,6 +462,16 @@ static int dpu_kms_check_mode_changed(struct msm_kms *kms, struct drm_atomic_com
 	return 0;
 }
 
+static void dpu_kms_seamless_dfps_update(struct msm_kms *kms,
+					 struct drm_crtc *crtc,
+					 const struct drm_display_mode *mode)
+{
+	struct drm_encoder *encoder;
+
+	drm_for_each_encoder_mask(encoder, crtc->dev, crtc->state->encoder_mask)
+		dpu_encoder_seamless_dfps_update(encoder, mode);
+}
+
 static void dpu_kms_flush_commit(struct msm_kms *kms, unsigned crtc_mask)
 {
 	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
@@ -1075,6 +1085,7 @@ static const struct msm_kms_funcs kms_funcs = {
 	.enable_commit   = dpu_kms_enable_commit,
 	.disable_commit  = dpu_kms_disable_commit,
 	.check_mode_changed = dpu_kms_check_mode_changed,
+	.seamless_dfps_update = dpu_kms_seamless_dfps_update,
 	.flush_commit    = dpu_kms_flush_commit,
 	.wait_flush      = dpu_kms_wait_flush,
 	.complete_commit = dpu_kms_complete_commit,

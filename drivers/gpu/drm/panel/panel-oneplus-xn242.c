@@ -808,7 +808,8 @@ static int xn242_probe(struct mipi_dsi_device *dsi)
 
 		ctx->dsi[i]->lanes = 4;
 		ctx->dsi[i]->format = MIPI_DSI_FMT_RGB888;
-		ctx->dsi[i]->mode_flags = MIPI_DSI_MODE_VIDEO;
+		ctx->dsi[i]->mode_flags = MIPI_DSI_MODE_VIDEO |
+					  MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT;
 
 		ret = devm_mipi_dsi_attach(dev, ctx->dsi[i]);
 		if (ret < 0) {
