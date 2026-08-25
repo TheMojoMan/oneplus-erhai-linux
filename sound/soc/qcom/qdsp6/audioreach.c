@@ -210,6 +210,13 @@ struct apm_codec_dma_module_intf_cfg {
 
 #define APM_CDMA_INTF_CFG_PSIZE ALIGN(sizeof(struct apm_codec_dma_module_intf_cfg), 8)
 
+struct apm_tdm_module_intf_cfg {
+	struct apm_module_param_data param_data;
+	struct param_id_tdm_intf_cfg cfg;
+} __packed;
+
+#define APM_TDM_INTF_CFG_PSIZE ALIGN(sizeof(struct apm_tdm_module_intf_cfg), 8)
+
 struct apm_display_port_module_intf_cfg {
 	struct apm_module_param_data param_data;
 	struct param_id_display_port_intf_cfg cfg;
@@ -1080,7 +1087,7 @@ static int audioreach_audio_if_set_media_format(struct q6apm_graph *graph,
 	int size = ic_sz + ep_sz + fd_sz;
 	u32 slot_mask = cfg->slot_mask ? cfg->slot_mask : module->slot_mask;
 	u16 nslots_per_frame = cfg->nslots_per_frame ?
-				 (u16)cfg->nslots_per_frame : module->nslots_per_frame;
+			 (u16)cfg->nslots_per_frame : module->nslots_per_frame;
 	u16 slot_width = cfg->slot_width ? (u16)cfg->slot_width : module->slot_width;
 	void *p;
 
@@ -1137,6 +1144,110 @@ static int audioreach_audio_if_set_media_format(struct q6apm_graph *graph,
 	fd_cfg->frame_duration.allow_frame_duration_normalization = AUDIO_IF_FRAME_DURATION_NORMALIZATION_ENABLE;
 	fd_cfg->frame_duration.min_normalized_frame_dur_us = AUDIO_IF_FRAME_DURATION_MIN_US;
 	fd_cfg->frame_duration.max_normalized_frame_dur_us = AUDIO_IF_FRAME_DURATION_MAX_US;
+
+	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
+}
+
+/*
+ * TDM HW-EP defaults (OnePlus Pad 3 speakers: 6x AW88261 on SECONDARY TDM,
+ * 8 slots x 32-bit @ 48kHz per /odm/etc/backend_conf.xml). Mainline
+ * AudioReach had no TDM HW-EP; these mirror the Android working config.
+ */
+#define TDM_DEFAULT_SLOTS	8
+#define TDM_DEFAULT_SLOT_WIDTH	32
+
+static int audioreach_tdm_set_media_format(struct q6apm_graph *graph,
+					   const struct audioreach_module *module,
+					   const struct audioreach_module_config *cfg)
+{
+	struct apm_module_frame_size_factor_cfg *fs_cfg;
+	struct apm_module_param_data *param_data;
+	struct apm_tdm_module_intf_cfg *intf_cfg;
+	struct apm_module_hw_ep_mf_cfg *hw_cfg;
+	int ic_sz = APM_TDM_INTF_CFG_PSIZE;
+	int ep_sz = APM_HW_EP_CFG_PSIZE;
+	int fs_sz = APM_FS_CFG_PSIZE;
+	int size = ic_sz + ep_sz + fs_sz;
+	u16 slots, slot_width;
+	u32 slot_mask;
+	void *p;
+
+	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
+	if (IS_ERR(pkt))
+		return PTR_ERR(pkt);
+
+	p = (void *)pkt + GPR_HDR_SIZE + APM_CMD_HDR_SIZE;
+	intf_cfg = p;
+
+	param_data = &intf_cfg->param_data;
+	param_data->module_instance_id = module->instance_id;
+	param_data->error_code = 0;
+	param_data->param_id = PARAM_ID_TDM_INTF_CFG;
+	param_data->param_size = ic_sz - APM_MODULE_PARAM_DATA_SIZE;
+
+	slots = cfg->tdm_slots ? cfg->tdm_slots : TDM_DEFAULT_SLOTS;
+	slot_width = cfg->tdm_slot_width ? cfg->tdm_slot_width : TDM_DEFAULT_SLOT_WIDTH;
+	/*
+	 * The ADSP TDM module requires popcount(slot_mask) == num_channels
+	 * (it rejects SET_CFG otherwise). The active-slot mask therefore
+	 * derives from the channel count, not the frame's total slot count
+	 * (which only sets the BCLK = slots*width*fs).
+	 */
+	if (cfg->tdm_slot_mask)
+		slot_mask = cfg->tdm_slot_mask;
+	else if (cfg->num_channels >= 32)
+		slot_mask = 0xFFFFFFFF;
+	else
+		slot_mask = (1u << cfg->num_channels) - 1;
+
+	intf_cfg->cfg.lpaif_type = module->hw_interface_type;
+	intf_cfg->cfg.intf_idx = module->hw_interface_idx;
+	intf_cfg->cfg.slot_mask = slot_mask;
+	intf_cfg->cfg.nslots_per_frame = slots;
+	intf_cfg->cfg.slot_width = slot_width;
+	intf_cfg->cfg.sync_mode = TDM_SHORT_SYNC_BIT_MODE;
+	intf_cfg->cfg.ctrl_data_out_enable = TDM_CTRL_DATA_OE_ENABLE;
+	intf_cfg->cfg.ctrl_invert_sync_pulse = TDM_SYNC_NORMAL;
+	intf_cfg->cfg.ctrl_sync_data_delay = TDM_DATA_DELAY_0_BCLK_CYCLE;
+	intf_cfg->cfg.reserved = 0;
+
+	switch (cfg->fmt & SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) {
+	case SND_SOC_DAIFMT_BC_FC:
+		/* CPU is clock/sync slave */
+		intf_cfg->cfg.sync_src = TDM_SYNC_SRC_EXTERNAL;
+		break;
+	case SND_SOC_DAIFMT_BP_FP:
+	default:
+		/* LPAIF generates BCLK + sync (default for the AW88261 amps) */
+		intf_cfg->cfg.sync_src = TDM_SYNC_SRC_INTERNAL;
+		break;
+	}
+
+	p += ic_sz;
+	hw_cfg = p;
+	param_data = &hw_cfg->param_data;
+	param_data->module_instance_id = module->instance_id;
+	param_data->error_code = 0;
+	param_data->param_id = PARAM_ID_HW_EP_MF_CFG;
+	param_data->param_size = ep_sz - APM_MODULE_PARAM_DATA_SIZE;
+
+	hw_cfg->mf.sample_rate = cfg->sample_rate;
+	hw_cfg->mf.bit_width = cfg->bit_width;
+	hw_cfg->mf.num_channels = cfg->num_channels;
+	hw_cfg->mf.data_format = module->data_format;
+
+	p += ep_sz;
+	fs_cfg = p;
+	param_data = &fs_cfg->param_data;
+	param_data->module_instance_id = module->instance_id;
+	param_data->error_code = 0;
+	param_data->param_id = PARAM_ID_HW_EP_FRAME_SIZE_FACTOR;
+	param_data->param_size = fs_sz - APM_MODULE_PARAM_DATA_SIZE;
+	fs_cfg->frame_size_factor = 1;
+
+	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
+}
+
 
 	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
 }
@@ -1492,6 +1603,10 @@ int audioreach_set_media_format(struct q6apm_graph *graph,
 	case MODULE_ID_I2S_SOURCE:
 	case MODULE_ID_I2S_SINK:
 		rc = audioreach_i2s_set_media_format(graph, module, cfg);
+		break;
+	case MODULE_ID_TDM_SOURCE:
+	case MODULE_ID_TDM_SINK:
+		rc = audioreach_tdm_set_media_format(graph, module, cfg);
 		break;
 	case MODULE_ID_WR_SHARED_MEM_EP:
 	case MODULE_ID_SH_MEM_PULL_MODE:
