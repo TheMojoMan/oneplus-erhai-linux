@@ -265,6 +265,35 @@ static int q6apm_lpass_dai_prepare(struct snd_pcm_substream *substream, struct s
 		dev_err(dai->dev, "Failed to prepare Graph %d\n", rc);
 		goto err;
 	}
+
+	/*
+	 * Bring the sink interface (and its bit-clock) up now, before the codec
+	 * (amp) DAPM widget powers up and runs its fatal PLL-lock check. The
+	 * AW88261 amps need TDM BCLK present at that check; the trigger's
+	 * is_port_started guard then skips the duplicate start.
+	 *
+	 * Exclude HDMI/DP backends: a standalone BE graph start at prepare()
+	 * is rejected by the ADSP for DISPLAY_PORT_RX_* (GPR error 0x1001002/
+	 * -22 whenever no stream is running yet), which poisoned PipeWire's
+	 * profile probing and killed the whole card. MI2S/TDM backends accept
+	 * it — note the erhai speaker BE is SECONDARY_MI2S_RX driven by
+	 * q6i2s_ops, whose module_config never has tdm_slots set (the amp TDM
+	 * framing comes from the ACF firmware and the ADSP falls back to
+	 * TDM_DEFAULT_SLOTS), so gating on set_tdm_slot() state would skip
+	 * this start and leave the amps without a bit-clock.
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK &&
+	    dai->id != HDMI_RX &&
+	    dai->id != DISPLAY_PORT_RX &&
+	    !(dai->id >= DISPLAY_PORT_RX_1 && dai->id <= DISPLAY_PORT_RX_7) &&
+	    !dai_data->is_port_started[dai->id]) {
+		rc = q6apm_graph_start(dai_data->graph[dai->id]);
+		if (rc < 0) {
+			dev_err(dai->dev, "early BE graph start failed %d\n", rc);
+			goto err;
+		}
+		dai_data->is_port_started[dai->id] = true;
+	}
 	return 0;
 err:
 	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
@@ -384,6 +413,12 @@ static int q6tdm_set_tdm_slot(struct snd_soc_dai *dai,
 		return -EINVAL;
 	}
 
+	/* erhai: TDM module config (MODULE_ID_TDM_SINK/SOURCE) */
+	cfg->tdm_slots = slots;
+	cfg->tdm_slot_width = slot_width;
+	/* TDM RX dai ids are even, TX odd */
+	cfg->tdm_slot_mask = (dai->id & 0x1) ? tx_mask : rx_mask;
+
 	switch (dai->id) {
 	case PRIMARY_TDM_RX_0 ... QUINARY_TDM_TX_7:
 		slot_mask = (dai->id & 0x1) ? tx_mask : rx_mask;
@@ -422,6 +457,16 @@ static const struct snd_soc_dai_ops q6i2s_ops = {
 	.hw_params        = q6dma_hw_params,
 	.set_fmt	= q6i2s_set_fmt,
 	.set_sysclk	= q6i2s_set_sysclk,
+	.trigger	= q6apm_lpass_dai_trigger,
+};
+
+static const struct snd_soc_dai_ops q6tdm_ops = {
+	.prepare	= q6apm_lpass_dai_prepare,
+	.startup	= q6apm_lpass_dai_startup,
+	.shutdown	= q6apm_lpass_dai_shutdown,
+	.set_tdm_slot	= q6tdm_set_tdm_slot,
+	.hw_params	= q6dma_hw_params,
+	.set_fmt	= q6i2s_set_fmt,
 	.trigger	= q6apm_lpass_dai_trigger,
 };
 
@@ -536,6 +581,7 @@ static int q6apm_lpass_dai_dev_probe(struct platform_device *pdev)
 
 	memset(&cfg, 0, sizeof(cfg));
 	cfg.q6i2s_ops = &q6i2s_ops;
+	cfg.q6tdm_ops = &q6tdm_ops;
 	cfg.q6dma_ops = &q6dma_ops;
 	cfg.q6hdmi_ops = &q6hdmi_ops;
 	cfg.q6tdm_ops = &q6tdm_ops;
