@@ -566,6 +566,35 @@ static const struct of_device_id pmic_glink_altmode_of_quirks[] = {
 	{}
 };
 
+/*
+ * Returns true if the connector graph references an available remote device
+ * carrying @prop ("mode-switch"/"orientation-switch"). Used to distinguish
+ * "this connector genuinely has no mux/switch" (proceed) from "the mux/switch
+ * device exists but has not registered yet" (defer) — the latter is a probe
+ * ordering race on platforms where the switch is an i2c device (wcd939x-usbss)
+ * that probes after pmic_glink spawns this altmode aux device.
+ */
+static bool pmic_glink_altmode_fwnode_has_switch(struct fwnode_handle *fwnode,
+						 const char *prop)
+{
+	struct fwnode_handle *ep, *rpp;
+	bool found = false;
+
+	fwnode_graph_for_each_endpoint(fwnode, ep) {
+		rpp = fwnode_graph_get_remote_port_parent(ep);
+		if (rpp && fwnode_device_is_available(rpp) &&
+		    fwnode_property_present(rpp, prop))
+			found = true;
+		fwnode_handle_put(rpp);
+		if (found) {
+			fwnode_handle_put(ep);
+			break;
+		}
+	}
+
+	return found;
+}
+
 static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 				    const struct auxiliary_device_id *id)
 {
@@ -632,6 +661,13 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 		alt_port->tbt_alt.active = 1;
 
 		alt_port->typec_mux = fwnode_typec_mux_get(fwnode);
+		if (!alt_port->typec_mux &&
+		    pmic_glink_altmode_fwnode_has_switch(fwnode, "mode-switch")) {
+			fwnode_handle_put(fwnode);
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "mode-switch in graph not registered yet for port %d\n",
+					     port);
+		}
 		if (IS_ERR(alt_port->typec_mux)) {
 			fwnode_handle_put(fwnode);
 			return dev_err_probe(dev, PTR_ERR(alt_port->typec_mux),
@@ -662,6 +698,13 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 		}
 
 		alt_port->typec_switch = fwnode_typec_switch_get(fwnode);
+		if (!alt_port->typec_switch &&
+		    pmic_glink_altmode_fwnode_has_switch(fwnode, "orientation-switch")) {
+			fwnode_handle_put(fwnode);
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "orientation-switch in graph not registered yet for port %d\n",
+					     port);
+		}
 		if (IS_ERR(alt_port->typec_switch)) {
 			fwnode_handle_put(fwnode);
 			return dev_err_probe(dev, PTR_ERR(alt_port->typec_switch),
