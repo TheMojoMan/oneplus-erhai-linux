@@ -465,6 +465,40 @@ error_alloc_chan_ctxt:
 	return ret;
 }
 
+/* Walk the MISC-region capability chain and, if the device exposes a BW_SCALE
+ * capability, advertise host support by writing BW_SCALE_CFG (the bw_scale
+ * event-ring index + enable). Only then does qcom/WCN7880 firmware emit MHI
+ * BW_REQ events. Must run during MMIO init (device in M0/READY), before the
+ * firmware's bring-up reads it. Mainline has no cap walk; offsets/value are
+ * byte-verified against the vendor mhi.ko mhi_misc_init_mmio.
+ */
+static void mhi_init_bw_scale(struct mhi_controller *mhi_cntrl, void __iomem *base)
+{
+	struct device *dev = &mhi_cntrl->mhi_dev->dev;
+	u32 misc, off, hdr, capid, next, cfg;
+	int n = 0;
+
+	if (mhi_read_reg(mhi_cntrl, base, MISCOFF, &misc))
+		return;
+
+	for (off = misc; off && off < mhi_cntrl->reg_len && n++ < 16; off = next) {
+		if (mhi_read_reg(mhi_cntrl, base, off, &hdr))
+			return;
+		capid = FIELD_GET(MHI_MISC_CAP_CAPID_MASK, hdr);
+		next = FIELD_GET(MHI_MISC_CAP_NEXT_MASK, hdr);
+		if (capid != MHI_BW_SCALE_CAP_ID)
+			continue;
+
+		cfg = MHI_BW_SCALE_CFG(mhi_cntrl->bw_scale_er_index);
+		mhi_write_reg(mhi_cntrl, base, off + MHI_BW_SCALE_CFG_OFFSET, cfg);
+		dev_info(dev, "MHI bw_scale advertised: cfg@0x%x=0x%08x (er %u)\n",
+			 off + MHI_BW_SCALE_CFG_OFFSET, cfg,
+			 mhi_cntrl->bw_scale_er_index);
+		return;
+	}
+	dev_info(dev, "MHI bw_scale: device exposes no BW_SCALE capability\n");
+}
+
 int mhi_init_mmio(struct mhi_controller *mhi_cntrl)
 {
 	u32 val;
@@ -601,6 +635,9 @@ int mhi_init_mmio(struct mhi_controller *mhi_cntrl)
 		dev_err(dev, "Unable to write MHICFG register\n");
 		return ret;
 	}
+
+	if (mhi_cntrl->bw_scale_supported)
+		mhi_init_bw_scale(mhi_cntrl, base);
 
 	return 0;
 }
