@@ -13,6 +13,7 @@
 #include <linux/irqchip/chained_irq.h>
 #include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/pm_domain.h>
 #include <linux/pm_runtime.h>
 #include <linux/reset.h>
 
@@ -365,6 +366,7 @@ static int mdp5_mdss_parse_clock(struct platform_device *pdev, struct clk_bulk_d
 static struct msm_mdss *msm_mdss_init(struct platform_device *pdev, bool is_mdp5)
 {
 	const struct msm_mdss_data *mdss_data;
+	struct dev_pm_domain_list *pds;
 	struct msm_mdss *msm_mdss;
 	int ret;
 	int irq;
@@ -409,6 +411,23 @@ static struct msm_mdss *msm_mdss_init(struct platform_device *pdev, bool is_mdp5
 	msm_mdss->is_mdp5 = is_mdp5;
 
 	msm_mdss->dev = &pdev->dev;
+
+	/*
+	 * The driver core only auto-attaches a power domain when the node names
+	 * exactly one, so a display subsystem spanning several of them has to
+	 * attach them itself. SM8750 is such a case: its second MDP datapath
+	 * lives behind MDSS_INT2_GDSC, which nothing else votes for, so without
+	 * this the domain stays collapsed and enabling that datapath's core
+	 * clock hangs. The device links created here make a runtime resume of
+	 * this device power every domain up before any child driver touches the
+	 * hardware behind it.
+	 *
+	 * -EEXIST means the single-domain case already got auto-attached.
+	 */
+	ret = devm_pm_domain_attach_list(&pdev->dev, NULL, &pds);
+	if (ret < 0 && ret != -EEXIST)
+		return ERR_PTR(dev_err_probe(&pdev->dev, ret,
+					     "failed to attach power domains\n"));
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)

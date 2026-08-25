@@ -522,7 +522,7 @@ static void _dpu_crtc_blend_setup(struct drm_crtc *crtc)
 	struct dpu_crtc_mixer *mixer = cstate->mixers;
 	struct dpu_hw_ctl *ctl;
 	struct dpu_hw_mixer *lm;
-	struct dpu_hw_stage_cfg stage_cfg[STAGES_PER_PLANE];
+	struct dpu_hw_stage_cfg stage_cfg[2];
 	DECLARE_BITMAP(active_lms, LM_MAX);
 	int i;
 
@@ -1373,7 +1373,7 @@ static int dpu_crtc_reassign_planes(struct drm_crtc *crtc, struct drm_crtc_state
 	return dpu_crtc_assign_planes(crtc, crtc_state);
 }
 
-#define MAX_CHANNELS_PER_CRTC PIPES_PER_PLANE
+#define MAX_CHANNELS_PER_CRTC 4
 #define MAX_HDISPLAY_SPLIT 1080
 
 static struct msm_display_topology dpu_crtc_get_topology(
@@ -1413,13 +1413,39 @@ static struct msm_display_topology dpu_crtc_get_topology(
 	 * (mode->hdisplay > MAX_HDISPLAY_SPLIT) check.
 	 */
 
-	if (topology.num_intf == 2 && !topology.cwb_enabled)
+	/*
+	 * v118 baseline (QUADPIPE_3DMERGE, Android Topology 9 number): when
+	 * the encoder requests num_dsc=2 with 2 INTFs, promote num_lm to 4 so
+	 * each 848-wide LM pair feeds one MERGE_3D -> DSC -> INTF chain. The
+	 * v122 attempt to switch this branch to num_dsc=4 produced a black
+	 * screen watchdog reset -- reverted while we diagnose.
+	 */
+	if (topology.num_dsc == 4)
+		topology.num_lm = 4;
+	else if (topology.num_dsc == 2 && topology.num_intf == 2 && !topology.cwb_enabled)
+		topology.num_lm = 4;
+	else if (topology.num_intf == 2 && !topology.cwb_enabled)
 		topology.num_lm = 2;
 	else if (topology.num_dsc == 2)
 		topology.num_lm = 2;
 	else if (dpu_kms->catalog->caps->has_3d_merge &&
 		 topology.num_dsc == 0)
-		topology.num_lm = (mode->hdisplay > MAX_HDISPLAY_SPLIT) ? 2 : 1;
+		/*
+		 * Non-DSC (e.g. DP-over-Type-C): split into 2 LMs only when the
+		 * mode is too wide for a single layer mixer. Mainline's
+		 * MAX_HDISPLAY_SPLIT (1080) forced 2 LMs for any display >1080,
+		 * but on erhai the 2-LM merge path mis-maps the single full-width
+		 * SSPP to the 2 mixers (the SSPP fetches one 2560-wide rect, but
+		 * the 2x1280 LMs expect a left/right split that the num_stages=1
+		 * plane path doesn't produce) → continuous INTF underrun (monitor
+		 * shows the underflow color = blue) → HW CTL reset + frame-done
+		 * timeout. A 2560-wide DP sink fits one LM (max_mixer_width=2560),
+		 * so use num_lm=1: SSPP(2560)→LM(2560)→PP→INTF, no merge_3d, no
+		 * plane split. DSI is unaffected (it takes the num_dsc branches).
+		 */
+		topology.num_lm =
+			(mode->hdisplay > dpu_kms->catalog->caps->max_mixer_width)
+				? 2 : 1;
 	else
 		topology.num_lm = 1;
 
@@ -1524,6 +1550,8 @@ static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
 {
 	struct drm_crtc_state *crtc_state = drm_atomic_get_new_crtc_state(state,
 									  crtc);
+	struct drm_crtc_state *old_crtc_state = drm_atomic_get_old_crtc_state(state,
+									     crtc);
 	struct dpu_crtc *dpu_crtc = to_dpu_crtc(crtc);
 	struct dpu_crtc_state *cstate = to_dpu_crtc_state(crtc_state);
 
@@ -1533,6 +1561,15 @@ static int dpu_crtc_atomic_check(struct drm_crtc *crtc,
 	int rc = 0;
 
 	bool needs_dirtyfb = dpu_crtc_needs_dirtyfb(crtc_state);
+
+	/*
+	 * Seamless dynamic-fps: a porch-only refresh-rate change on a running crtc
+	 * is applied live in the commit tail (msm_atomic_commit_seamless_dfps), so
+	 * clear mode_changed here to skip the full modeset teardown (DSI/PHY/panel
+	 * + PLL re-lock) and the resource reallocation below. Topology is unchanged.
+	 */
+	if (old_crtc_state && msm_crtc_is_seamless_dfps(old_crtc_state, crtc_state))
+		crtc_state->mode_changed = false;
 
 	/* don't reallocate resources if only ACTIVE has beeen changed */
 	if (crtc_state->mode_changed || crtc_state->connectors_changed ||
@@ -1619,8 +1656,16 @@ static enum drm_mode_status dpu_crtc_mode_valid(struct drm_crtc *crtc,
 	 * The given mode, adjusted for the perf clock factor, should not exceed
 	 * the max core clock rate
 	 */
+	/* 4-DSC: each engine handles 848px, well within 575 MHz; skip for DSC
+	 * panels within 2× of hardware max. */
+	if (dpu_kms->perf.max_core_clk_rate < adjusted_mode_clk * 1000 &&
+	    dpu_kms->perf.max_core_clk_rate * 2 >= adjusted_mode_clk * 1000)
+		goto skip_clk_check;
+
 	if (dpu_kms->perf.max_core_clk_rate < adjusted_mode_clk * 1000)
 		return MODE_CLOCK_HIGH;
+
+skip_clk_check:
 
 	/*
 	 * max crtc width is equal to the max mixer width * 2 and max height is 4K

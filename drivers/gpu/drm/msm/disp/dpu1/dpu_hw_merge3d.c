@@ -22,7 +22,6 @@ static void dpu_hw_merge_3d_setup_3d_mode(struct dpu_hw_merge_3d *merge_3d,
 	struct dpu_hw_blk_reg_map *c;
 	u32 data;
 
-
 	c = &merge_3d->hw;
 	if (mode_3d == BLEND_3D_NONE) {
 		DPU_REG_WRITE(c, MERGE_3D_MODE, 0);

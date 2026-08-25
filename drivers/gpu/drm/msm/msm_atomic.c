@@ -13,6 +13,105 @@
 #include "msm_kms.h"
 
 /*
+ * Seamless dynamic-fps (refresh-rate) switching. When set, a commit whose only
+ * change is the crtc's timing (porches/totals, same active resolution, crtc stays
+ * on) is applied by reprogramming the INTF + DSI-host porches live, instead of a
+ * full modeset that tears down the DSI/PHY/panel and re-locks the PLL. The panel
+ * runs one constant DSI bit clock for every rate, so no clock change is needed.
+ */
+bool msm_crtc_is_seamless_dfps(const struct drm_crtc_state *old_state,
+			       const struct drm_crtc_state *new_state)
+{
+	const struct drm_display_mode *om = &old_state->adjusted_mode;
+	const struct drm_display_mode *nm = &new_state->adjusted_mode;
+
+	/* both before and after must be a live, lit crtc (not an enable/disable) */
+	if (!old_state->active || !new_state->active)
+		return false;
+	if (new_state->active_changed || new_state->connectors_changed)
+		return false;
+	/* same active resolution and scan type */
+	if (om->hdisplay != nm->hdisplay || om->vdisplay != nm->vdisplay)
+		return false;
+	if ((om->flags & DRM_MODE_FLAG_INTERLACE) !=
+	    (nm->flags & DRM_MODE_FLAG_INTERLACE))
+		return false;
+	/*
+	 * Porch-only switching keeps the DSI PLL/byte clock fixed and just
+	 * reprograms the timing-generator porches. The panel runs one constant
+	 * DSI link clock for its whole dfps set, so any same-resolution rate is
+	 * porch-able regardless of the nominal mode->clock label (DSC decouples
+	 * the uncompressed pixel throughput from the link rate).
+	 */
+	/* require an actual timing (porch) change, else there is nothing to do */
+	if (om->htotal == nm->htotal && om->vtotal == nm->vtotal &&
+	    om->hsync_start == nm->hsync_start && om->hsync_end == nm->hsync_end &&
+	    om->vsync_start == nm->vsync_start && om->vsync_end == nm->vsync_end)
+		return false;
+	return true;
+}
+
+/*
+ * Reprogram the timing-generator porches for any crtc doing a seamless dfps switch.
+ * Runs in the commit tail after modeset_disables (which skips these crtcs because
+ * dpu_crtc_atomic_check cleared their mode_changed) and before commit_planes, so the
+ * new INTF/DSI timing is in place when the next frame is flushed. No clock/PLL/PHY/
+ * panel is touched.
+ */
+static void msm_atomic_commit_seamless_dfps(struct drm_atomic_commit *state)
+{
+	struct drm_device *dev = state->dev;
+	struct msm_drm_private *priv = dev->dev_private;
+	struct msm_kms *kms = priv->kms;
+	struct drm_crtc *crtc;
+	struct drm_crtc_state *old_crtc_state, *new_crtc_state;
+	int i, d;
+
+	for_each_oldnew_crtc_in_state(state, crtc, old_crtc_state, new_crtc_state, i) {
+		const struct drm_display_mode *mode = &new_crtc_state->adjusted_mode;
+		const struct drm_display_mode *omode = &old_crtc_state->adjusted_mode;
+		bool is_bonded;
+		bool htotal_change;
+
+		if (!msm_crtc_is_seamless_dfps(old_crtc_state, new_crtc_state))
+			continue;
+
+		/*
+		 * A vertical-only (VFP) change keeps the line width (htotal) fixed,
+		 * so writing the new totals at an arbitrary point in the frame is
+		 * harmless — only the porch counter between frames moves. But when
+		 * htotal changes (e.g. 120<->144 on the XN242: compressed per-link
+		 * htotal 712<->636), the DSI-host REG_DSI_TOTAL write takes effect
+		 * IMMEDIATELY while the DPU INTF timing-gen latches at the next
+		 * vsync. If the DSI line width changes mid-active-line the DSC
+		 * decoder in the DDIC desyncs (image fades to black; the in-cell
+		 * touch, slaved to panel timing, dies). Synchronize the reprogram
+		 * to the vblank so both the INTF latch and the DSI write land in the
+		 * porch and apply coherently to the same next frame.
+		 */
+		htotal_change = omode->htotal != mode->htotal;
+		if (htotal_change)
+			drm_crtc_wait_one_vblank(crtc);
+
+		/* DPU INTF timing generator (porches) */
+		if (kms->funcs->seamless_dfps_update)
+			kms->funcs->seamless_dfps_update(kms, crtc, mode);
+
+		/* DSI host video timing (porches) on the link(s) driving this crtc */
+		is_bonded = kms->dsi[0] && kms->dsi[1];
+		for (d = 0; d < ARRAY_SIZE(kms->dsi); d++)
+			msm_dsi_seamless_timing_update(kms->dsi[d],
+						       new_crtc_state->encoder_mask,
+						       is_bonded, mode);
+
+		drm_dbg_atomic(dev, "seamless dfps: crtc-%d -> %dx%d@%d porch reprogram (htotal %u->%u%s)\n",
+			       crtc->base.id, mode->hdisplay, mode->vdisplay,
+			       drm_mode_vrefresh(mode), omode->htotal, mode->htotal,
+			       htotal_change ? ", vblank-synced" : "");
+	}
+}
+
+/*
  * Helpers to control vblanks while we flush.. basically just to ensure
  * that vblank accounting is switched on, so we get valid seqn/timestamp
  * on pageflip events (if requested)
@@ -245,6 +344,7 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
 	 * Push atomic updates down to hardware:
 	 */
 	drm_atomic_helper_commit_modeset_disables(dev, state);
+	msm_atomic_commit_seamless_dfps(state);
 	drm_atomic_helper_commit_planes(dev, state, 0);
 	drm_atomic_helper_commit_modeset_enables(dev, state);
 
