@@ -119,10 +119,13 @@ struct image_info {
  * struct mhi_link_info - BW requirement
  * @target_link_speed: Link speed as defined by TLS bits in LinkControl reg
  * @target_link_width: Link width as defined by NLW bits in LinkStatus reg
+ * @sequence_num: Sequence number echoed back to the device in the BW_REQ ack
+
  */
 struct mhi_link_info {
 	unsigned int target_link_speed;
 	unsigned int target_link_width;
+	unsigned int sequence_num;
 };
 
 /**
@@ -358,6 +361,8 @@ struct mhi_controller_config {
  * @transition_lock: Lock for protecting MHI state transition list
  * @wlock: Lock for protecting device wakeup
  * @mhi_link_info: Device bandwidth info
+ * @bw_scale_supported: Advertise host BW_SCALE support so the device emits BW_REQ
+ * @bw_scale_er_index: Event ring index the device posts BW_REQ events to
  * @st_worker: State transition worker
  * @hiprio_wq: High priority workqueue for MHI work such as state transitions
  * @state_event: State change event
@@ -437,6 +442,8 @@ struct mhi_controller {
 	spinlock_t transition_lock;
 	spinlock_t wlock;
 	struct mhi_link_info mhi_link_info;
+	bool bw_scale_supported;
+	u32 bw_scale_er_index;
 	struct work_struct st_worker;
 	struct workqueue_struct *hiprio_wq;
 	wait_queue_head_t state_event;

@@ -446,10 +446,21 @@ static bool gpio_shared_dev_is_reset_gpio(struct device *consumer,
 int gpio_shared_add_proxy_lookup(struct device *consumer, struct fwnode_handle *fwnode,
 				 const char *con_id, unsigned long lflags)
 {
-	const char *dev_id = dev_name(consumer);
+	const char *dev_id;
 	struct gpiod_lookup_table *lookup;
 	struct gpio_shared_entry *entry;
 	struct gpio_shared_ref *ref;
+
+	/* fwnode-only requests (fwnode_gpiod_get_index(), e.g. the cnss2 port's
+	 * of_get_named_gpio() shim) pass a NULL consumer device. There is no
+	 * dev_name() to key a proxy machine-lookup on, so there is nothing to
+	 * add here -- returning 0 lets the caller fall through to the platform
+	 * lookup (which finds no proxy table and yields -ENOENT to the caller)
+	 * instead of NULL-dereferencing dev_name(NULL). */
+	if (!consumer)
+		return 0;
+
+	dev_id = dev_name(consumer);
 
 	list_for_each_entry(entry, &gpio_shared_list, list) {
 		list_for_each_entry(ref, &entry->refs, list) {

@@ -60,6 +60,7 @@
 #define PARF_INT_ALL_CLEAR			0x228
 #define PARF_INT_ALL_MASK			0x22c
 #define PARF_STATUS				0x230
+#define PARF_CFG_BITS_3				0x2c4
 #define PARF_SID_OFFSET				0x234
 #define PARF_BDF_TRANSLATE_CFG			0x24c
 #define PARF_DBI_BASE_ADDR_V2			0x350
@@ -72,6 +73,87 @@
 #define PARF_DEVICE_TYPE			0x1000
 #define PARF_BDF_TO_SID_TABLE_N			0x2000
 #define PARF_BDF_TO_SID_CFG			0x2c00
+/*
+ * CESTA clkreq/l1ss-timeout routing config. Offset matches the downstream MSM
+ * PCIe driver's "qcom,pcie-clkreq-offset" for the SM8750 WCN RC (sun-pcie.dtsi
+ * pcie0@1c00000 = 0x2c48). bit0 selects where the controller takes CLKREQ from:
+ * 1 = from the CESTA hardware state-machine, 0 = from the direct clkreq gpio.
+ * bit3 enables forwarding the L1ss-sleep timeout indication to the CESTA SM.
+ */
+#define PARF_CESTA_CONFIG			0x2c48
+#define PARF_CESTA_CLKREQ_SEL			BIT(0)
+#define PARF_CESTA_L1SUB_TIMEOUT_EXT_INT_EN	BIT(3)
+
+/*
+ * CESTA l1ss-sleep timeout timer (PARF_L1SUB_AHB_CLK_MAX_TIMER). Arming it makes
+ * the controller signal "l1ss timeout" to the CESTA SM (forwarded by the bit3
+ * above) so the SM enters l1ss-sleep and grants the fw's request. Value =
+ * RESET | (l1ss_timeout_us * aux_clk_freq_MHz); downstream sun-pcie.dtsi pcie0:
+ * qcom,drv-l1ss-timeout-us=5000, qcom,aux-clk-freq=20 -> 100000 ticks.
+ */
+#define PARF_L1SUB_AHB_CLK_MAX_TIMER		0x180
+#define PARF_L1SUB_AHB_CLK_MAX_TIMER_RESET	BIT(31)
+#define CESTA_L1SS_TIMEOUT_TICKS		(5000 * 20)
+
+/*
+ * CESTA PCIe State-Manager register block ("pcie_sm" reg in sun-pcie.dtsi
+ * pcie0 = phys 0x01D07000 / 0x7000). The SM instruction memory is at offset 0;
+ * the downstream loads its instruction + branch sequence here and starts it.
+ */
+#define PCIE_SM_PHYS				0x01d07000
+#define PCIE_SM_SIZE				0x7000
+#define PCIE_SM_PWR_CTRL			0x1040
+#define PCIE_SM_PWR_CTRL_MASK			0x1048
+#define PCIE_SM_BRANCH_OFFSET			0x1000
+#define PCIE_SM_START_OFFSET			0x1090
+/* SM status regs (read-only) to confirm the SM is actually executing. */
+#define PCIE_SM_PC_VAL				0x1088
+#define PCIE_SM_PWR_CTRL_STATUS			0x1070
+#define PCIE_SM_CLKREQ_GATE_REQ_STATUS		0x109c
+
+/*
+ * pcie_crm hardware ("qcom,pcie-crm-v2" @ crm@1d01000 in sun.dtsi). The CESTA
+ * SM votes resources through this block; without it the SM's perf-ol votes go
+ * nowhere. Probe it to decide whether the full CRM port is needed: read the
+ * common region (reg[5] @0x1d05f00) version/cfg/enable + HW-DRV0 perf-ol status.
+ */
+#define PCIE_CRM_BASE_PHYS			0x01d01000	/* reg "base"   */
+#define PCIE_CRM_BASE_SIZE			0x2000
+#define PCIE_CRM_COMMON_PHYS			0x01d05f00	/* reg "common" */
+#define PCIE_CRM_COMMON_SIZE			0x100
+#define PCIE_CRM_CRMC_PHYS			0x01d03800	/* reg "crm_c"  */
+#define PCIE_CRM_CRMC_SIZE			0x2000
+#define CRM_COMMON_VERSION			0x0
+#define CRM_COMMON_CFG_PARAM_1			0x4
+#define CRM_COMMON_CFG_PARAM_2			0x8
+#define CRM_COMMON_ENABLE			0xc
+/* HW-DRV perf-ol VCD regs live in the "base" region: drv0 @0, drv1 @0x1000. */
+#define CRM_HWDRV_DISTANCE			0x1000
+#define CRM_HWDRV_PERFOL_STATUS			0x28
+#define CRM_HWDRV_PERFOL_PWR_IDX_STATUS		0x37c
+/* crmc aggregated/current perf-ol for the PCIe resource. */
+#define CRM_CRMC_AGGR_PERF_OL			0x4
+#define CRM_CRMC_CURR_PERF_OL			0x24
+
+/*
+ * HW-DRV perf-ol VCD write layout (in the "base" region, drv0 @ offset 0).
+ * crm_get_offset() = PWR_STn + ch*PWR_ST_CHN_DISTANCE + resource*RES_DISTANCE.
+ * Mirrors crm_write_pwr_states()/crm_flush_cache() for HW DRV0, resource 0.
+ */
+#define CRM_PERFOL_PWR_ST0			0x0	/* PWR_ST0; ST1..4 stride 4 */
+#define CRM_PERFOL_PWR_ST_STRIDE		0x4
+#define CRM_PERFOL_CHN_DISTANCE			0x14	/* PWR_ST_CHN_DISTANCE */
+#define CRM_PERFOL_RES_DISTANCE			0x2c	/* DRV_RESOURCE_DISTANCE */
+#define CRM_NUM_PERFOL_RES			2	/* perfol_vcd=2 (CFG1) */
+#define CRM_NUM_PWR_STATES			5	/* pwrst/ch=5 (CFG1) */
+#define CRM_CHN_BUSY				0x370
+#define CRM_CHN_UPDATE				0x374
+/* perf-ol vote levels (enum msm_pcie_cesta_perf_idx). */
+#define CRM_PERF_LVL_D3COLD			0
+#define CRM_PERF_LVL_L1SS			1
+#define CRM_PERF_LVL_GEN1			2
+#define CRM_PERF_LVL_GEN2			3
+#define CRM_PERF_LVL_GEN3			4
 
 /* ELBI registers */
 #define ELBI_SYS_CTRL				0x04
@@ -308,11 +390,48 @@ struct qcom_pcie {
 	struct gpio_desc *reset;
 	int global_irq;
 	bool use_pm_opp;
+	bool wcn_clk_hwgated;	/* D3: SW vote dropped on HWCG AXI clocks */
+	/* v472: WCN L1SS programming (msm_pcie_config_l1ss faithful). Values from the
+	 * Android pcie0 DT (qcom,l1-2-th-value=0x96 / qcom,l1-2-th-scale=2); applied to
+	 * EP+RC when the WCN endpoint binds (bus notifier) since pcie-qcom has no
+	 * post-enumeration hook. */
+	struct notifier_block wcn_l1ss_nb;
+	u32 wcn_l1_2_th_value;
+	u32 wcn_l1_2_th_scale;
 };
 
 #define to_qcom_pcie(x)		dev_get_drvdata((x)->dev)
 static int qcom_pcie_reset_root_port(struct pci_host_bridge *bridge,
 				  struct pci_dev *pdev);
+
+/*
+ * erhai WCN7880 cal->mission faithful re-link. cnss's cnss_set_pci_link() is
+ * stubbed on this mainline port (pci_qcom.o excluded), so its own cal->mission
+ * suspend_pci_link(DOWN)/resume_pci_link(UP) recovery never actually drops and
+ * cold-retrains the WCN link -> the chip stays warm in MISSION EE, WLFW never
+ * re-arrives. Export a real link toggle that cnss's stub calls.
+ *
+ * A bare PERST deassert does NOT retrain a power-cycled EP (boot#38/#39: LTSSM
+ * stuck in PRE_DETECT_QUIET, -110) because the RC PHY/controller are left in a
+ * stale state. The only path proven to train this link is the full host
+ * bring-up. So reuse the DWC system-PM machinery:
+ *   DOWN = dw_pcie_stop_link + pp->ops->deinit (qcom_pcie_host_deinit: PERST
+ *          assert, pci_pwrctrl powers the WCN OFF via pwrseq/WLAN_EN, PHY off,
+ *          clocks off) + mark pci->suspended.
+ *   UP   = dw_pcie_resume_noirq (pp->ops->init = qcom_pcie_host_init re-powers
+ *          the WCN via pwrctrl/pwrseq, re-inits clocks+PHY, deasserts PERST;
+ *          then setup_rc + start_link + wait_for_link + post_init).
+ * resume_noirq is a no-op unless we set pci->suspended, so a stray UP without a
+ * matching DOWN can't disturb a live link. pwrctrl owns WLAN_EN throughout.
+ * Gated for A/B.
+ */
+static struct qcom_pcie *qcom_pcie_wcn_erhai;
+static bool qcom_pcie_wcn_relink = true;
+module_param(qcom_pcie_wcn_relink, bool, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_relink,
+		"erhai: cnss_set_pci_link cold-cycles the WCN at cal->mission (default on)");
+static unsigned int qcom_pcie_wcn_relink_settle_ms = 100;
+module_param(qcom_pcie_wcn_relink_settle_ms, uint, 0644);
 
 static void __qcom_pcie_perst_assert(struct qcom_pcie *pcie, bool assert)
 {
@@ -339,6 +458,260 @@ static void qcom_pcie_perst_deassert(struct qcom_pcie *pcie)
 	msleep(PCIE_T_PVPERL_MS);
 	__qcom_pcie_perst_assert(pcie, false);
 }
+
+static struct pci_dev *qcom_pcie_wcn_find_rootport(struct qcom_pcie *pcie);
+static struct pci_dev *qcom_pcie_wcn_find_ep(struct qcom_pcie *pcie);
+
+/*
+ * cnss calls set_pci_link(DOWN) then, some time later, set_pci_link(UP), and
+ * between the two it runs its own shutdown bookkeeping + MHI teardown that
+ * touches the EP/RC. If we drop the link in DOWN, those accesses hit a
+ * clock-gated RC -> NoC/SError (boot#44 crashed even with the portdrv IRQ
+ * masked -- the fault is the DOWN *window*, not just the teardown instant;
+ * mode 3 only survived because the whole cycle was one atomic call with
+ * nothing else touching the device).
+ *
+ * So DON'T expose a down link to cnss at all: DOWN just records intent and
+ * leaves the link electrically UP; the entire power-cycle (teardown + chip
+ * WLAN_EN cold-cycle via pwrctrl + link retrain) is done ATOMICALLY inside the
+ * following UP, exactly reproducing the mode-3 conditions that ran clean. The
+ * chip still genuinely power-cycles (fresh SBL->AMSS) -- just deferred to UP.
+ */
+static bool qcom_pcie_wcn_cycle_pending;
+
+int qcom_pcie_wcn_set_link(bool up)
+{
+	struct qcom_pcie *pcie = qcom_pcie_wcn_erhai;
+	struct pci_dev *rp, *ep = NULL;
+	struct dw_pcie *pci;
+	int rp_irq = 0, ret;
+
+	if (!qcom_pcie_wcn_relink)	/* A/B: behave like the old cnss stub */
+		return 0;
+
+	if (!pcie) {
+		pr_warn("erhai: qcom_pcie_wcn_set_link: WCN pcie not registered\n");
+		return -ENODEV;
+	}
+	pci = pcie->pci;
+
+	if (!up) {
+		/* Defer: leave the link up while cnss does its bookkeeping. */
+		qcom_pcie_wcn_cycle_pending = true;
+		dev_info(pci->dev, "erhai-cc: 0 WCN DOWN deferred (atomic cold-cycle happens at UP)\n");
+		return 0;
+	}
+
+	/* UP with no pending DOWN => nothing to do, don't disturb the link. */
+	if (!qcom_pcie_wcn_cycle_pending) {
+		dev_info(pci->dev, "erhai: WCN UP (no pending cycle, link_up=%d)\n",
+			 dw_pcie_link_up(pci));
+		return 0;
+	}
+	qcom_pcie_wcn_cycle_pending = false;
+
+	/*
+	 * Atomic cold-cycle. Mask the root-port PME/AER/bwctrl IRQ so a portdrv
+	 * service can't read the clock-gated RC during the ~200ms the link is
+	 * down (boot#43 mode-3 root cause), then teardown + full re-init.
+	 */
+	rp = qcom_pcie_wcn_find_rootport(pcie);
+	ep = qcom_pcie_wcn_find_ep(pcie);
+	if (rp && rp->irq) {
+		rp_irq = rp->irq;
+		disable_irq(rp_irq);
+	}
+
+	/*
+	 * Root cause of the ~50% post-cal SoC reset (breadcrumb-3 crash boot): after
+	 * deinit() cuts PHY+clocks and drops the link, the WCN RC/EP config block is
+	 * unclocked for the whole teardown+settle+retrain window. A CONCURRENT config
+	 * access from another context -- udev/NetworkManager probing the just-renamed
+	 * wlp1s0 EP, or a portdrv (PME/AER) config read -- hits the dead block and
+	 * raises an unrecoverable external abort -> SoC reset. Masking rp_irq only
+	 * stops the RC's own IRQ handler, not these. pci_cfg_access_lock() is the
+	 * primitive pci_reset_function() uses for exactly this: concurrent
+	 * pci_{read,write}_config on the locked dev block (pci_wait_cfg) until we
+	 * unlock, instead of touching the unclocked device. Lock both RC and EP; the
+	 * cold-cycle's own DBI accesses use readl/writel (not the config API) so they
+	 * are unaffected and cannot deadlock.
+	 */
+	if (rp)
+		pci_cfg_access_lock(rp);
+	if (ep)
+		pci_cfg_access_lock(ep);
+
+	/*
+	 * erhai-cc breadcrumbs: localize the faulting sub-step if it still resets
+	 * (DRAM wiped by Mu -> only fsync'd journald lines survive). Pair with the
+	 * fsync-per-line /dev/kmsg logger on the device.
+	 */
+	dev_info(pci->dev, "erhai-cc: 1 rp_irq=%d masked, cfg locked (rp=%d ep=%d), stop_link...\n",
+		 rp_irq, !!rp, !!ep);
+	dw_pcie_stop_link(pci);
+	dev_info(pci->dev, "erhai-cc: 2 stop_link done, deinit (PERST+WLAN_EN off+PHY/clk off)...\n");
+	if (pci->pp.ops->deinit)
+		pci->pp.ops->deinit(&pci->pp);	/* PERST + WLAN_EN off + PHY/clk off */
+	pci->suspended = true;
+	dev_info(pci->dev, "erhai-cc: 3 deinit done, settle %ums...\n",
+		 qcom_pcie_wcn_relink_settle_ms);
+	if (qcom_pcie_wcn_relink_settle_ms)
+		msleep(qcom_pcie_wcn_relink_settle_ms);	/* chip powered off; rails drain */
+
+	dev_info(pci->dev, "erhai-cc: 4 resume_noirq (WLAN_EN cold-cycle + clk/PHY + retrain)...\n");
+	ret = dw_pcie_resume_noirq(pci);	/* WLAN_EN cold-cycle + clk/PHY + retrain */
+	dev_info(pci->dev, "erhai-cc: 5 resume_noirq returned %d\n", ret);
+
+	if (rp_irq)
+		enable_irq(rp_irq);
+	if (ep) {
+		pci_cfg_access_unlock(ep);
+		pci_dev_put(ep);
+	}
+	if (rp) {
+		pci_cfg_access_unlock(rp);
+		pci_dev_put(rp);
+	}
+
+	dev_info(pci->dev, "erhai: WCN atomic cold-cycle done (portdrv irq %d, resume ret=%d link_up=%d)\n",
+		 rp_irq, ret, dw_pcie_link_up(pci));
+
+	/*
+	 * dw_pcie_resume_noirq() can return 0 on this marginal WCN link even when
+	 * the LTSSM never reached L0 (retrain trained to nowhere). cnss's caller
+	 * (cnss_resume_pci_link) treats ret==0 as success and immediately pokes
+	 * the EP config space (set_power_state(D0) + RESTORE_PCI_CONFIG_SPACE +
+	 * pci_enable_device). Those accesses to a dead link raise an unrecoverable
+	 * external abort / AER-uncorrectable -> full SoC reset (the ~50% post-cal
+	 * reboot). Gate on link_up so a bad retrain becomes a clean cnss abort
+	 * (-EAGAIN, mission retries) instead of a hard reboot.
+	 */
+	if (!ret && !dw_pcie_link_up(pci)) {
+		dev_err(pci->dev, "erhai: WCN retrain reported OK but link is DOWN -> fail (avoid dead-EP SoC reset)\n");
+		ret = -EIO;
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qcom_pcie_wcn_set_link);
+
+/*
+ * Standalone link DOWN->UP tester, driven with cnss NOT loaded:
+ *   echo 1 > .../qcom_pcie_wcn_relink_test   bare RC teardown/re-init
+ *   echo 2 > .../qcom_pcie_wcn_relink_test   same, but first put the WCN EP
+ *      (01:00.0) into cnss's exact pre-DOWN state (save cfg + clear master +
+ *      disable + D3hot) and restore it after (D0 + enable + restore + master).
+ *      Mode 2 reproduces the boot#40 crash condition (cnss quiesces the EP to
+ *      D3hot before calling set_pci_link(DOWN)) WITHOUT cnss/MHI, so a fault
+ *      isolates whether the D3hot-EP + portdrv(PME/AER/bwctrl on IRQ 228)
+ *      interaction is what tears down.
+ * Every micro-step is logged BEFORE it runs so the last line to reach disk
+ * localizes a hard fault. Reads that touch the RC block are only done while
+ * its clocks are known on.
+ */
+static struct pci_dev *qcom_pcie_wcn_find_ep(struct qcom_pcie *pcie)
+{
+	struct pci_host_bridge *bridge = pcie->pci->pp.bridge;
+	struct pci_dev *pdev = NULL;
+
+	if (!bridge || !bridge->bus)
+		return NULL;
+	/* WCN EP is the single endpoint on bus 01 under this RC. */
+	for_each_pci_dev(pdev) {
+		if (pci_domain_nr(pdev->bus) == pci_domain_nr(bridge->bus) &&
+		    pci_pcie_type(pdev) == PCI_EXP_TYPE_ENDPOINT)
+			return pdev;
+	}
+	return NULL;
+}
+
+static struct pci_dev *qcom_pcie_wcn_find_rootport(struct qcom_pcie *pcie)
+{
+	struct pci_host_bridge *bridge = pcie->pci->pp.bridge;
+
+	if (!bridge || !bridge->bus)
+		return NULL;
+	/* Root port = 00:00.0 on the RC's root bus. */
+	return pci_get_slot(bridge->bus, PCI_DEVFN(0, 0));
+}
+
+static int qcom_pcie_wcn_relink_test_set(const char *val,
+					 const struct kernel_param *kp)
+{
+	struct qcom_pcie *pcie = qcom_pcie_wcn_erhai;
+	struct pci_dev *ep = NULL, *rp = NULL;
+	struct dw_pcie *pci;
+	int mode = 1, ret;
+
+	if (!pcie) {
+		pr_warn("erhai relink_test: WCN pcie not registered\n");
+		return -ENODEV;
+	}
+	pci = pcie->pci;
+	if (val && val[0] == '2')
+		mode = 2;
+	else if (val && val[0] == '3')
+		mode = 3;
+
+	if (mode >= 2) {
+		ep = qcom_pcie_wcn_find_ep(pcie);
+		dev_info(pci->dev, "erhai relink_test[%d]: EP=%s -- quiescing to cnss pre-DOWN state (D3hot)\n",
+			 mode, ep ? pci_name(ep) : "NONE");
+		if (ep) {
+			pci_clear_master(ep);
+			pci_save_state(ep);
+			pci_disable_device(ep);
+			pci_set_power_state(ep, PCI_D3hot);
+		}
+	}
+	if (mode == 3) {
+		rp = qcom_pcie_wcn_find_rootport(pcie);
+		if (rp && rp->irq) {
+			dev_info(pci->dev, "erhai relink_test[3]: masking root-port portdrv IRQ %u (PME/AER/bwctrl) around the cycle\n",
+				 rp->irq);
+			disable_irq(rp->irq);
+		} else {
+			dev_info(pci->dev, "erhai relink_test[3]: root-port irq NOT found (rp=%s)\n",
+				 rp ? pci_name(rp) : "NONE");
+		}
+	}
+
+	dev_info(pci->dev, "erhai relink_test[%d]: STEP1 pre-down link_up=%d\n",
+		 mode, dw_pcie_link_up(pci));
+	dev_info(pci->dev, "erhai relink_test[%d]: STEP2 dw_pcie_stop_link\n", mode);
+	dw_pcie_stop_link(pci);
+	dev_info(pci->dev, "erhai relink_test[%d]: STEP3 calling ops->deinit (PHY/clocks/pwrctrl OFF) -- fault here => teardown unsafe\n", mode);
+	if (pci->pp.ops->deinit)
+		pci->pp.ops->deinit(&pci->pp);
+	pci->suspended = true;
+	dev_info(pci->dev, "erhai relink_test[%d]: STEP4 deinit returned OK; down complete, sleep 200ms\n", mode);
+	msleep(200);
+	dev_info(pci->dev, "erhai relink_test[%d]: STEP5 calling dw_pcie_resume_noirq\n", mode);
+	ret = dw_pcie_resume_noirq(pci);
+	dev_info(pci->dev, "erhai relink_test[%d]: STEP6 resume ret=%d link_up=%d\n",
+		 mode, ret, dw_pcie_link_up(pci));
+
+	if (mode == 3 && rp && rp->irq) {
+		dev_info(pci->dev, "erhai relink_test[3]: unmasking root-port IRQ %u\n", rp->irq);
+		enable_irq(rp->irq);
+	}
+	if (rp)
+		pci_dev_put(rp);
+	if (mode >= 2 && ep) {
+		dev_info(pci->dev, "erhai relink_test[%d]: STEP7 restoring EP (D0 + restore + enable + master)\n", mode);
+		pci_set_power_state(ep, PCI_D0);
+		pci_restore_state(ep);
+		if (pci_enable_device(ep) == 0)
+			pci_set_master(ep);
+		dev_info(pci->dev, "erhai relink_test[%d]: STEP8 EP restored\n", mode);
+	}
+	return 0;
+}
+
+static const struct kernel_param_ops qcom_pcie_wcn_relink_test_ops = {
+	.set = qcom_pcie_wcn_relink_test_set,
+};
+module_param_cb(qcom_pcie_wcn_relink_test, &qcom_pcie_wcn_relink_test_ops,
+		NULL, 0644);
 
 static int qcom_pcie_start_link(struct dw_pcie *pci)
 {
@@ -1020,6 +1393,598 @@ static int qcom_pcie_get_resources_2_7_0(struct qcom_pcie *pcie)
 	return 0;
 }
 
+/*
+ * WCN7880 cold-boot-cal RDDM root-cause (2026-06-24, GATE-1 source diff vs the
+ * downstream OnePlus SM8750 pci-msm.c + sun-pcie.dtsi): the downstream driver
+ * runs the WCN PCIe RC under CESTA ("qcom,drv-name = cesta", a "pcie_sm" reg
+ * region @0x01D07000, a *_PCIE_CRM_HW_* interconnect). The CESTA hardware
+ * state-machine answers the WCN amss cold-boot-cal phy_off l1ss-sleep / CLKREQ
+ * handshake (pcie_core_ctrl_l1ss_sleep_mode). Mainline pcie-qcom has no CESTA,
+ * so when the cal fw requests PCIe l1ss-sleep nothing answers ("l1ss_sleep
+ * unvoted by client") -> PCSS watchdog -> NoC error ~270ms into cal.
+ *
+ * Hypothesis-#1 (clear CLKREQ_SEL so CLKREQ uses the direct gpio) was REFUTED on
+ * v442: PARF_CESTA_CONFIG reset = 0x80000000, CLKREQ_SEL already 0, cal RDDM
+ * byte-identical. So routing alone is not enough -- the CESTA state-machine has
+ * to actually run.
+ *
+ * v443 SM-only (load SM + route CLKREQ, skip CRM votes) was REFUTED: cal RDDM
+ * byte-identical. v444 diagnostic boot then showed WHY: the pcie_crm HW block is
+ * ALIVE (CRM v2.0 ENABLE=1, chans=2 hwdrvs=2 perfol_vcd=2 pwrst/ch=5) but its
+ * PCIe-resource CURR_PERF_OL = 0 (D3COLD) -- the SM runs (PC_VAL!=0) yet has no
+ * perf-ol vote to act on, so it can never drive the link's l1ss state. The fix is
+ * to push the perf-ol vote the way the downstream crm_write_pwr_states() does.
+ *
+ * Theory (now fully coherent): the fw cold-boot-cal phy_off path deasserts CLKREQ
+ * to request l1ss-sleep and polls for the host "client" to grant it. Only when the
+ * host CESTA is voted to DRV_STATE = {POWER_STATE_0=L1SS, POWER_STATE_1=GEN3} does
+ * the SM grant l1ss on CLKREQ-deassert. With no vote (or D0={GEN3,GEN3}) the host
+ * pins the link up, never grants l1ss -> the fw polls to its fixed PCSS watchdog
+ * (~330ms, host-invariant -- matching every refuted generic ASPM/L1ss/retrain
+ * lever). Gated qcom_pcie_wcn_cesta (default OFF); recover a wedged boot via the
+ * previous EFI at rEFInd.
+ *
+ * DEFAULT OFF (2026-06-25): the full CESTA/CRM machinery was faithfully
+ * replicated (SM runs, CRM perf-ol DRV vote verified landing CURR_PERF_OL->GEN3)
+ * and REFUTED as a cal-RDDM fix (ledger C3) -- the host PCIe link-power plane is
+ * exonerated. Worse, its init poking destabilises the WCN EP link-training: the
+ * l1ss-timeout/SM gating intermittently leaves the EP un-enumerated ("Device not
+ * found", no ath12k, no cal). Since it neither fixes the bug nor is load-bearing,
+ * keep it OFF so the WCN PCIe reverts to the reliable mainline bring-up. Flip
+ * pcie_qcom.qcom_pcie_wcn_cesta=1 only to re-run the (refuted) CESTA A/B.
+ */
+/*
+ * v458: default-ON as the HW clock-manager that makes lever D3 (HW-gated PCIe AXI
+ * clocks, qcom_pcie_wcn_clk_hwgate) SAFE. D3 alone (v457) dropped the SW clock
+ * vote and SoC-reset during WCN link bring-up: with the AXI clocks HW-gated and
+ * nothing managing the clock requests, the DBI/link access hung the NoC. Android
+ * gates those clocks AND runs the RC under CESTA -- the SM grants the clock on
+ * CLKREQ#, so accesses don't hang. CESTA alone (C3) was refuted as a cal fix and
+ * D3 alone breaks boot; this is the Android-faithful COMBINATION (full-replay).
+ * A/B via pcie_qcom.qcom_pcie_wcn_cesta=0 (also disable D3 then).
+ */
+static bool qcom_pcie_wcn_cesta = true;
+module_param(qcom_pcie_wcn_cesta, bool, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_cesta,
+	"SM8750 WCN PCIe: load+start the CESTA pcie_sm SM + CRM perf-ol vote + route CLKREQ/l1ss to it (HW clock-manager that makes D3 gated-AXI-clocks safe; default 1)");
+
+/*
+ * CESTA usage scenario to vote: 1 = DRV {L1SS,GEN3} (CESTA drops to L1SS perf on
+ * CLKREQ deassert); 0 = D0 {GEN3,GEN3} (CLKREQ deassert drops NOTHING; link
+ * resources pinned while host active).
+ *
+ * DEFAULT FLIPPED 1->0 (lever #23, 2026-07-08 Android PARF/source ground truth):
+ * downstream msm_pcie keeps the ACTIVE host in the D0 map -- cesta_map[D0] =
+ * {MAX,MAX} at boot, and the BW_REQ Gen1 scale does map_save(GEN1) +
+ * map_apply(D0) = {GEN1,GEN1}. The DRV map {L1SS,GEN1} (+ l1ss-to timer + CLKREQ
+ * wake-GPIO) is applied ONLY at cnss DRV suspend (host hands the link away).
+ * Our old DRV{L1SS,*} vote during active mission let the CESTA SM power-drop the
+ * link the instant the fw deasserts CLKREQ at its dev-SOL-LOW l1ss_sleep entry
+ * (mission, fw_ready#2+~250ms) -- mid-L1.2-handshake, under live MHI traffic ->
+ * fw "polling for L1ss failed" -> PCSS watchdog -> NOC 437:0x8 RDDM. On Android
+ * the same fw CLKREQ deassert hits PS0=GEN1 (no drop) and mission lives.
+ * Settable via cmdline pcie_qcom.qcom_pcie_wcn_cesta_state= for A/B.
+ */
+static int qcom_pcie_wcn_cesta_state;
+module_param(qcom_pcie_wcn_cesta_state, int, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_cesta_state,
+	"SM8750 WCN PCIe CESTA perf-ol vote: 0=D0{GEN3,GEN3} (default, Android-faithful active-host map), 1=DRV{L1SS,GEN3}");
+
+/*
+ * Arm the CESTA l1ss-timeout timer at .init (default OFF). At init it fires
+ * during EP link-training idle and breaks enumeration (v446); ath12k arms it at
+ * cal-start instead. Kept gated for A/B via pcie_qcom.qcom_pcie_wcn_cesta_l1ss_to=1.
+ */
+static bool qcom_pcie_wcn_cesta_l1ss_to;
+module_param(qcom_pcie_wcn_cesta_l1ss_to, bool, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_cesta_l1ss_to,
+	"SM8750 WCN PCIe: arm the CESTA l1ss-timeout timer at init (default 0; breaks EP enum)");
+
+/* CESTA SM instruction + branch sequence, from the downstream SM8750
+ * sun-pcie.dtsi pcie0 (qcom,pcie-sm-seq / qcom,pcie-sm-branch-seq). */
+static const u32 qcom_pcie_wcn_sm_seq[] = {
+	0x1c018081, 0x70074002, 0x50028000, 0x28007003, 0x80804002,
+	0x70021c01, 0x18001802, 0x70005000, 0x10004000, 0x80814002,
+	0x18001c01, 0x1c018080, 0x00000100,
+};
+static const u32 qcom_pcie_wcn_sm_branch[] = {
+	0x4, 0x1c, 0x24, 0x2c, 0x0, 0x0, 0x0,
+};
+
+/*
+ * Load + start the CESTA state-machine for the SM8750 WCN RC and route the
+ * CLKREQ + L1ss-sleep timeout to it. Called from .init before link training,
+ * matching the downstream order (cesta_init at probe, before enable_link).
+ */
+/*
+ * Read-only probe of the pcie_crm HW block. Logs version/config/enable and the
+ * HW-DRV0 perf-ol status so we can tell whether the CRM is alive and what the
+ * CESTA SM's votes would land on. No writes — purely diagnostic for now.
+ */
+static void qcom_pcie_wcn_crm_probe(struct qcom_pcie *pcie)
+{
+	struct device *dev = pcie->pci->dev;
+	void __iomem *common, *base, *crmc;
+	u32 cfg1, cfg2, en, ver;
+
+	common = ioremap(PCIE_CRM_COMMON_PHYS, PCIE_CRM_COMMON_SIZE);
+	if (!common) {
+		dev_warn(dev, "wcn7880: CRM: ioremap(common) failed\n");
+		return;
+	}
+	ver  = readl(common + CRM_COMMON_VERSION);
+	cfg1 = readl(common + CRM_COMMON_CFG_PARAM_1);
+	cfg2 = readl(common + CRM_COMMON_CFG_PARAM_2);
+	en   = readl(common + CRM_COMMON_ENABLE);
+	dev_info(dev,
+		 "wcn7880: CRM v%u.%u ENABLE=0x%08x CFG1=0x%08x (chans=%u hwdrvs=%u swdrvs=%u perfol_vcd=%u pwrst/ch=%u) CFG2=0x%08x\n",
+		 (ver >> 16) & 0xff, (ver >> 8) & 0xff, en, cfg1,
+		 (cfg1 >> 4) & 0xf, (cfg1 >> 16) & 0xf, (cfg1 >> 20) & 0xf,
+		 (cfg1 >> 8) & 0xf, cfg1 & 0xf, cfg2);
+	iounmap(common);
+
+	/* HW-DRV0 perf-ol status (resource 0) lives in the "base" region. */
+	base = ioremap(PCIE_CRM_BASE_PHYS, PCIE_CRM_BASE_SIZE);
+	if (base) {
+		dev_info(dev,
+			 "wcn7880: CRM HWDRV0 perfol STATUS=0x%08x PWR_IDX_STATUS=0x%08x\n",
+			 readl(base + CRM_HWDRV_PERFOL_STATUS),
+			 readl(base + CRM_HWDRV_PERFOL_PWR_IDX_STATUS));
+		iounmap(base);
+	}
+
+	/* crmc aggregated/current perf-ol for the PCIe resource. */
+	crmc = ioremap(PCIE_CRM_CRMC_PHYS, PCIE_CRM_CRMC_SIZE);
+	if (crmc) {
+		dev_info(dev,
+			 "wcn7880: CRM crmc AGGR_PERF_OL=0x%08x CURR_PERF_OL=0x%08x\n",
+			 readl(crmc + CRM_CRMC_AGGR_PERF_OL),
+			 readl(crmc + CRM_CRMC_CURR_PERF_OL));
+		iounmap(crmc);
+	}
+}
+
+/*
+ * Push the perf-ol vote for the WCN PCIe resource into the CRM HW DRV0, the way
+ * the downstream crm_write_pwr_states()/crm_flush_cache() does: write the per-
+ * power-state perf levels into the free channel, then switch to it. This gives
+ * the CESTA SM a valid l1ss/Gen3 mapping so it can grant the fw's l1ss-sleep.
+ *
+ *   crm_get_offset(perf_ol, ch, res) = PWR_STn + ch*0x14 + res*0x2c  (drv0 @ 0)
+ *   resource 0 = the WCN PCIe link (rc_idx 0). DRV vote = {L1SS, GEN3}.
+ */
+/*
+ * Low-level CRM perf-ol writer: write the per-power-state perf levels {st0, st1}
+ * into the free HW-DRV0 channel and switch to it (== crm_write_pwr_states +
+ * crm_switch_channel for drv0/resource0). @dev may be NULL (BW_REQ re-vote path
+ * has no qcom_pcie handle); falls back to pr_*.
+ */
+static void __qcom_pcie_wcn_crm_write(struct device *dev, const char *tag,
+				      u32 st0, u32 st1)
+{
+	void __iomem *base, *crmc;
+	u32 map[CRM_NUM_PWR_STATES] = { 0 };
+	u32 chn_update, ch, busy = 0;
+	int res, j, retry = 100;
+
+	map[0] = st0;
+	map[1] = st1;
+
+	base = ioremap(PCIE_CRM_BASE_PHYS, PCIE_CRM_BASE_SIZE);
+	if (!base) {
+		if (dev)
+			dev_warn(dev, "wcn7880: CRM vote: ioremap(base) failed\n");
+		else
+			pr_warn("wcn7880: CRM vote: ioremap(base) failed\n");
+		return;
+	}
+
+	/* crm_get_channel(CHN_FREE): pick the unused channel (drv0 chn regs @ base). */
+	chn_update = readl(base + CRM_CHN_UPDATE);
+	if (!chn_update)
+		ch = 0;
+	else if (chn_update & BIT(0))		/* CH0 busy -> use CH1 */
+		ch = 1;
+	else					/* CH1 busy (or other) -> use CH0 */
+		ch = 0;
+
+	/* crm_flush_cache(): perf-ol VCD, resources 0..N, pwr states 0..4. */
+	for (res = 0; res < CRM_NUM_PERFOL_RES; res++) {
+		for (j = 0; j < CRM_NUM_PWR_STATES; j++) {
+			u32 data = (res == 0) ? map[j] : 0;
+			u32 off = CRM_PERFOL_PWR_ST0 + j * CRM_PERFOL_PWR_ST_STRIDE +
+				  ch * CRM_PERFOL_CHN_DISTANCE +
+				  res * CRM_PERFOL_RES_DISTANCE;
+
+			writel(data, base + off);
+		}
+	}
+
+	/* crm_switch_channel(): request the new channel, poll CHN_BUSY. */
+	writel(BIT(ch), base + CRM_CHN_UPDATE);
+	do {
+		busy = readl(base + CRM_CHN_BUSY) & BIT(ch);
+		udelay(100);
+	} while (busy != BIT(ch) && --retry);
+
+	if (dev)
+		dev_info(dev,
+			 "wcn7880: CRM perf-ol vote applied: %s ch=%u ST0=%u ST1=%u switch_retry=%d busy=0x%x\n",
+			 tag, ch, map[0], map[1], retry, busy);
+	else
+		pr_info("wcn7880: CRM perf-ol vote applied: %s ch=%u ST0=%u ST1=%u switch_retry=%d busy=0x%x\n",
+			tag, ch, map[0], map[1], retry, busy);
+	iounmap(base);
+
+	/* Verify the vote landed: crmc CURR_PERF_OL for resource 0 should track it. */
+	crmc = ioremap(PCIE_CRM_CRMC_PHYS, PCIE_CRM_CRMC_SIZE);
+	if (crmc) {
+		if (dev)
+			dev_info(dev,
+				 "wcn7880: CRM after vote: AGGR_PERF_OL=0x%08x CURR_PERF_OL=0x%08x\n",
+				 readl(crmc + CRM_CRMC_AGGR_PERF_OL),
+				 readl(crmc + CRM_CRMC_CURR_PERF_OL));
+		else
+			pr_info("wcn7880: CRM after vote: AGGR_PERF_OL=0x%08x CURR_PERF_OL=0x%08x\n",
+				readl(crmc + CRM_CRMC_AGGR_PERF_OL),
+				readl(crmc + CRM_CRMC_CURR_PERF_OL));
+		iounmap(crmc);
+	}
+}
+
+static void qcom_pcie_wcn_crm_vote(struct qcom_pcie *pcie)
+{
+	struct device *dev = pcie->pci->dev;
+
+	if (qcom_pcie_wcn_cesta_state)		/* DRV {L1SS, GEN3} */
+		__qcom_pcie_wcn_crm_write(dev, "DRV{L1SS,GEN3}",
+					  CRM_PERF_LVL_L1SS, CRM_PERF_LVL_GEN3);
+	else					/* D0  {GEN3, GEN3} */
+		__qcom_pcie_wcn_crm_write(dev, "D0{GEN3,GEN3}",
+					  CRM_PERF_LVL_GEN3, CRM_PERF_LVL_GEN3);
+}
+
+/*
+ * BW_REQ re-vote: when the WCN cold-boot-cal firmware emits its MHI BW_REQ asking
+ * for Gen1 (the last host<->fw exchange before the phy_off/l1ss-sleep RDDM), the
+ * downstream host does NOT just ack it -- msm_pcie_set_link_bandwidth() ->
+ * msm_pcie_scale_link_bandwidth() -> cesta_map_save(GEN1) + cesta_map_apply(D0)
+ * re-votes the CRM perf-ol for the active/DRV power states DOWN from GEN3 to GEN1.
+ * Mainline pcie-qcom holds the static GEN3 vote (qcom_pcie_wcn_crm_vote) and never
+ * re-scales, so the CESTA SM services the fw's commanded l1ss-sleep at the GEN3
+ * perf level while the fw expects Gen1 -> the fw's pcie_core_check_pcie_clock_on
+ * poll fails -> NoC -> RDDM. Replicate the GEN1 re-vote here; ath12k's bw_scale
+ * work calls it on BW_REQ. WCN7880-specific (fixed CRM phys; rc_idx 0).
+ */
+void qcom_pcie_wcn_crm_revote_gen1(void)
+{
+	if (!qcom_pcie_wcn_cesta)
+		return;
+	/* Follow the boot vote's scenario (lever #23): Android's BW_REQ path is
+	 * map_save(GEN1) + map_apply(D0) = {GEN1,GEN1} -- PS0 stays full-on so the
+	 * fw's later CLKREQ deassert (mission l1ss_sleep) drops nothing. The old
+	 * unconditional DRV{L1SS,GEN1} re-vote is kept for the cesta_state=1 A/B.
+	 */
+	if (qcom_pcie_wcn_cesta_state)
+		__qcom_pcie_wcn_crm_write(NULL, "BW_REQ DRV{L1SS,GEN1}",
+					  CRM_PERF_LVL_L1SS, CRM_PERF_LVL_GEN1);
+	else
+		__qcom_pcie_wcn_crm_write(NULL, "BW_REQ D0{GEN1,GEN1}",
+					  CRM_PERF_LVL_GEN1, CRM_PERF_LVL_GEN1);
+}
+EXPORT_SYMBOL(qcom_pcie_wcn_crm_revote_gen1);
+
+static void qcom_pcie_wcn_cesta_enable(struct qcom_pcie *pcie)
+{
+	struct device *dev = pcie->pci->dev;
+	void __iomem *sm;
+	u32 v;
+	int i;
+
+	if (!qcom_pcie_wcn_cesta ||
+	    !of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750"))
+		return;
+
+	sm = ioremap(PCIE_SM_PHYS, PCIE_SM_SIZE);
+	if (!sm) {
+		dev_warn(dev, "wcn7880: CESTA: ioremap(pcie_sm) failed\n");
+		return;
+	}
+
+	/* Clear the PWR_CTRL / PWR_CTRL_MASK overrides (rc_idx 0). */
+	writel(0, sm + PCIE_SM_PWR_CTRL);
+	writel(0, sm + PCIE_SM_PWR_CTRL_MASK);
+
+	/* Load the SM instruction sequence (base offset 0) and branch sequence. */
+	for (i = 0; i < ARRAY_SIZE(qcom_pcie_wcn_sm_seq); i++)
+		writel(qcom_pcie_wcn_sm_seq[i], sm + 4 * i);
+	for (i = 0; i < ARRAY_SIZE(qcom_pcie_wcn_sm_branch); i++)
+		writel(qcom_pcie_wcn_sm_branch[i],
+		       sm + PCIE_SM_BRANCH_OFFSET + 4 * i);
+
+	/* Start the state-machine. */
+	v = readl(sm + PCIE_SM_START_OFFSET);
+	writel(v | BIT(0), sm + PCIE_SM_START_OFFSET);
+	dev_info(dev,
+		 "wcn7880: CESTA SM loaded+started (start=0x%08x; CRM votes skipped)\n",
+		 readl(sm + PCIE_SM_START_OFFSET));
+	/* Is the SM actually executing? PC_VAL should advance if it runs. */
+	dev_info(dev,
+		 "wcn7880: SM status: PC_VAL=0x%08x PWR_CTRL_STATUS=0x%08x CLKREQ_GATE_REQ=0x%08x\n",
+		 readl(sm + PCIE_SM_PC_VAL),
+		 readl(sm + PCIE_SM_PWR_CTRL_STATUS),
+		 readl(sm + PCIE_SM_CLKREQ_GATE_REQ_STATUS));
+
+	iounmap(sm);
+
+	/*
+	 * Probe the pcie_crm HW block (alive?), then push the perf-ol vote so the
+	 * CESTA SM has a valid l1ss/Gen3 mapping to grant the fw's l1ss-sleep.
+	 */
+	qcom_pcie_wcn_crm_probe(pcie);
+	qcom_pcie_wcn_crm_vote(pcie);
+
+	/* Route CLKREQ + the L1ss-sleep timeout to the CESTA SM (Android value). */
+	v = readl(pcie->parf + PARF_CESTA_CONFIG);
+	dev_info(dev, "wcn7880: PARF_CESTA_CONFIG before=0x%08x\n", v);
+	v |= PARF_CESTA_CLKREQ_SEL | PARF_CESTA_L1SUB_TIMEOUT_EXT_INT_EN;
+	writel(v, pcie->parf + PARF_CESTA_CONFIG);
+	dev_info(dev,
+		 "wcn7880: PARF_CESTA_CONFIG after=0x%08x (CLKREQ+l1ss-timeout -> CESTA SM)\n",
+		 readl(pcie->parf + PARF_CESTA_CONFIG));
+
+	/*
+	 * Arm the l1ss-sleep timeout timer (msm_pcie_cesta_enable_l1ss_to): write
+	 * RESET, then RESET|ticks. This is what makes the controller hand the SM
+	 * the l1ss-TO so it actually enters l1ss-sleep and grants the fw request.
+	 *
+	 * DEFAULT OFF at init: armed here, it fires on the idle gaps DURING the WCN
+	 * EP's link training and the SM gates the link -> the EP never enumerates
+	 * ("Device not found", no ath12k, no cal -- proven on v446). The timer must
+	 * instead be armed AFTER enumeration, right before cold-boot-cal, from
+	 * ath12k (ath12k_wcn7880_arm_cesta_l1ss_to(), which maps PARF 0x01c00000).
+	 */
+	if (qcom_pcie_wcn_cesta_l1ss_to) {
+		writel(PARF_L1SUB_AHB_CLK_MAX_TIMER_RESET,
+		       pcie->parf + PARF_L1SUB_AHB_CLK_MAX_TIMER);
+		writel(PARF_L1SUB_AHB_CLK_MAX_TIMER_RESET | CESTA_L1SS_TIMEOUT_TICKS,
+		       pcie->parf + PARF_L1SUB_AHB_CLK_MAX_TIMER);
+		dev_info(dev, "wcn7880: CESTA l1ss-timeout armed @init @PARF+0x180 = 0x%08x\n",
+			 readl(pcie->parf + PARF_L1SUB_AHB_CLK_MAX_TIMER));
+	}
+}
+
+/*
+ * SM8750 WCN PCIe RC — keep the PCIe core clock running through L1/L1ss.
+ *
+ * Cold-boot rwmmio diff (captures/wcn-fw-cal-trace/android-coldboot-mmio/) of the
+ * working OxygenOS cal-powerup vs ours: the ONLY un-refuted PARF divergence is
+ * PARF_SYS_CTRL — Android = 0x365E, ours (mainline 2_7_0 RMW) = 0x361C. The two
+ * extra bits Android sets are CORE_CLK_CGC_DIS (BIT6, disable the core clock
+ * gating-cell) and L1_CLK_RMV_DIS (BIT1, disable clock removal while the link is
+ * in L1). Both KEEP the PCIe core clock alive in low-power; mainline's older
+ * 2_3_3 path sets them, but the 2_7_0 path sm8750 uses does not. Downstream
+ * pci-msm.c writes PARF_SYS_CTRL=0x365E verbatim (line 6014).
+ *
+ * This is dead-on the decoded WCN cold-boot-cal RDDM: the cal fw enters a routine
+ * inter-step l1ss-sleep, then pcie_core_check_pcie_clock_on reads
+ * GCC_SNOC_PCIE_AXI_CBCR clk_off (clock removed in L1 on our side) -> touches a
+ * PCIE_NOC target with the clock gated -> "NOC ERROR DETECTED 0x8" -> PCSS
+ * watchdog -> RDDM. Keeping the core clock on (as Android does) should let that
+ * first l1ss-sleep complete. Also replays the two other cold-boot PARF writes
+ * Android does that we don't (INT_ALL_MASK, CFG_BITS_3) for full parity.
+ *
+ * Gated default-ON (full-replay-then-prune); A/B via pcie_qcom.qcom_pcie_wcn_clk_keepon=0.
+ */
+static bool qcom_pcie_wcn_clk_keepon = true;
+module_param(qcom_pcie_wcn_clk_keepon, bool, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_clk_keepon,
+	"SM8750 WCN: keep PCIe core clock on in L1 (PARF_SYS_CTRL 0x365E) like Android (default on)");
+
+static void qcom_pcie_wcn_clk_keepon_apply(struct qcom_pcie *pcie)
+{
+	struct device *dev = pcie->pci->dev;
+	u32 v;
+
+	if (!qcom_pcie_wcn_clk_keepon ||
+	    !of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750"))
+		return;
+
+	/* PARF_SYS_CTRL: add the two clock-keep-on bits -> matches Android 0x365E. */
+	v = readl(pcie->parf + PARF_SYS_CTRL);
+	dev_info(dev, "wcn7880: PARF_SYS_CTRL before=0x%08x\n", v);
+	v |= CORE_CLK_CGC_DIS | L1_CLK_RMV_DIS;
+	writel(v, pcie->parf + PARF_SYS_CTRL);
+	dev_info(dev, "wcn7880: PARF_SYS_CTRL after=0x%08x (clock kept on in L1)\n",
+		 readl(pcie->parf + PARF_SYS_CTRL));
+
+	/* Replay the two other cold-boot PARF writes Android does (full parity).
+	 *
+	 * Lever #26 (b25, 2026-07-08): the Android cold-boot rwmmio trace writes
+	 * CFG_BITS_3 TWICE back-to-back right before LTSSM_EN — 0x68 then 0x168
+	 * (bit8 added; only writes to 0x2c4 in the whole boot). Our replay stopped
+	 * at the first write, so bit8 was never set — the ONLY missing PARF init
+	 * bit after the full b24/b25 parity audit (PHY table 128/128 byte-equal,
+	 * PARF init otherwise equal; 0x508 INT_ALL_2_MASK BW_MGT skipped
+	 * deliberately: msm's own retrain-IRQ plumbing, we poll). Suspected the
+	 * source of the standing read-only divergences CLKREQ_OVERRIDE
+	 * 0x10-vs-0x20 and PM_STTS[10:8] 4-vs-3, i.e. the CLKREQ/refclk plane the
+	 * fw's mission l1ss_sleep entry dies on (NOC 437:0x8 25ms after
+	 * dev-SOL-LOW, L1/L1.2 entry retry loop).
+	 */
+	writel(0x7f80d202, pcie->parf + PARF_INT_ALL_MASK);
+	writel(0x68, pcie->parf + PARF_CFG_BITS_3);
+	writel(0x168, pcie->parf + PARF_CFG_BITS_3);
+	dev_info(dev, "wcn7880: PARF_INT_ALL_MASK=0x%08x PARF_CFG_BITS_3=0x%08x\n",
+		 readl(pcie->parf + PARF_INT_ALL_MASK),
+		 readl(pcie->parf + PARF_CFG_BITS_3));
+}
+
+/*
+ * NOTE (lever D2): the SM8750 WCN PCIe RC votes its PCIe->mem_noc->LLCC->DDR
+ * bandwidth via the OPP table (use_pm_opp=true), NOT via icc_mem (icc_init is
+ * skipped on this platform). The avg-bw FLOOR that keeps the NoC->DDR route
+ * clocked through the idle/L1.2 cold-boot-cal window is therefore set in the
+ * DTS pcie0_opp_table (opp-avg-kBps), not here. See STATE-DIFF-FINDINGS.
+ */
+
+/*
+ * Lever D3 (WCN cold-boot-cal): let the HWCG-capable PCIe AXI clocks GATE during
+ * the idle cal window like Android, instead of SW-pinning them on.
+ *
+ * BROAD STATE diff: in-cal `clk_summary` shows Android's `gcc_pcie_0_{slv,mstr}_axi`
+ * + `cfg_ahb` at **hw_en=N** (HW-gated, link idle), while ours sit at **hw_en=Y**
+ * because mainline `qcom_pcie_init_2_7_0` does `clk_bulk_prepare_enable` on ALL DT
+ * clocks -- holding the CBCR SW-enable so HWCG never gates them. These three CBCRs
+ * already carry HWCG (gcc-sm8750 hwcg_reg 0x6b020/030/040, matches the downstream
+ * gcc), so DROPPING our SW vote lets the hardware gate them when the AXI block is
+ * idle (and auto-ungate on activity -- safe: HWCG keeps them on whenever the block
+ * is busy, so enum/datapath are unaffected). Matches Android's hw_en=N during cal.
+ *
+ * (The non-HWCG PCIe clocks -- aux/pipe/phy_rchng/slv_q2a -- are left SW-enabled;
+ * Android gates those via CESTA HW clock management, which is lever C3, already
+ * replicated + refuted. So this is the only independently-testable slice of D3.)
+ * Gated default-ON (full-replay); A/B via pcie_qcom.qcom_pcie_wcn_clk_hwgate=0.
+ */
+static bool qcom_pcie_wcn_clk_hwgate = true;
+module_param(qcom_pcie_wcn_clk_hwgate, bool, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_clk_hwgate,
+	"SM8750 WCN: drop the SW vote on the HWCG PCIe AXI clocks so they HW-gate during idle cal like Android (default on)");
+
+/*
+ * Full clock-release (v459, full-replay of Android): drop the SW vote on ALL
+ * eight controller PCIe clocks, not just the original three. Android holds
+ * enable_count=0 on every gcc_pcie_0 clock during cold-boot cal (managed by
+ * HWCG/CESTA, link parked in L1.2); D3 originally dropped only bus_master/
+ * bus_slave/cfg. The other five (aux/slave_q2a/ddrss_sf_tbu/noc_aggr/
+ * cnoc_sf_axi) now all carry HWCG in gcc-sm8750 (aux + slv_q2a HWCG added in
+ * the same change; the rest already had it), so dropping their vote lets the
+ * hardware gate them when the link idles and auto-ungate on activity -- the
+ * proven D3 pattern, extended to the whole controller clock set.
+ */
+static const char * const qcom_pcie_wcn_hwgate_clks[] = {
+	"aux", "cfg", "bus_master", "bus_slave",
+	"slave_q2a", "ddrss_sf_tbu", "noc_aggr", "cnoc_sf_axi",
+};
+
+static bool qcom_pcie_wcn_clk_is_hwgate(const char *id)
+{
+	int i;
+
+	if (!id)
+		return false;
+	for (i = 0; i < ARRAY_SIZE(qcom_pcie_wcn_hwgate_clks); i++)
+		if (!strcmp(id, qcom_pcie_wcn_hwgate_clks[i]))
+			return true;
+	return false;
+}
+
+/* Drop the SW enable on the HWCG AXI clocks (called after clk_bulk_prepare_enable). */
+static void qcom_pcie_wcn_clk_hwgate_apply(struct qcom_pcie *pcie,
+					   struct clk_bulk_data *clks, int num)
+{
+	struct device *dev = pcie->pci->dev;
+	int i, n = 0;
+
+	if (!qcom_pcie_wcn_clk_hwgate ||
+	    !of_device_is_compatible(dev->of_node, "qcom,pcie-sm8750"))
+		return;
+
+	for (i = 0; i < num; i++) {
+		if (qcom_pcie_wcn_clk_is_hwgate(clks[i].id)) {
+			clk_disable_unprepare(clks[i].clk);
+			n++;
+		}
+	}
+	pcie->wcn_clk_hwgated = true;
+	dev_info(dev, "wcn7880: dropped SW vote on %d HWCG AXI clocks (D3: let them HW-gate in idle cal)\n", n);
+}
+
+/* Re-balance the bulk refcount before clk_bulk_disable_unprepare in deinit. */
+static void qcom_pcie_wcn_clk_hwgate_undo(struct qcom_pcie *pcie,
+					  struct clk_bulk_data *clks, int num)
+{
+	int i;
+
+	if (!pcie->wcn_clk_hwgated)
+		return;
+
+	for (i = 0; i < num; i++)
+		if (qcom_pcie_wcn_clk_is_hwgate(clks[i].id))
+			clk_prepare_enable(clks[i].clk);
+	pcie->wcn_clk_hwgated = false;
+}
+
+/*
+ * v472/v473: replicate downstream msm_pcie's L1SS programming
+ * (msm_pcie_config_l1_2_threshold + msm_pcie_config_l1ss) for the WCN7880 link,
+ * so the cnss port sees the same link config Android's msm_pcie leaves behind.
+ * msm_pcie writes the LTR_L1.2 threshold (LTR_L12_TH_VALUE/SCALE, verbatim from
+ * DT qcom,l1-2-th-value / -scale, shifts 16/29) and enables all four L1SS
+ * substates on RC + endpoint, plus DEVCTL2.LTR_EN. The live OxygenOS value is
+ * 0xDF (EP CTL1=0x40df000f, RC=0x40df460f) -- that is what the DT now carries.
+ *
+ * Gated to the cnss_pci driver ONLY: ath12k self-programs L1SS
+ * (ath12k_wcn7880_program_l1ss), so firing this for an ath12k bind would collide
+ * with it. NB: L1SS does NOT gate fw-ready -- ath12k reaches fw-ready with L1SS
+ * both disabled and enabled -- so this is a faithfulness match that matters for
+ * the later cal phy-off L1.2-entry step, not for the QMI preamble.
+ */
+static void qcom_pcie_wcn_program_l1ss(struct qcom_pcie *pcie,
+				       struct pci_dev *pdev)
+{
+	int l1ss = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_L1SS);
+	u32 ctl1;
+
+	if (!l1ss)
+		return;
+
+	/* LTR must be enabled for ASPM L1.2 to be entered. */
+	pcie_capability_set_word(pdev, PCI_EXP_DEVCTL2, PCI_EXP_DEVCTL2_LTR_EN);
+
+	pci_read_config_dword(pdev, l1ss + PCI_L1SS_CTL1, &ctl1);
+	ctl1 &= ~(PCI_L1SS_CTL1_LTR_L12_TH_VALUE |
+		  PCI_L1SS_CTL1_LTR_L12_TH_SCALE);
+	ctl1 |= (PCI_L1SS_CTL1_LTR_L12_TH_VALUE &
+		 (pcie->wcn_l1_2_th_value << 16)) |
+		(PCI_L1SS_CTL1_LTR_L12_TH_SCALE &
+		 (pcie->wcn_l1_2_th_scale << 29)) |
+		PCI_L1SS_CTL1_L1SS_MASK;	/* PCIPM + ASPM, L1.1 + L1.2 enable */
+	pci_write_config_dword(pdev, l1ss + PCI_L1SS_CTL1, ctl1);
+
+	pci_read_config_dword(pdev, l1ss + PCI_L1SS_CTL1, &ctl1);
+	pci_info(pdev, "wcn7880: L1SS CTL1 = 0x%08x (LTR_L1.2 th=0x%x scale=%u)\n",
+		 ctl1, pcie->wcn_l1_2_th_value, pcie->wcn_l1_2_th_scale);
+}
+
+static int qcom_pcie_wcn_l1ss_notify(struct notifier_block *nb,
+				     unsigned long action, void *data)
+{
+	struct qcom_pcie *pcie = container_of(nb, struct qcom_pcie, wcn_l1ss_nb);
+	struct pci_dev *pdev = to_pci_dev(data);
+	struct pci_dev *rc;
+
+	if (action != BUS_NOTIFY_BOUND_DRIVER)
+		return NOTIFY_DONE;
+	/* WCN7880 (peach) endpoint only. */
+	if (pdev->vendor != 0x17cb || pdev->device != 0x110e)
+		return NOTIFY_DONE;
+	/*
+	 * cnss_pci only. ath12k (ath12k_wifi7_pci) force-programs L1SS itself;
+	 * doing it here too would collide. This notifier exists to do for the
+	 * cnss port what msm_pcie does on Android, so scope it to that driver.
+	 */
+	if (!pdev->dev.driver || strcmp(pdev->dev.driver->name, "cnss_pci"))
+		return NOTIFY_DONE;
+
+	qcom_pcie_wcn_program_l1ss(pcie, pdev);		/* endpoint */
+	rc = pci_upstream_bridge(pdev);
+	if (rc)
+		qcom_pcie_wcn_program_l1ss(pcie, rc);	/* root port */
+
+	return NOTIFY_DONE;
+}
+
 static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 {
 	struct qcom_pcie_resources_2_7_0 *res = &pcie->res.v2_7_0;
@@ -1037,6 +2002,11 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	ret = clk_bulk_prepare_enable(res->num_clks, res->clks);
 	if (ret < 0)
 		goto err_disable_regulators;
+
+	/* D3: let the HWCG PCIe AXI clocks gate in idle cal like Android (safe
+	 * only with CESTA managing the clock requests -- see qcom_pcie_wcn_cesta).
+	 */
+	qcom_pcie_wcn_clk_hwgate_apply(pcie, res->clks, res->num_clks);
 
 	ret = reset_control_assert(res->rst);
 	if (ret) {
@@ -1070,6 +2040,9 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	val &= ~MAC_PHY_POWERDOWN_IN_P2_D_MUX_EN;
 	writel(val, pcie->parf + PARF_SYS_CTRL);
 
+	/* SM8750 WCN RC: keep the PCIe core clock on in L1 (Android 0x365E). */
+	qcom_pcie_wcn_clk_keepon_apply(pcie);
+
 	val = readl(pcie->parf + PARF_MHI_CLOCK_RESET_CTRL);
 	val |= BYPASS;
 	writel(val, pcie->parf + PARF_MHI_CLOCK_RESET_CTRL);
@@ -1080,6 +2053,27 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 	writel(val, pcie->parf + PARF_PM_CTRL);
 
 	pci->l1ss_support = true;
+
+	/* SM8750 WCN RC: load+start the CESTA SM (SM-only, no CRM votes). */
+	qcom_pcie_wcn_cesta_enable(pcie);
+
+	/* v472: if the pcie node carries the Android L1SS threshold props, program
+	 * L1.2 the msm_pcie way once the WCN endpoint binds (bus notifier — no
+	 * post-enum hook exists here). Only the WCN pcie0 node has these props. */
+	if (!of_property_read_u32(dev->of_node, "qcom,l1-2-th-value",
+				  &pcie->wcn_l1_2_th_value)) {
+		pcie->wcn_l1_2_th_scale = 2;
+		of_property_read_u32(dev->of_node, "qcom,l1-2-th-scale",
+				     &pcie->wcn_l1_2_th_scale);
+		pcie->wcn_l1ss_nb.notifier_call = qcom_pcie_wcn_l1ss_notify;
+		bus_register_notifier(&pci_bus_type, &pcie->wcn_l1ss_nb);
+		dev_info(dev,
+			 "wcn7880: L1SS programmer armed (LTR_L1.2 th=0x%x scale=%u, applied on EP bind)\n",
+			 pcie->wcn_l1_2_th_value, pcie->wcn_l1_2_th_scale);
+		/* Only the WCN pcie0 node carries these props: stash it for the
+		 * exported cal->mission link toggle (qcom_pcie_wcn_set_link). */
+		qcom_pcie_wcn_erhai = pcie;
+	}
 
 	val = readl(pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
 	val |= EN;
@@ -1119,11 +2113,49 @@ static int qcom_pcie_enable_aspm(struct pci_dev *pdev, void *userdata)
 	return 0;
 }
 
+/*
+ * WCN cold-boot-cal: the complete PCIe config-space diff vs OxygenOS found the
+ * one remaining host divergence on the WCN EP -- Android enables ASPM **L0s**
+ * (LinkCtl 0x43 = L0s+L1, RCB=64) in both baseline and cal-done, while our
+ * kernel leaves the EP at L1-only (0x4a, L0s off): qcom_pcie_enable_aspm()
+ * requests PCIE_LINK_STATE_ALL but aspm.c masks L0s off on the latency check.
+ * This matches the EP LinkCtl to Android exactly (set L0s, clear RCB) so the
+ * link's L0s behaviour during cal replays Android (ours shows a one-directional
+ * L0s storm in the post-bw_req freeze that Android's symmetric L0s does not).
+ * Only the EP (non-bridge) is touched; the RC already matches Android (0x4b).
+ * Gated default-on; A/B via pcie_qcom.qcom_pcie_wcn_force_l0s=0.
+ */
+static bool qcom_pcie_wcn_force_l0s = true;
+module_param(qcom_pcie_wcn_force_l0s, bool, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_force_l0s,
+	"SM8750 WCN: force ASPM L0s on the WCN endpoint (match Android EP LinkCtl 0x43) (default on)");
+
+static int qcom_pcie_wcn_force_l0s_dev(struct pci_dev *pdev, void *data)
+{
+	u16 lnkctl, want;
+
+	if (pci_is_bridge(pdev))	/* only the WCN endpoint; RC already 0x4b */
+		return 0;
+
+	pcie_capability_read_word(pdev, PCI_EXP_LNKCTL, &lnkctl);
+	want = (lnkctl | PCI_EXP_LNKCTL_ASPM_L0S) & ~PCI_EXP_LNKCTL_RCB;
+	if (want != lnkctl) {
+		pcie_capability_write_word(pdev, PCI_EXP_LNKCTL, want);
+		pci_info(pdev, "wcn7880: forced EP ASPM L0s (LnkCtl 0x%04x -> 0x%04x, match Android 0x43)\n",
+			 lnkctl, want);
+	}
+	return 0;
+}
+
 static void qcom_pcie_host_post_init_2_7_0(struct qcom_pcie *pcie)
 {
 	struct dw_pcie_rp *pp = &pcie->pci->pp;
 
 	pci_walk_bus(pp->bridge->bus, qcom_pcie_enable_aspm, NULL);
+
+	if (qcom_pcie_wcn_force_l0s &&
+	    of_device_is_compatible(pcie->pci->dev->of_node, "qcom,pcie-sm8750"))
+		pci_walk_bus(pp->bridge->bus, qcom_pcie_wcn_force_l0s_dev, NULL);
 }
 
 static void qcom_pcie_deinit_2_7_0(struct qcom_pcie *pcie)
@@ -1135,6 +2167,9 @@ static void qcom_pcie_deinit_2_7_0(struct qcom_pcie *pcie)
 	val = readl(pcie->parf + PARF_PHY_CTRL);
 	val |= PHY_TEST_PWR_DOWN;
 	writel(val, pcie->parf + PARF_PHY_CTRL);
+
+	/* D3: re-balance the clocks we dropped in init before the bulk disable. */
+	qcom_pcie_wcn_clk_hwgate_undo(pcie, res->clks, res->num_clks);
 
 	clk_bulk_disable_unprepare(res->num_clks, res->clks);
 

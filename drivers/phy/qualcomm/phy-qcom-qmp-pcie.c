@@ -3092,12 +3092,18 @@ static const struct qmp_phy_init_tbl sm8750_qmp_gen3x2_pcie_rx_tbl[] = {
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_01_HIGH, 0x09),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_01_HIGH2, 0x49),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_01_HIGH3, 0x1B),
-	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_01_HIGH4, 0x9C),
+	/*
+	 * erhai WCN cold-boot rwmmio diff vs OxygenOS: downstream pci-msm programs
+	 * RX_MODE_{01,10}_HIGH4 = 0x8F (we shipped the mainline 0x9C). Only PHY
+	 * register divergence found pre-cal; matched here for byte parity (both
+	 * lanes). RX-equalization HIGH4 coeff; link trains Gen3x2 either way.
+	 */
+	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_01_HIGH4, 0x8F),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_01_LOW, 0xD1),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_10_HIGH, 0x09),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_10_HIGH2, 0x49),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_10_HIGH3, 0x1B),
-	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_10_HIGH4, 0x9C),
+	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_10_HIGH4, 0x8F),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_RX_MODE_10_LOW, 0xD1),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_TX_ADAPT_PRE_THRESH1, 0x3E),
 	QMP_PHY_INIT_CFG(QSERDES_V7_RX_TX_ADAPT_PRE_THRESH2, 0x1E),
@@ -3127,7 +3133,12 @@ static const struct qmp_phy_init_tbl sm8750_qmp_gen3x2_pcie_pcs_tbl[] = {
 	QMP_PHY_INIT_CFG(QPHY_V7_PCS_REFGEN_REQ_CONFIG1, 0x05),
 	QMP_PHY_INIT_CFG(QPHY_V7_PCS_RX_SIGDET_LVL, 0x77),
 	QMP_PHY_INIT_CFG(QPHY_V7_PCS_RATE_SLEW_CNTRL1, 0x0B),
-	QMP_PHY_INIT_CFG(QPHY_V7_PCS_EQ_CONFIG2, 0x0F),
+	/*
+	 * erhai WCN cold-boot rwmmio diff vs OxygenOS: downstream pci-msm
+	 * programs EQ_CONFIG3 (0x1e4) = 0x0F, not the mainline EQ_CONFIG2
+	 * (0x1e0). Match Android byte-for-byte (it writes only 0x1e4).
+	 */
+	QMP_PHY_INIT_CFG(QPHY_V7_PCS_EQ_CONFIG3, 0x0F),
 	QMP_PHY_INIT_CFG(QPHY_V7_PCS_PCS_TX_RX_CONFIG, 0x8C),
 	QMP_PHY_INIT_CFG(QPHY_V7_PCS_G12S1_TXDEEMPH_M6DB, 0x17),
 	QMP_PHY_INIT_CFG(QPHY_V7_PCS_G3S2_PRE_GAIN,	0x2E),
@@ -3136,6 +3147,8 @@ static const struct qmp_phy_init_tbl sm8750_qmp_gen3x2_pcie_pcs_tbl[] = {
 static const struct qmp_phy_init_tbl sm8750_qmp_gen3x2_pcie_pcs_misc_tbl[] = {
 	QMP_PHY_INIT_CFG(QPHY_PCIE_V6_PCS_PCIE_EQ_CONFIG1, 0x1E),
 	QMP_PHY_INIT_CFG(QPHY_PCIE_V6_PCS_PCIE_RXEQEVAL_TIME, 0x27),
+	/* erhai WCN cold-boot parity: Android also writes RXEQEVAL_TIME2 (0xf8) = 0x1F */
+	QMP_PHY_INIT_CFG(QPHY_PCIE_V6_PCS_PCIE_RXEQEVAL_TIME2, 0x1F),
 	QMP_PHY_INIT_CFG(QPHY_PCIE_V6_PCS_PCIE_POWER_STATE_CONFIG2, 0x1D),
 	QMP_PHY_INIT_CFG(QPHY_PCIE_V6_PCS_PCIE_POWER_STATE_CONFIG4, 0x07),
 	QMP_PHY_INIT_CFG(QPHY_PCIE_V6_PCS_PCIE_ENDPOINT_REFCLK_DRIVE, 0xC1),
@@ -4042,6 +4055,9 @@ struct qmp_pcie {
 
 	struct clk_fixed_rate pipe_clk_fixed;
 	struct clk_fixed_rate aux_clk_fixed;
+
+	/* WCN cal full clock-release: PHY SW votes dropped (aux/cfg_ahb/rchng/pipe). */
+	bool wcn_clk_released;
 };
 
 static bool qphy_checkbits(const void __iomem *base, u32 offset, u32 val)
@@ -4080,6 +4096,94 @@ static inline void qphy_clrbits(void __iomem *base, u32 offset, u32 val)
 static const char * const qmp_pciephy_clk_l[] = {
 	"aux", "cfg_ahb", "ref", "refgen", "rchng", "phy_aux",
 };
+
+/*
+ * WCN cold-boot-cal full clock-release (full-replay of Android): the WCN PCIe
+ * link must idle into L1.2 during cal so the EP fw's commanded l1ss-sleep can
+ * gate the link clocks. Otherwise the fw's `pcie_core_check_pcie_clock_on`
+ * polls forever ("L1ss polling failed") -> wal_pm_wmac_assert_phy_off -> NoC
+ * error 0x8 -> RDDM. Android holds enable_count=0 on every gcc_pcie_0 clock
+ * during cal; the controller votes are dropped in pcie-qcom.c, but the big PHY
+ * votes (pipe/phy_rchng/aux/cfg_ahb) are owned HERE and were never released.
+ * Drop them after power-on so HWCG (aux/rchng -- added in gcc-sm8750) gates
+ * them in idle and ungates on activity. Two PHY clocks are KEPT voted:
+ *   - "pipe": the recovered data clock. v459 proved dropping it stalls LTSSM
+ *     in Polling (never reaches L0) -- our partial CESTA does not grant clocks
+ *     on CLKREQ# for cold link-up, and pipe has no HWCG. Holding its GCC-branch
+ *     vote does NOT prevent L1.2 (the PHY gates pipe electrically via CLKREQ#
+ *     regardless of the Linux vote), so keeping it is training-safe and
+ *     L1.2-neutral.
+ *   - "ref" (tcsr clkref_en): Android keeps it hw-on too; dropping it risks
+ *     losing the PCIe reference clock entirely.
+ * Gated default-on; A/B via phy_qcom_qmp_pcie.qcom_qmp_pcie_wcn_clk_release=0.
+ */
+static bool qcom_qmp_pcie_wcn_clk_release = true;
+module_param(qcom_qmp_pcie_wcn_clk_release, bool, 0644);
+MODULE_PARM_DESC(qcom_qmp_pcie_wcn_clk_release,
+	"SM8750 WCN PCIe PHY: drop the SW vote on aux/cfg_ahb/rchng (pipe+ref kept) to approach Android's en=0 clock state during cold-boot cal (default on)");
+
+/* PHY bulk (qmp->clks) ids whose SW vote we drop; ref kept, refgen/phy_aux absent. */
+static const char * const qcom_qmp_pcie_wcn_release_clks[] = {
+	"aux", "cfg_ahb", "rchng",
+};
+
+static bool qmp_pcie_wcn_clk_release_ok(struct qmp_pcie *qmp)
+{
+	return qcom_qmp_pcie_wcn_clk_release &&
+	       of_device_is_compatible(qmp->dev->of_node,
+				       "qcom,sm8750-qmp-gen3x2-pcie-phy");
+}
+
+static bool qmp_pcie_wcn_is_release_clk(const char *id)
+{
+	int i;
+
+	if (!id)
+		return false;
+	for (i = 0; i < ARRAY_SIZE(qcom_qmp_pcie_wcn_release_clks); i++)
+		if (!strcmp(id, qcom_qmp_pcie_wcn_release_clks[i]))
+			return true;
+	return false;
+}
+
+/* Drop the PHY's SW vote on aux/cfg_ahb/rchng (called after power-on). pipe
+ * and ref are deliberately KEPT (see comment above). */
+static void qmp_pcie_wcn_clk_release_apply(struct qmp_pcie *qmp)
+{
+	int i, n = 0;
+
+	if (!qmp_pcie_wcn_clk_release_ok(qmp) || qmp->wcn_clk_released)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(qmp_pciephy_clk_l); i++) {
+		if (qmp->clks[i].clk && qmp_pcie_wcn_is_release_clk(qmp->clks[i].id)) {
+			clk_disable_unprepare(qmp->clks[i].clk);
+			n++;
+		}
+	}
+	qmp->wcn_clk_released = true;
+	dev_info(qmp->dev,
+		 "wcn7880: released %d PHY clock SW votes (aux/cfg_ahb/rchng; pipe+ref kept for training)\n",
+		 n);
+}
+
+/*
+ * Re-balance the qmp->clks refcount before exit()'s clk_bulk_disable_unprepare.
+ * The generic PHY core guarantees power_off precedes exit; undoing in power_off
+ * restores the init-time refcount.
+ */
+static void qmp_pcie_wcn_clk_release_undo(struct qmp_pcie *qmp)
+{
+	int i;
+
+	if (!qmp->wcn_clk_released)
+		return;
+
+	for (i = 0; i < ARRAY_SIZE(qmp_pciephy_clk_l); i++)
+		if (qmp->clks[i].clk && qmp_pcie_wcn_is_release_clk(qmp->clks[i].id))
+			clk_prepare_enable(qmp->clks[i].clk);
+	qmp->wcn_clk_released = false;
+}
 
 /* list of regulators */
 static const char * const qmp_phy_vreg_l[] = {
@@ -5657,6 +5761,17 @@ static void qmp_pcie_init_registers(struct qmp_pcie *qmp, const struct qmp_phy_c
 	if (cfg->lanes >= 2) {
 		qmp_configure_lane(qmp->dev, tx2, tbls->tx, tbls->tx_num, 2);
 		qmp_configure_lane(qmp->dev, rx2, tbls->rx, tbls->rx_num, 2);
+
+		/*
+		 * erhai WCN cold-boot rwmmio parity: OxygenOS' downstream PHY
+		 * init (msm_pcie_enable_link) writes TX register 0x0 = 0x0 on
+		 * lane 2 *only* — not lane 1 — which the symmetric mainline tx
+		 * table cannot express. Replicate it byte-for-byte, scoped to
+		 * the sm8750 WCN PHY. (TX lane fine-tuning; link trains Gen3x2
+		 * either way — matched for full Android host-plane parity.)
+		 */
+		if (cfg == &sm8750_qmp_gen3x2_pciephy_cfg)
+			writel(0x0, tx2);
 	}
 
 	qmp_configure(qmp->dev, pcs, tbls->pcs, tbls->pcs_num);
@@ -5762,6 +5877,9 @@ static int qmp_pcie_exit(struct phy *phy)
 	else
 		reset_control_bulk_assert(cfg->num_resets, qmp->resets);
 
+	/* Defensive: normally power_off already rebalanced; no-op if so. */
+	qmp_pcie_wcn_clk_release_undo(qmp);
+
 	clk_bulk_disable_unprepare(ARRAY_SIZE(qmp_pciephy_clk_l), qmp->clks);
 
 	regulator_bulk_disable(cfg->num_vregs, qmp->vregs);
@@ -5835,6 +5953,9 @@ skip_serdes_start:
 		goto err_disable_pipe_clk;
 	}
 
+	/* WCN cal: drop pipe/aux/cfg_ahb/rchng SW votes so the link can park L1.2. */
+	qmp_pcie_wcn_clk_release_apply(qmp);
+
 	return 0;
 
 err_disable_pipe_clk:
@@ -5847,6 +5968,9 @@ static int qmp_pcie_power_off(struct phy *phy)
 {
 	struct qmp_pcie *qmp = phy_get_drvdata(phy);
 	const struct qmp_phy_cfg *cfg = qmp->cfg;
+
+	/* Rebalance the WCN cal clock-release votes before the bulk disable. */
+	qmp_pcie_wcn_clk_release_undo(qmp);
 
 	clk_bulk_disable_unprepare(qmp->num_pipe_clks, qmp->pipe_clks);
 

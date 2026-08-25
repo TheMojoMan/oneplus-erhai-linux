@@ -29,6 +29,7 @@
 #define QPHY_V7_PCS_PCS_TX_RX_CONFIG		0x1d0
 #define QPHY_V7_PCS_EQ_CONFIG1			0x1dc
 #define QPHY_V7_PCS_EQ_CONFIG2			0x1e0
+#define QPHY_V7_PCS_EQ_CONFIG3			0x1e4
 #define QPHY_V7_PCS_EQ_CONFIG5			0x1ec
 
 #endif
