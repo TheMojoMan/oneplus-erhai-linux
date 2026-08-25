@@ -35,6 +35,15 @@
 
 #define CSID_TOP_IRQ_STATUS		0x7C
 #define		 TOP_IRQ_STATUS_RESET_DONE	BIT(0)
+/*
+ * The CSID interrupt line is aggregated from TOP_IRQ_STATUS, so a sub-block
+ * status (BUF_DONE at 0x8C, the RDIn paths at 0xEC+) only reaches the CPU if
+ * its TOP bit is unmasked as well. Enabling BUF_DONE_IRQ_MASK alone is not
+ * enough. Bit assignment confirmed against camss-csid-680.c (same TOP layout,
+ * CSID_TOP_IRQ_BUF_DONE) and the downstream csid-lite980 register description
+ * this SoC declares (top_buf_done_irq_mask = 0x2000).
+ */
+#define		 TOP_IRQ_STATUS_BUF_DONE	BIT(13)
 
 #define CSID_TOP_IRQ_MASK		0x80
 #define CSID_TOP_IRQ_CLEAR		0x84
@@ -57,6 +66,8 @@
 
 #define CSID_CSI2_RDIN_IRQ_STATUS(rdi)	(0xEC + 0x10 * (rdi))
 #define		RUP_DONE_IRQ_STATUS		BIT(23)
+
+#define CSID_CSI2_RDIN_IRQ_MASK(rdi)	(0xF0 + 0x10 * (rdi))
 
 #define CSID_CSI2_RDIN_IRQ_CLEAR(rdi)	(0xF4 + 0x10 * (rdi))
 #define CSID_CSI2_RDIN_IRQ_SET(rdi)	(0xF8 + 0x10 * (rdi))
@@ -186,20 +197,28 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 
 
 	val = RDI_CFG0_TIMESTAMP_EN;
 	val |= RDI_CFG0_TIMESTAMP_STB_SEL;
-	/* note: for non-RDI path, this should be format->decode_format */
-	val |= DECODE_FORMAT_PAYLOAD_ONLY << RDI_CFG0_DECODE_FORMAT;
+	/*
+	 * Downstream cam_ife_csid_get_format_rdi() programs PAYLOAD_ONLY (0xf)
+	 * only when the block has no MIPI packing. The csid-lite980 RDI paths this
+	 * SoC declares all support MIPI packing, so program the real decode format
+	 * (RAW10 -> 0x2) and let the MIPI packing bit in RDI_CFG1 repack it.
+	 * Payload-only bypasses the CSID decode/pixel pipeline, leaving the output
+	 * stage emitting nothing (0-byte captures).
+	 */
+	val |= format->decode_format << RDI_CFG0_DECODE_FORMAT;
 	val |= vc << RDI_CFG0_VC;
 	val |= format->data_type << RDI_CFG0_DT;
 	val |= dt_id << RDI_CFG0_DT_ID;
 
 	writel(val, csid->base + CSID_RDI_CFG0(port));
 
+	/*
+	 * Downstream leaves DROP/CROP off for a full-frame RDI passthrough and
+	 * does not set pix_store for the lite block, so cfg1 is MIPI packing only
+	 * (0x8000). Forcing DROP/CROP on drops every frame, since the crop/drop
+	 * windows are left at their HW reset default.
+	 */
 	val = RDI_CFG1_PACKING_FORMAT_MIPI;
-	val |= RDI_CFG1_PIX_STORE;
-	val |= RDI_CFG1_DROP_H_EN;
-	val |= RDI_CFG1_DROP_V_EN;
-	val |= RDI_CFG1_CROP_H_EN;
-	val |= RDI_CFG1_CROP_V_EN;
 
 	writel(val, csid->base + CSID_RDI_CFG1(port));
 
@@ -225,13 +244,34 @@ static void csid_configure_stream(struct csid_device *csid, u8 enable)
 
 	__csid_configure_wrapper(csid);
 
-	/* Loop through all enabled ports and configure a stream for each */
+	/*
+	 * Replay the downstream start order for the double-buffered path
+	 * registers: program every enabled path, latch the config with a CSID
+	 * RUP/AUP, enable the RX, then issue START. Mainline's generic gen3 flow
+	 * relied on the VFE side latching the config after START; issuing the RUP
+	 * from the CSID before START makes the config active before the path runs.
+	 */
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
-		if (csid->phy.en_vc & BIT(i)) {
+		if (csid->phy.en_vc & BIT(i))
 			__csid_configure_rdi_stream(csid, enable, i, 0);
+
+	if (enable) {
+		u32 rup = 0;
+
+		for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+			if (csid->phy.en_vc & BIT(i))
+				rup |= CSID_RUP_AUP_RDI(i);
+		if (rup)
+			writel(rup, csid->base + CSID_RUP_AUP_CMD);
+	}
+
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+		if (csid->phy.en_vc & BIT(i))
 			__csid_configure_rx(csid, &csid->phy, 0);
+
+	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
+		if (csid->phy.en_vc & BIT(i))
 			__csid_ctrl_rdi(csid, enable, i);
-		}
 }
 
 static int csid_configure_testgen_pattern(struct csid_device *csid, s32 val)
@@ -318,7 +358,8 @@ static int csid_reset(struct csid_device *csid)
 
 	writel(1, csid->base + CSID_TOP_IRQ_CLEAR);
 	writel(1, csid->base + CSID_IRQ_CMD);
-	writel(1, csid->base + CSID_TOP_IRQ_MASK);
+	writel(TOP_IRQ_STATUS_RESET_DONE | TOP_IRQ_STATUS_BUF_DONE,
+	       csid->base + CSID_TOP_IRQ_MASK);
 
 	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++)
 		if (csid->phy.en_vc & BIT(i)) {
@@ -327,6 +368,16 @@ static int csid_reset(struct csid_device *csid)
 			writel(IRQ_CMD_CLEAR, csid->base + CSID_IRQ_CMD);
 			writel(BIT(BUF_DONE_IRQ_STATUS_RDI_OFFSET + i),
 			       csid->base + CSID_BUF_DONE_IRQ_MASK);
+
+			/*
+			 * The ISR acts on RUP_DONE to clear the reg-update bit,
+			 * but nothing ever unmasked it, so it could not fire.
+			 */
+			writel(RUP_DONE_IRQ_STATUS,
+			       csid->base + CSID_CSI2_RDIN_IRQ_CLEAR(i));
+			writel(IRQ_CMD_CLEAR, csid->base + CSID_IRQ_CMD);
+			writel(RUP_DONE_IRQ_STATUS,
+			       csid->base + CSID_CSI2_RDIN_IRQ_MASK(i));
 		}
 
 	/* preserve registers */
