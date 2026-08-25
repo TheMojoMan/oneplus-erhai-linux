@@ -901,6 +901,8 @@ static int audioreach_widget_load_buffer(struct snd_soc_component *component,
 		break;
 	case MODULE_ID_I2S_SINK:
 	case MODULE_ID_I2S_SOURCE:
+	case MODULE_ID_TDM_SINK:
+	case MODULE_ID_TDM_SOURCE:
 		audioreach_widget_i2s_module_load(mod, mod_array);
 		break;
 	case MODULE_ID_AUDIO_IF_SINK:

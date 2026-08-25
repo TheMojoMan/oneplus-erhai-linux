@@ -2,6 +2,9 @@
 // Copyright (c) 2022, Linaro Limited
 
 #include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+#include <linux/clk.h>
+#include <linux/of.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <sound/soc.h>
@@ -170,6 +173,49 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	return 0;
+
+
+/*
+ * The AW88261 amplifiers on the secondary TDM bus need a running LPAIF bit
+ * clock (8 slots x 32 bit @ 48 kHz) before their PLL-lock check, and the DSP
+ * does not vote for it on its own here. Vote for it from the AP side through
+ * q6prm when that backend is initialised.
+ */
+#define SEC_TDM_IBIT_RATE	12288000
+
+static void sc8280xp_vote_sec_tdm_bclk(struct device *dev)
+{
+	struct of_phandle_args clkspec;
+	struct device_node *np;
+	struct clk *clk;
+	int ret;
+
+	np = of_find_compatible_node(NULL, NULL, "qcom,q6prm-lpass-clocks");
+	if (!np) {
+		dev_err(dev, "q6prm-lpass-clocks node not found\n");
+		return;
+	}
+
+	clkspec.np = np;
+	clkspec.args_count = 2;
+	clkspec.args[0] = LPASS_CLK_ID_SEC_TDM_IBIT;
+	clkspec.args[1] = LPASS_CLK_ATTRIBUTE_COUPLE_NO;
+	clk = of_clk_get_from_provider(&clkspec);
+	of_node_put(np);
+	if (IS_ERR(clk)) {
+		dev_err(dev, "failed to get SEC_TDM_IBIT: %ld\n", PTR_ERR(clk));
+		return;
+	}
+
+	ret = clk_set_rate(clk, SEC_TDM_IBIT_RATE);
+	if (ret)
+		dev_err(dev, "failed to set SEC_TDM_IBIT rate: %d\n", ret);
+
+	ret = clk_prepare_enable(clk);
+	if (ret)
+		dev_err(dev, "failed to enable SEC_TDM_IBIT: %d\n", ret);
+
+
 }
 
 static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
@@ -181,6 +227,14 @@ static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
 	int dp_pcm_id = 0;
 
 	switch (cpu_dai->id) {
+	case PRIMARY_MI2S_RX...QUATERNARY_MI2S_TX:
+	case QUINARY_MI2S_RX...QUINARY_MI2S_TX:
+		snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+		if (cpu_dai->id == SECONDARY_MI2S_RX)
+			sc8280xp_vote_sec_tdm_bclk(card->dev);
+		break;
+
+
 	case WSA_CODEC_DMA_RX_0:
 	case WSA_CODEC_DMA_RX_1:
 		/*
