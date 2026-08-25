@@ -5,12 +5,30 @@
 #include <linux/clk.h>
 #include <linux/completion.h>
 #include <linux/i2c.h>
+#include <linux/interconnect.h>
 #include <linux/io.h>
+#include <linux/iopoll.h>
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/pm_runtime.h>
+
+/*
+ * erhai: boot-safe CCI CSR bring-up gate. On sm8750, running the CCI CSR
+ * bring-up (CPAS-TOP unlock + qchannel wakeup + cci_reset) at probe time races
+ * pre-userspace and can wedge the boot uncapturably (no serial, Mu wipes DRAM).
+ * Default 0 makes probe enable clocks and cast the interconnect votes but SKIP
+ * the CSR bring-up, so the device boots clean and inert. The boot service arms
+ * it from a running system (where a hang only costs a reboot):
+ *   echo 1 > /sys/module/i2c_qcom_cci/parameters/erhai_cci_csr
+ *   echo <dev> > /sys/bus/platform/drivers/i2c-qcom-cci/unbind
+ *   echo <dev> > /sys/bus/platform/drivers/i2c-qcom-cci/bind
+ */
+static int erhai_cci_csr;
+module_param(erhai_cci_csr, int, 0644);
+MODULE_PARM_DESC(erhai_cci_csr,
+		 "erhai: nonzero = run CCI CSR bring-up at probe; 0 (default) = defer (boot-safe)");
 
 #define CCI_HW_VERSION				0x0
 #define CCI_RESET_CMD				0x004
@@ -127,6 +145,15 @@ struct cci {
 	const struct cci_data *data;
 	struct clk_bulk_data *clocks;
 	int nclocks;
+	/*
+	 * erhai: true only once the full path ran (cci_reset + pm_runtime_enable
+	 * + i2c_add_adapter). The deferred path (erhai_cci_csr=0) returns early
+	 * WITHOUT enabling pm or adding adapters; cci_remove must not then
+	 * pm_runtime_disable (imbalances disable_depth -> later real bind gets
+	 * -EACCES in pm_runtime_get_sync), del unregistered adapters, or cci_halt
+	 * a clock-gated block.
+	 */
+	bool probed_full;
 	struct cci_master master[NUM_MASTERS];
 };
 
@@ -587,8 +614,103 @@ static int cci_probe(struct platform_device *pdev)
 		goto disable_clocks;
 	}
 
-	val = readl(cci->base + CCI_HW_VERSION);
-	dev_dbg(dev, "CCI HW version = 0x%08x", val);
+	/*
+	 * erhai: vote the camera config-NoC AHB path (MASTER_APPSS_PROC ->
+	 * SLAVE_CAMERA_CFG, named "ahb"). On sm8750 the CCI CSR aperture at
+	 * 0xac7b000 is unreachable with clocks+GDSC alone (readl stalls the NoC);
+	 * this vote is what the downstream CPAS driver / mainline camss "ahb" path
+	 * do to open the config route. devm_of_icc_get() returns NULL when the DT
+	 * has no interconnects (other SoCs / the msm8996 fallback), so this is a
+	 * no-op there.
+	 */
+	{
+		struct icc_path *ahb = devm_of_icc_get(dev, "ahb");
+
+		if (IS_ERR(ahb))
+			return dev_err_probe(dev, PTR_ERR(ahb),
+					     "failed to get 'ahb' interconnect\n");
+		if (ahb) {
+			ret = icc_set_bw(ahb, 76800, 300000);
+			if (ret < 0) {
+				dev_err(dev, "failed to vote 'ahb' icc bw: %d\n", ret);
+				goto disable_clocks;
+			}
+		}
+	}
+
+	/*
+	 * erhai: vote the CAMNOC data-path mnoc interconnects
+	 * (MASTER_CAMNOC_HF -> SLAVE_MNOC_HF_MEM_NOC = "cam_hf", SF pair =
+	 * "cam_sf"). Both are members of mainline bcm_mm1 (the RPMh CAMNOC BCM),
+	 * so a nonzero vote fires that BCM and pulls the CAMNOC fabric out of
+	 * retention. This is downstream CPAS apply_default_axi_vote, run before
+	 * the qchannel handshake; without it the camnoc-domain CPAS-TOP control
+	 * regs (0x1C/0x5C) drop writes and QACCEPTN never asserts. No CESTA/CRM:
+	 * mainline manually controls the camnoc RCG (dispcc "cesta" TODO; display
+	 * works this way) and the RPMh wake is exactly this icc/BCM vote. NULL
+	 * when the DT lacks the path (older DTBs / non-erhai).
+	 */
+	{
+		static const char * const mnoc_names[] = { "cam_hf", "cam_sf" };
+		int mi;
+
+		for (mi = 0; mi < ARRAY_SIZE(mnoc_names); mi++) {
+			struct icc_path *p = devm_of_icc_get(dev, mnoc_names[mi]);
+
+			if (IS_ERR(p))
+				return dev_err_probe(dev, PTR_ERR(p),
+					"failed to get '%s' interconnect\n",
+					mnoc_names[mi]);
+			if (!p)
+				continue;
+			ret = icc_set_bw(p, 0, 3000000);
+			if (ret < 0) {
+				dev_err(dev, "failed to vote '%s' icc bw: %d\n",
+					mnoc_names[mi], ret);
+				goto disable_clocks;
+			}
+		}
+	}
+
+	if (!erhai_cci_csr) {
+		/*
+		 * Deferred (boot-safe default): clocks and interconnect votes are up
+		 * but no CSR was touched, so the device boots inert. Balance
+		 * cci_enable_clocks(); the boot service rebinds with erhai_cci_csr=1
+		 * to run the bring-up. GDSC stays managed by genpd and there is no
+		 * pm_runtime yet, so cci_remove leaves the clocks alone.
+		 */
+		cci_disable_clocks(cci);
+		return 0;
+	}
+
+	/*
+	 * erhai: CCI CSR bring-up. Under clocks + GDSC + interconnect votes the
+	 * CPAS control block (CPAS-TOP, reg[1] at 0xac04000) is reachable. Unlock
+	 * its protected registers (v880 secure_access_ctrl @0x1C = 0xFFFFFFFF) and
+	 * kick the CAMNOC Q-Channel wakeup (@0x5C, ack @0x60 bit0=QACCEPTN) before
+	 * touching the CCI CSR at 0xac7b000. QACCEPTN is advisory (mainline sm8650
+	 * never checks it), so the poll timeout only bounds the settle and is
+	 * non-fatal.
+	 */
+	{
+		struct resource *r2 = platform_get_resource(pdev, IORESOURCE_MEM, 1);
+		void __iomem *cpas_top = NULL;
+		u32 qstat = 0;
+
+		if (r2)
+			cpas_top = devm_ioremap(dev, r2->start, resource_size(r2));
+		if (!cpas_top) {
+			dev_err(dev, "no/failed CPAS-TOP reg[1] map\n");
+			ret = -ENOMEM;
+			goto disable_clocks;
+		}
+
+		writel(0xFFFFFFFF, cpas_top + 0x1C);
+		writel(0x1, cpas_top + 0x5C);
+		readl_poll_timeout(cpas_top + 0x60, qstat, (qstat & BIT(0)),
+				   10, 10000);
+	}
 
 	ret = cci_reset(cci);
 	if (ret < 0)
@@ -598,6 +720,7 @@ static int cci_probe(struct platform_device *pdev)
 	pm_runtime_use_autosuspend(dev);
 	pm_runtime_set_active(dev);
 	pm_runtime_enable(dev);
+	cci->probed_full = true;
 
 	for (i = 0; i < cci->data->num_masters; i++) {
 		if (!cci->master[i].cci)
@@ -632,6 +755,16 @@ static void cci_remove(struct platform_device *pdev)
 {
 	struct cci *cci = platform_get_drvdata(pdev);
 	int i;
+
+	/*
+	 * Deferred bring-up (erhai_cci_csr=0): nothing was set up — no adapters,
+	 * pm never enabled, clocks already disabled. Tearing down here would del
+	 * unregistered adapters, cci_halt a gated block, and over-disable runtime
+	 * pm (persists on the DT device across rebind -> next real bind hits
+	 * -EACCES). Leave it untouched.
+	 */
+	if (!cci->probed_full)
+		return;
 
 	for (i = 0; i < cci->data->num_masters; i++) {
 		if (cci->master[i].cci) {

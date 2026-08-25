@@ -5723,6 +5723,202 @@ static const struct camss_resources sm8650_resources = {
 	.vfe_num = ARRAY_SIZE(vfe_res_sm8650),
 };
 
+/*
+ * SM8750 ("sun") — RDI-LITE-ONLY subset.
+ *
+ * The full sun camera subsystem is architecturally reorganised vs sm8650 and
+ * does NOT map onto mainline gen3 (evidence, PHASE-B-PLAN.md 2026-07-11):
+ *   - no CPAS clocks in sm8750 camcc (sm8650 has 13) → gen3 RT VFE clock list
+ *     ("cpas_ahb"/"cpas_vfe*") cannot resolve;
+ *   - main ISP is TFE (CAM_CC_TFE_0/1/2_*, TFE_x_GDSC), a different block than
+ *     gen3 IFE; RT CSID (csid980) is fused inside the TFE;
+ *   - register map fully relocated.
+ * Only the CSID-lite / VFE-lite RDI raw-dump path reuses gen3 ops, and its
+ * camcc clocks (IFE_LITE_*, CSIPHY*, CSIxPHYTIMER, CSID_CSIPHY_RX) all exist on
+ * sm8750 with matching names. So this variant exposes CSIPHY0-5 + 2 CSID-lite +
+ * 2 VFE-lite only. Lite CSID skips the csid wrapper (csid-gen3.c is_lite early
+ * return) → csid_wrapper_res = NULL. ICC/interconnects deferred (icc_path_num=0)
+ * until frame-capture bring-up. Full pixel/TFE ISP = future TFE/980 driver.
+ */
+static const struct camss_subdev_resources csiphy_res_sm8750[] = {
+	/* CSIPHY0 */
+	{
+		.regulators = {},
+		.clock = { "csiphy0", "csiphy0_timer" },
+		.clock_rate = { { 400000000 }, { 400000000 } },
+		.reg = { "csiphy0" },
+		.interrupt = { "csiphy0" },
+		.csiphy = {
+			.id = 0,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845,
+		},
+	},
+	/* CSIPHY1 */
+	{
+		.regulators = {},
+		.clock = { "csiphy1", "csiphy1_timer" },
+		.clock_rate = { { 400000000 }, { 400000000 } },
+		.reg = { "csiphy1" },
+		.interrupt = { "csiphy1" },
+		.csiphy = {
+			.id = 1,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845,
+		},
+	},
+	/* CSIPHY2 */
+	{
+		.regulators = {},
+		.clock = { "csiphy2", "csiphy2_timer" },
+		.clock_rate = { { 400000000 }, { 400000000 } },
+		.reg = { "csiphy2" },
+		.interrupt = { "csiphy2" },
+		.csiphy = {
+			.id = 2,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845,
+		},
+	},
+	/* CSIPHY3 */
+	{
+		.regulators = {},
+		.clock = { "csiphy3", "csiphy3_timer" },
+		.clock_rate = { { 400000000 }, { 400000000 } },
+		.reg = { "csiphy3" },
+		.interrupt = { "csiphy3" },
+		.csiphy = {
+			.id = 3,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845,
+		},
+	},
+	/* CSIPHY4 — rear main sensor (SC1320CS) */
+	{
+		.regulators = {},
+		.clock = { "csiphy4", "csiphy4_timer" },
+		.clock_rate = { { 400000000 }, { 400000000 } },
+		.reg = { "csiphy4" },
+		.interrupt = { "csiphy4" },
+		.csiphy = {
+			.id = 4,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845,
+		},
+	},
+	/* CSIPHY5 — front sensor (SC820CS, on GENI i2c) */
+	{
+		.regulators = {},
+		.clock = { "csiphy5", "csiphy5_timer" },
+		.clock_rate = { { 400000000 }, { 400000000 } },
+		.reg = { "csiphy5" },
+		.interrupt = { "csiphy5" },
+		.csiphy = {
+			.id = 5,
+			.hw_ops = &csiphy_ops_3ph_1_0,
+			.formats = &csiphy_formats_sdm845,
+		},
+	},
+};
+
+static const struct camss_subdev_resources csid_res_sm8750[] = {
+	/* CSID-lite0 */
+	{
+		.regulators = {},
+		.clock = { "vfe_lite_ahb", "vfe_lite_csid", "vfe_lite_cphy_rx" },
+		.clock_rate = { { 0 },
+				{ 400000000, 480000000 },
+				{ 0 } },
+		.reg = { "csid_lite0" },
+		.interrupt = { "csid_lite0" },
+		.csid = {
+			.is_lite = true,
+			.parent_dev_ops = &vfe_parent_dev_ops,
+			.hw_ops = &csid_ops_gen3,
+			.formats = &csid_formats_gen2,
+		},
+	},
+	/* CSID-lite1 */
+	{
+		.regulators = {},
+		.clock = { "vfe_lite_ahb", "vfe_lite_csid", "vfe_lite_cphy_rx" },
+		.clock_rate = { { 0 },
+				{ 400000000, 480000000 },
+				{ 0 } },
+		.reg = { "csid_lite1" },
+		.interrupt = { "csid_lite1" },
+		.csid = {
+			.is_lite = true,
+			.parent_dev_ops = &vfe_parent_dev_ops,
+			.hw_ops = &csid_ops_gen3,
+			.formats = &csid_formats_gen2,
+		},
+	},
+};
+
+static const struct camss_subdev_resources vfe_res_sm8750[] = {
+	/* VFE-lite0 — CPAS clocks dropped (absent on sm8750 camcc) */
+	{
+		.regulators = {},
+		.clock = { "gcc_axi_hf", "camnoc_axi", "vfe_lite_ahb",
+			   "vfe_lite", "qdss_debug_xo", "camnoc_rt_ife_lite",
+		},
+		.clock_rate = { { 0 },
+				{ 300000000, 400000000 },
+				{ 0 },
+				{ 400000000, 480000000 },
+				{ 0 },
+				{ 0 },
+		},
+		.reg = { "vfe_lite0" },
+		.interrupt = { "vfe_lite0" },
+		.vfe = {
+			.line_num = 4,
+			.is_lite = true,
+			.hw_ops = &vfe_ops_gen3,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_845
+		},
+	},
+	/* VFE-lite1 */
+	{
+		.regulators = {},
+		.clock = { "gcc_axi_hf", "camnoc_axi", "vfe_lite_ahb",
+			   "vfe_lite", "qdss_debug_xo", "camnoc_rt_ife_lite",
+		},
+		.clock_rate = { { 0 },
+				{ 300000000, 400000000 },
+				{ 0 },
+				{ 400000000, 480000000 },
+				{ 0 },
+				{ 0 },
+		},
+		.reg = { "vfe_lite1" },
+		.interrupt = { "vfe_lite1" },
+		.vfe = {
+			.line_num = 4,
+			.is_lite = true,
+			.hw_ops = &vfe_ops_gen3,
+			.formats_rdi = &vfe_formats_rdi_845,
+			.formats_pix = &vfe_formats_pix_845
+		},
+	},
+};
+
+static const struct camss_resources sm8750_resources = {
+	.version = CAMSS_8750,
+	.pd_name = "top",
+	.csiphy_res = csiphy_res_sm8750,
+	.csid_res = csid_res_sm8750,
+	.csid_wrapper_res = NULL,
+	.vfe_res = vfe_res_sm8750,
+	.icc_res = NULL,
+	.icc_path_num = 0,
+	.csiphy_num = ARRAY_SIZE(csiphy_res_sm8750),
+	.csid_num = ARRAY_SIZE(csid_res_sm8750),
+	.vfe_num = ARRAY_SIZE(vfe_res_sm8750),
+};
+
 static const struct camss_resources x1e80100_resources = {
 	.version = CAMSS_X1E80100,
 	.pd_name = "top",
@@ -5757,6 +5953,7 @@ static const struct of_device_id camss_dt_match[] = {
 	{ .compatible = "qcom,sm8250-camss", .data = &sm8250_resources },
 	{ .compatible = "qcom,sm8550-camss", .data = &sm8550_resources },
 	{ .compatible = "qcom,sm8650-camss", .data = &sm8650_resources },
+	{ .compatible = "qcom,sm8750-camss", .data = &sm8750_resources },
 	{ .compatible = "qcom,x1e80100-camss", .data = &x1e80100_resources },
 	{ }
 };

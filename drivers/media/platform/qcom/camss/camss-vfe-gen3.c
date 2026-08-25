@@ -16,6 +16,9 @@
 	    ((vfe->camss->res->version == CAMSS_8775P) \
 	    || (vfe->camss->res->version == CAMSS_8300))
 
+#define IS_VFE_8750(vfe) \
+	    (vfe->camss->res->version == CAMSS_8750)
+
 #define BUS_REG_BASE_690 \
 	    (vfe_is_lite(vfe) ? 0x480 : 0x400)
 #define BUS_REG_BASE_780 \
@@ -23,14 +26,28 @@
 #define BUS_REG_BASE \
 	    (IS_VFE_690(vfe) ? BUS_REG_BASE_690 : BUS_REG_BASE_780)
 
+/*
+ * Per-client (write-master) register block offset relative to BUS_REG_BASE.
+ * On SM8750 (cam_vfe_lite98x) the bus write-client aperture sits at
+ * BUS_REG_BASE + 0x500 (RDI0 cfg at vfe_lite0 window +0x700), not +0x200 as on
+ * 780/690. Verified against the downstream cam_vfe_lite98x.h bus_client_reg map
+ * (RDI0 cfg 0x1700, our vfe_lite0 base = downstream base + 0x1000). Without this
+ * every WM write lands 0x300 low in dead space, the WM never enables, no DMA
+ * happens and CSID buf_done never fires (frames dropped, 0-byte captures).
+ */
+#define WM_CLIENT_OFF \
+	    (IS_VFE_8750(vfe) ? 0x500 : 0x200)
+
 #define VFE_TOP_CORE_CFG (0x24)
 #define VFE_DISABLE_DSCALING_DS4  BIT(21)
 #define VFE_DISABLE_DSCALING_DS16 BIT(22)
 
 #define VFE_BUS_WM_TEST_BUS_CTRL_690 (BUS_REG_BASE + 0xFC)
 #define VFE_BUS_WM_TEST_BUS_CTRL_780 (BUS_REG_BASE + 0xDC)
+#define VFE_BUS_WM_TEST_BUS_CTRL_8750 (BUS_REG_BASE + 0x128)
 #define VFE_BUS_WM_TEST_BUS_CTRL \
-	    (IS_VFE_690(vfe) ? VFE_BUS_WM_TEST_BUS_CTRL_690 \
+	    (IS_VFE_8750(vfe) ? VFE_BUS_WM_TEST_BUS_CTRL_8750 \
+	     : IS_VFE_690(vfe) ? VFE_BUS_WM_TEST_BUS_CTRL_690 \
 	     : VFE_BUS_WM_TEST_BUS_CTRL_780)
 /*
  * Bus client mapping:
@@ -50,25 +67,32 @@
 #define VFE_BUS_WM_CGC_OVERRIDE		(BUS_REG_BASE + 0x08)
 #define		WM_CGC_OVERRIDE_ALL		(0x7FFFFFF)
 
-#define VFE_BUS_WM_CFG(n)		(BUS_REG_BASE + 0x200 + (n) * 0x100)
+#define VFE_BUS_WM_CFG(n)		(BUS_REG_BASE + WM_CLIENT_OFF + 0x00 + (n) * 0x100)
 #define		WM_CFG_EN			BIT(0)
 #define		WM_VIR_FRM_EN			BIT(1)
 #define		WM_CFG_MODE			BIT(16)
-#define VFE_BUS_WM_IMAGE_ADDR(n)	(BUS_REG_BASE + 0x204 + (n) * 0x100)
-#define VFE_BUS_WM_FRAME_INCR(n)	(BUS_REG_BASE + 0x208 + (n) * 0x100)
-#define VFE_BUS_WM_IMAGE_CFG_0(n)	(BUS_REG_BASE + 0x20c + (n) * 0x100)
+#define VFE_BUS_WM_IMAGE_ADDR(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x04 + (n) * 0x100)
+/*
+ * 36-bit expanded-memory low-byte address offset (cam_vfe_lite98x addr_cfg =
+ * WM client +0x70). SM8750 uses expanded memory: the WM IOVA is split into
+ * image_addr = iova>>8 and addr_cfg = iova & 0xFF. Mainline writes image_addr
+ * (>>8) but never addr_cfg, leaving the DMA address low byte unlatched.
+ */
+#define VFE_BUS_WM_ADDR_CFG(n)		(BUS_REG_BASE + WM_CLIENT_OFF + 0x70 + (n) * 0x100)
+#define VFE_BUS_WM_FRAME_INCR(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x08 + (n) * 0x100)
+#define VFE_BUS_WM_IMAGE_CFG_0(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x0c + (n) * 0x100)
 #define		WM_IMAGE_CFG_0_DEFAULT_WIDTH	(0xFFFF)
-#define VFE_BUS_WM_IMAGE_CFG_2(n)	(BUS_REG_BASE + 0x214 + (n) * 0x100)
+#define VFE_BUS_WM_IMAGE_CFG_2(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x14 + (n) * 0x100)
 #define		WM_IMAGE_CFG_2_DEFAULT_STRIDE	(0xFFFF)
-#define VFE_BUS_WM_PACKER_CFG(n)	(BUS_REG_BASE + 0x218 + (n) * 0x100)
+#define VFE_BUS_WM_PACKER_CFG(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x18 + (n) * 0x100)
 
-#define VFE_BUS_WM_IRQ_SUBSAMPLE_PERIOD(n)	(BUS_REG_BASE + 0x230 + (n) * 0x100)
-#define VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(n)	(BUS_REG_BASE + 0x234 + (n) * 0x100)
-#define VFE_BUS_WM_FRAMEDROP_PERIOD(n)		(BUS_REG_BASE + 0x238 + (n) * 0x100)
-#define VFE_BUS_WM_FRAMEDROP_PATTERN(n)		(BUS_REG_BASE + 0x23c + (n) * 0x100)
+#define VFE_BUS_WM_IRQ_SUBSAMPLE_PERIOD(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x30 + (n) * 0x100)
+#define VFE_BUS_WM_IRQ_SUBSAMPLE_PATTERN(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x34 + (n) * 0x100)
+#define VFE_BUS_WM_FRAMEDROP_PERIOD(n)		(BUS_REG_BASE + WM_CLIENT_OFF + 0x38 + (n) * 0x100)
+#define VFE_BUS_WM_FRAMEDROP_PATTERN(n)		(BUS_REG_BASE + WM_CLIENT_OFF + 0x3c + (n) * 0x100)
 
-#define VFE_BUS_WM_MMU_PREFETCH_CFG(n)		(BUS_REG_BASE + 0x260 + (n) * 0x100)
-#define VFE_BUS_WM_MMU_PREFETCH_MAX_OFFSET(n)	(BUS_REG_BASE + 0x264 + (n) * 0x100)
+#define VFE_BUS_WM_MMU_PREFETCH_CFG(n)		(BUS_REG_BASE + WM_CLIENT_OFF + 0x60 + (n) * 0x100)
+#define VFE_BUS_WM_MMU_PREFETCH_MAX_OFFSET(n)	(BUS_REG_BASE + WM_CLIENT_OFF + 0x64 + (n) * 0x100)
 
 static void vfe_wm_start(struct vfe_device *vfe, u8 wm, struct vfe_line *line)
 {
@@ -123,10 +147,14 @@ static void vfe_wm_update(struct vfe_device *vfe, u8 wm, u32 addr,
 {
 	wm = RDI_WM(wm);
 
-	if (IS_VFE_690(vfe))
+	if (IS_VFE_690(vfe)) {
 		writel(addr, vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
-	else
+	} else {
 		writel((addr >> 8), vfe->base + VFE_BUS_WM_IMAGE_ADDR(wm));
+		/* 36-bit expanded memory: low-byte offset in addr_cfg */
+		if (IS_VFE_8750(vfe))
+			writel(addr & 0xFF, vfe->base + VFE_BUS_WM_ADDR_CFG(wm));
+	}
 
 	dev_dbg(vfe->camss->dev, "wm:%d, image buf addr:0x%x\n",
 		wm, addr);
