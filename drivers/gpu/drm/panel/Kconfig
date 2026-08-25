@@ -1415,4 +1415,15 @@ config DRM_PANEL_XINPENG_XPP055C272
 	  Say Y here if you want to enable support for the Xinpeng
 	  XPP055C272 controller for 720x1280 LCD panels with MIPI/RGB/SPI
 	  system interfaces.
+
+config DRM_PANEL_ONEPLUS_XN242
+	tristate "OnePlus XN242 panel driver"
+	depends on OF
+	depends on DRM_MIPI_DSI
+	depends on BACKLIGHT_CLASS_DEVICE
+	help
+	  Say Y here if you want to enable support for the OnePlus XN242
+	  panel found in OnePlus Pad 3 (erhai) and OnePlus 13 (dodge).
+	  This panel uses a dual-DSI interface.
+
 endmenu
