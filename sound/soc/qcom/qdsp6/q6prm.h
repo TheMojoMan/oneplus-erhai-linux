@@ -22,6 +22,18 @@
 #define Q6PRM_LPASS_CLK_ID_QUAD_MI2S_IBIT                         0x106
 /* Clock ID for Quartnery I2S EBIT */
 #define Q6PRM_LPASS_CLK_ID_QUAD_MI2S_EBIT                         0x107
+/* Clock IDs for TDM IBIT/EBIT (ADSP-side, 0x200 base) */
+#define Q6PRM_LPASS_CLK_ID_PRI_TDM_IBIT                           0x200
+#define Q6PRM_LPASS_CLK_ID_PRI_TDM_EBIT                           0x201
+#define Q6PRM_LPASS_CLK_ID_SEC_TDM_IBIT                           0x202
+#define Q6PRM_LPASS_CLK_ID_SEC_TDM_EBIT                           0x203
+#define Q6PRM_LPASS_CLK_ID_TER_TDM_IBIT                           0x204
+#define Q6PRM_LPASS_CLK_ID_TER_TDM_EBIT                           0x205
+#define Q6PRM_LPASS_CLK_ID_QUAD_TDM_IBIT                          0x206
+#define Q6PRM_LPASS_CLK_ID_QUAD_TDM_EBIT                          0x207
+#define Q6PRM_LPASS_CLK_ID_QUIN_TDM_IBIT                          0x208
+#define Q6PRM_LPASS_CLK_ID_QUIN_TDM_EBIT                          0x209
+
 /* Clock ID for Speaker I2S IBIT */
 #define Q6PRM_LPASS_CLK_ID_SPEAKER_I2S_IBIT                       0x108
 /* Clock ID for Speaker I2S EBIT */
