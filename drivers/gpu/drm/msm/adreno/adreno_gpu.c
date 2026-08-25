@@ -391,6 +391,16 @@ int adreno_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
 		*value = adreno_gpu->chip_id;
 		if (!adreno_gpu->info->revn)
 			*value |= ((uint64_t) adreno_gpu->speedbin) << 32;
+		/*
+		 * Report the exact chip id mesa matches Adreno 830 on. Its
+		 * device table compares chip_id exactly for this part, and the
+		 * value the kernel uses internally carries the slice count and
+		 * speedbin, which do not compare equal -- so userspace would
+		 * fail to bind turnip and fall back to software rendering.
+		 * Only what userspace sees changes here.
+		 */
+		if (((u32)adreno_gpu->chip_id & 0xffffff00) == 0x44050000)
+			*value = 0x44050000;
 		return 0;
 	case MSM_PARAM_MAX_FREQ:
 		*value = adreno_gpu->base.fast_rate;

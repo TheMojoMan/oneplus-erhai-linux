@@ -19,6 +19,85 @@
 #include "msm_gpu_trace.h"
 #include "msm_mmu.h"
 
+/*
+ * erhai SM8750/Adreno-830 bring-up safety gate + direct GMU-boot trigger.
+ *
+ * The GMU firmware boot sequence below touches CX/GX MMIO that, if the
+ * power/clock topology is even slightly off, NoC-times-out and SILENTLY
+ * RESETS the whole SoC (no oops, no ramoops on this Mu UEFI -> boot loop).
+ * Default OFF so the GPU build always boots to userspace + SSH.
+ *
+ * Why a direct trigger (not just a flag): the boot-time auto-load attempts a
+ * resume while disarmed -> the gate returns -ENODEV, which POISONS the GPU
+ * platform device's runtime-PM into the `error` state. After that, a normal
+ * `power/control=on` resume is blocked, and unbind-to-clear DEADLOCKS in the
+ * msm display teardown (dsi_unbind, D-state). So writing 1 here calls
+ * a6xx_gmu_resume() DIRECTLY (under gmu.lock, on the un-poisoned GMU pdev),
+ * giving a clean one-shot GMU boot on demand:
+ *   echo 1 > /sys/module/msm/parameters/erhai_gmu_enable   # arms AND boots
+ * The write blocks until the boot returns (or the SoC wedges -> power-cycle;
+ * the next boot is safe, the parameter resets to 0).
+ * Re-trigger with `echo 0 > ...` then `echo 1 > ...` (single-shot per arm).
+ */
+bool erhai_gmu_enable;
+static struct a6xx_gpu *erhai_gmu_gpu;	/* set in a6xx_gmu_init for the trigger */
+
+static int erhai_gmu_enable_set(const char *val, const struct kernel_param *kp)
+{
+	int ret = param_set_bool(val, kp);
+
+	if (ret)
+		return ret;
+
+	if (erhai_gmu_enable && erhai_gmu_gpu) {
+		struct msm_gpu *gpu = &erhai_gmu_gpu->base.base;
+		struct msm_gpu *loaded;
+
+		/*
+		 * The gated boot-time load left the GPU pdev's runtime-PM with
+		 * power.runtime_error set (rpm_resume returns -EINVAL while it is
+		 * set) and disable_depth>0 (pm_runtime_disable). Reset to a clean
+		 * SUSPENDED state (clears runtime_error; valid because it is
+		 * disabled) so adreno_load_gpu's enable+get_sync actually resumes.
+		 */
+		pm_runtime_set_suspended(&gpu->pdev->dev);
+
+		/*
+		 * Full proper load: adreno_load_gpu re-enables runpm, resumes (GMU
+		 * boots, gate now armed), then msm_gpu_hw_init -> a6xx_hw_init -> zap
+		 * shader TrustZone auth (gen80200_zap.mbn) + CP/ringbuffer bring-up.
+		 * On success renderD128 becomes a real adreno node.
+		 */
+		loaded = adreno_load_gpu(gpu->dev);
+
+		/*
+		 * Publish the loaded GPU into msm_drm_private exactly like mainline
+		 * load_gpu() (msm_drv.c) does. adreno_load_gpu() does NOT set priv->gpu
+		 * itself, and this trigger calls it directly (bypassing load_gpu's
+		 * `if (!priv->gpu)` guard). Without this, the first userspace DRM open
+		 * (e.g. vkcompute) sees priv->gpu == NULL and calls adreno_load_gpu()
+		 * AGAIN -> a second pm_runtime_enable() on the already-enabled gpu pdev
+		 * -> "Unbalanced pm_runtime_enable!". Setting it makes that open reuse
+		 * this GPU and just runtime-resume it (the intended slumber->resume path).
+		 */
+		if (loaded) {
+			struct msm_drm_private *priv = gpu->dev->dev_private;
+
+			priv->gpu = loaded;
+		}
+	}
+	return 0;	/* never fail the sysfs write; the boot result is in the log */
+}
+
+static const struct kernel_param_ops erhai_gmu_enable_ops = {
+	.set = erhai_gmu_enable_set,
+	.get = param_get_bool,
+};
+module_param_cb(erhai_gmu_enable, &erhai_gmu_enable_ops, &erhai_gmu_enable, 0644);
+MODULE_PARM_DESC(erhai_gmu_enable, "erhai: write 1 to arm+directly boot the Adreno GMU (bring-up; default off)");
+
+MODULE_PARM_DESC(erhai_no_ifpc, "erhai: disable IFPC (idle_level=ACTIVE) so context regs persist for regdump");
+
 static void a6xx_gmu_fault(struct a6xx_gmu *gmu)
 {
 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
@@ -1089,6 +1168,24 @@ static void a6xx_gmu_rpmh_off(struct a6xx_gmu *gmu)
 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
 	u32 val, seqmem_off = 0;
 
+	/*
+	 * On a8xx (gen8) this is only ever reached from a6xx_gmu_force_off() --
+	 * the ungraceful "GMU is wedged / hang recovery" path. By the time we get
+	 * here the GPU RSC has already run its slumber sequence, so the RSCC TCS
+	 * DRV0 STATUS block is UNCLOCKED and reading it faults with a synchronous
+	 * external abort (ESR 0x96000010). The RSC lives in its own clock domain,
+	 * NOT the GX domain -- gx_is_on() reads 1 (GX still powered after a hang)
+	 * while the RSCC is already down, so it is the wrong discriminator here.
+	 * Draining outstanding RPMh votes is best-effort on a forced kill anyway;
+	 * the CM3_SYSRESET + a6xx_rpmh_stop that follow handle the teardown, and
+	 * the RSC wakeup sequence re-establishes votes on the next hw_init.
+	 * Downstream gen8 only polls these (gen8_complete_rpmh_votes) earlier in
+	 * its suspend, while the RSC is still awake. So skip the poll on a8xx.
+	 */
+	if (adreno_is_a8xx(adreno_gpu)) {
+		return;
+	}
+
 	/* The second spin of A7xx GPUs messed with some register offsets.. */
 	if (adreno_is_a740_family(adreno_gpu) || adreno_is_a722(adreno_gpu) ||
 	    adreno_is_a8xx(adreno_gpu))
@@ -1316,6 +1413,15 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 	if (WARN(!gmu->initialized, "The GMU is not set up yet\n"))
 		return -EINVAL;
 
+	/*
+	 * erhai bring-up gate: refuse the GMU hardware boot unless explicitly
+	 * armed. Non-fatal -> runtime resume fails, GPU stays suspended, the
+	 * DRM/render node and userspace come up normally. No boot-time wedge.
+	 */
+	if (!erhai_gmu_enable) {
+		return -ENODEV;
+	}
+
 	gmu->hung = false;
 
 	/* Turn on the resources */
@@ -1337,6 +1443,16 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 
 	/* Read the slice info on A8x GPUs */
 	a8xx_gpu_get_slice_info(gpu);
+
+	/*
+	 * The vendor driver calls qcom_scm_gpu_init_regs() during GMU boot, after
+	 * the CX gdsc and GMU clocks but before the GMU device runs, requesting
+	 * GPU_ALWAYS_EN and GPU_TSENSE_EN. Upstream a8xx omits it; this TZ appears
+	 * to want GPU_ALWAYS_EN programmed before it will accept the zap PAS auth.
+	 * Not every firmware implements the call, so a failure is non-fatal.
+	 */
+	if (adreno_is_a8xx(adreno_gpu))
+		qcom_scm_gpu_init_regs(BIT(0) | BIT(3));
 
 	/* Set the bus quota to a reasonable value for boot */
 	a6xx_gmu_set_initial_bw(gpu, gmu);
@@ -1368,6 +1484,7 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 	ret = a6xx_hfi_start(gmu, status);
 	if (ret)
 		goto disable_irq;
+
 
 	/*
 	 * Turn on the GMU firmware fault interrupt after we know the boot
@@ -2299,7 +2416,6 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 	if (ret)
 		return ret;
 
-	/* Set GMU idle level */
 	gmu->idle_level = (adreno_gpu->info->quirks & ADRENO_QUIRK_IFPC) ?
 		GMU_IDLE_STATE_IFPC : GMU_IDLE_STATE_ACTIVE;
 
@@ -2469,6 +2585,8 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 	a6xx_gmu_rpmh_init(gmu);
 
 	gmu->initialized = true;
+
+	erhai_gmu_gpu = a6xx_gpu;	/* expose to the bring-up trigger (echo 1 > erhai_gmu_enable) */
 
 	return 0;
 
