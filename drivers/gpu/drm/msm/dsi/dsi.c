@@ -3,6 +3,8 @@
  * Copyright (c) 2015, The Linux Foundation. All rights reserved.
  */
 
+#include <drm/drm_encoder.h>
+
 #include "dsi.h"
 
 bool msm_dsi_is_cmd_mode(struct msm_dsi *msm_dsi)
@@ -236,6 +238,9 @@ int msm_dsi_modeset_init(struct msm_dsi *msm_dsi, struct drm_device *dev,
 	int ret;
 
 	msm_dsi->dev = dev;
+	/* Remember the encoder for both links (the bonded peer shares it) so the
+	 * seamless-dfps path can match a crtc to its DSI host(s). */
+	msm_dsi->encoder = encoder;
 
 	ret = msm_dsi_host_modeset_init(msm_dsi->host, dev);
 	if (ret) {
@@ -266,5 +271,24 @@ void msm_dsi_snapshot(struct msm_disp_state *disp_state, struct msm_dsi *msm_dsi
 {
 	msm_dsi_host_snapshot(disp_state, msm_dsi->host);
 	msm_dsi_phy_snapshot(disp_state, msm_dsi->phy);
+}
+
+/*
+ * Seamless dfps timing update for a single DSI link. No-op unless this link's
+ * encoder is in @encoder_mask (i.e. it drives the crtc being switched). Updates the
+ * host's cached mode and re-runs video timing setup live (no clock/PLL/PHY change).
+ * Called from the atomic commit tail for a porch-only change.
+ */
+void msm_dsi_seamless_timing_update(struct msm_dsi *msm_dsi,
+				    u32 encoder_mask, bool is_bonded_dsi,
+				    const struct drm_display_mode *mode)
+{
+	if (!msm_dsi || !msm_dsi->host || !msm_dsi->encoder)
+		return;
+	if (!(drm_encoder_mask(msm_dsi->encoder) & encoder_mask))
+		return;
+
+	msm_dsi_host_set_display_mode(msm_dsi->host, mode);
+	msm_dsi_host_seamless_timing(msm_dsi->host, is_bonded_dsi);
 }
 

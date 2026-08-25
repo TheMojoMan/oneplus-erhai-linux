@@ -118,6 +118,10 @@ struct dpu_encoder_phys_ops {
 	void (*cleanup_wb_job)(struct dpu_encoder_phys *phys_enc,
 			struct drm_writeback_job *job);
 	bool (*is_valid_for_commit)(struct dpu_encoder_phys *phys_enc);
+	/* Seamless dfps: reprogram the timing generator porches for a new
+	 * refresh rate on a running encoder (no teardown, no clock change). */
+	void (*seamless_mode_set)(struct dpu_encoder_phys *phys_enc,
+			const struct drm_display_mode *mode);
 };
 
 /**
@@ -160,6 +164,7 @@ enum dpu_intr_idx {
  * @intf_mode:		Interface mode
  * @enc_spinlock:	Virtual-Encoder-Wide Spin Lock for IRQ purposes
  * @enable_state:	Enable state tracking
+ * @error_count:	Consecutive hw-initiated ctl-reset failures (for recovery)
  * @vblank_refcount:	Reference count of vblank request
  * @vsync_cnt:		Vsync count for the physical encoder
  * @underrun_cnt:	Underrun count for the physical encoder
@@ -190,6 +195,7 @@ struct dpu_encoder_phys {
 	enum dpu_intf_mode intf_mode;
 	spinlock_t *enc_spinlock;
 	enum dpu_enc_enable_state enable_state;
+	unsigned int error_count;
 	int vblank_refcount;
 	atomic_t vsync_cnt;
 	atomic_t underrun_cnt;
@@ -300,11 +306,25 @@ static inline enum dpu_3d_blend_mode dpu_encoder_helper_get_3d_blend_mode(
 
 	dpu_cstate = to_dpu_crtc_state(phys_enc->parent->crtc->state);
 
-	/* Use merge_3d unless DSC MERGE topology is used */
+	/*
+	 * Standard mainline path: a SOLO encoder driving two layer mixers (the
+	 * high-res "stream merge" topology, e.g. a 2560-wide DP sink → 2 LMs →
+	 * MERGE_3D → 1 INTF) must engage MERGE_3D so both LMs combine into one
+	 * stream for the single interface; otherwise the second LM/PP is orphaned
+	 * and the frame never completes (CTL reset stuck, frame-done timeout).
+	 * Compare against the literal 2, NOT CRTC_DUAL_MIXERS: erhai redefined
+	 * CRTC_DUAL_MIXERS 2→4 to size the DSI 4-LM cstate arrays, which silently
+	 * turned this mainline `== 2` test false for the DP path. The DSI 4-LM
+	 * case is handled by the num_mixers==4 branch below.
+	 */
 	if (phys_enc->split_role == ENC_ROLE_SOLO &&
-	    dpu_cstate->num_mixers == CRTC_DUAL_MIXERS &&
+	    dpu_cstate->num_mixers == 2 &&
 	    !dpu_encoder_use_dsc_merge(phys_enc->parent))
 		return BLEND_3D_H_ROW_INT;
+
+	/* 4-LM Android topology: each LM has its own DSC, so no MERGE_3D. */
+	if (dpu_cstate->num_mixers == 4)
+		return BLEND_3D_NONE;
 
 	return BLEND_3D_NONE;
 }
