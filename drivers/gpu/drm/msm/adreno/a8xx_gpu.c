@@ -9,6 +9,7 @@
 #include "a6xx_gmu.xml.h"
 
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/devfreq.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/pm_domain.h>
@@ -58,6 +59,7 @@ static void a8xx_aperture_clear(struct msm_gpu *gpu)
 	a8xx_aperture_release(gpu, flags);
 }
 
+
 static void a8xx_write_pipe(struct msm_gpu *gpu, enum adreno_pipe pipe, u32 offset, u32 data)
 {
 	unsigned long flags;
@@ -89,6 +91,7 @@ void a8xx_gpu_get_slice_info(struct msm_gpu *gpu)
 	const struct a6xx_info *info = adreno_gpu->info->a6xx;
 	struct device *dev = &gpu->pdev->dev;
 	u32 slice_mask;
+	u32 raw_slice = 0;
 
 	if (adreno_gpu->info->family < ADRENO_8XX_GEN1)
 		return;
@@ -104,8 +107,29 @@ void a8xx_gpu_get_slice_info(struct msm_gpu *gpu)
 		return;
 	}
 
-	slice_mask &= a6xx_cx_misc_read(a6xx_gpu,
+	raw_slice = a6xx_cx_misc_read(a6xx_gpu,
 			REG_A8XX_CX_MISC_SLICE_ENABLE_FINAL);
+	slice_mask &= raw_slice;
+
+	/*
+	 * If the CX_MISC SLICE_ENABLE_FINAL read comes back 0, slice_mask becomes 0 and
+	 * a8xx_get_first_slice() returns ffs(0)-1 = 0xFFFFFFFF -- a garbage SLICEID
+	 * that makes the dyn pwrup per-pipe aperture READS (a8xx_read_pipe_slice)
+	 * target a non-existent slice -> TZ/HW err-fatal at PIPE_BR (pinned by
+	 * -> a TZ/hardware fault at PIPE_BR. The vendor driver reads those regs with
+	 * slice=0 unconditionally. Clamp a zero mask to slice 0 (always exists).
+	 */
+	/*
+	 * SLICE_ENABLE_FINAL is sampled early in the GMU resume, before the fuse
+	 * block is powered, and reads back as zero on this part. Zero is not a
+	 * usable mask: a8xx_get_first_slice() would return ffs(0) - 1, giving a
+	 * garbage SLICEID that makes the per-pipe aperture reads target a slice
+	 * that does not exist, and the slice count also feeds the chip id that
+	 * userspace matches its device on. Fall back to every slice the catalog
+	 * says this part has.
+	 */
+	if (!slice_mask)
+		slice_mask = GENMASK(adreno_gpu->info->a6xx->max_slices - 1, 0);
 
 	a6xx_gpu->slice_mask = slice_mask;
 
@@ -200,15 +224,17 @@ static void a8xx_set_hwcg(struct msm_gpu *gpu, bool state)
 	struct a6xx_gmu *gmu = &a6xx_gpu->gmu;
 	u32 val;
 
-	if (adreno_is_x285(adreno_gpu) && state)
-		gpu_write(gpu, REG_A8XX_RBBM_CGC_0_PC, 0x00000702);
+	{
+		if (adreno_is_x285(adreno_gpu) && state)
+			gpu_write(gpu, REG_A8XX_RBBM_CGC_0_PC, 0x00000702);
 
-	gmu_write(gmu, REG_A6XX_GPU_GMU_AO_GMU_CGC_MODE_CNTL,
-			state ? adreno_gpu->info->a6xx->gmu_cgc_mode : 0);
-	gmu_write(gmu, REG_A6XX_GPU_GMU_AO_GMU_CGC_DELAY_CNTL,
-			state ? 0x110111 : 0);
-	gmu_write(gmu, REG_A6XX_GPU_GMU_AO_GMU_CGC_HYST_CNTL,
-			state ? 0x55555 : 0);
+		gmu_write(gmu, REG_A6XX_GPU_GMU_AO_GMU_CGC_MODE_CNTL,
+				state ? adreno_gpu->info->a6xx->gmu_cgc_mode : 0);
+		gmu_write(gmu, REG_A6XX_GPU_GMU_AO_GMU_CGC_DELAY_CNTL,
+				state ? 0x110111 : 0);
+		gmu_write(gmu, REG_A6XX_GPU_GMU_AO_GMU_CGC_HYST_CNTL,
+				state ? 0x55555 : 0);
+	}
 
 	gpu_write(gpu, REG_A8XX_RBBM_CLOCK_CNTL_GLOBAL, 1);
 	gpu_write(gpu, REG_A8XX_RBBM_CGC_GLOBAL_LOAD_CMD, !!state);
@@ -406,6 +432,7 @@ static void a8xx_patch_pwrup_reglist(struct msm_gpu *gpu)
 
 	lock->gpu_req = lock->cpu_req = lock->turn = 0;
 
+
 	reglist = adreno_gpu->info->a6xx->ifpc_reglist;
 	if (reglist) {
 		lock->ifpc_list_len = reglist->count;
@@ -541,6 +568,10 @@ static int a8xx_cp_init(struct msm_gpu *gpu)
 	return a8xx_idle(gpu, ring) ? 0 : -EINVAL;
 }
 
+
+
+
+
 #define A8XX_INT_MASK \
 	(A6XX_RBBM_INT_0_MASK_CP_AHB_ERROR | \
 	 A6XX_RBBM_INT_0_MASK_RBBM_ATB_ASYNCFIFO_OVERFLOW | \
@@ -556,6 +587,26 @@ static int a8xx_cp_init(struct msm_gpu *gpu)
 	 A6XX_RBBM_INT_0_MASK_UCHE_TRAP_INTR | \
 	 A6XX_RBBM_INT_0_MASK_TSBWRITEERROR | \
 	 A6XX_RBBM_INT_0_MASK_SWFUSEVIOLATION)
+
+/*
+ * #34: hwsched GPU interrupt mask (downstream GEN8_HWSCHED_INT_MASK,
+ * adreno_gen8.h:264). In hwsched mode the GMU fields all the
+ * submission/scheduling/hang interrupts -- CP_SW, CP_HW_ERROR, PM4CP,
+ * RB_DONE_TS, CACHE_FLUSH_TS, HANG_DETECT, GPC_ERROR, SWFUSEVIOLATION are
+ * masked off the AP line (the AP's legacy a8xx_irq would otherwise process
+ * GMU-owned events -- e.g. retire the legacy ring fence or trigger AP-side
+ * hang handling -- racing the GMU). Only the AHB/ATB-bus/UCHE/TSB *error*
+ * interrupts stay on the AP. Bit-for-bit == GEN8_HWSCHED_INT_MASK (AHBERROR
+ * b1, ATBASYNCFIFO b6, ATBBUSOVERFLOW b22, OUTOFBOUNDACCESS b24, UCHETRAP
+ * b25, TSBWRITEERROR b28) = 0x13400042.
+ */
+#define A8XX_HWSCHED_INT_MASK \
+	(A6XX_RBBM_INT_0_MASK_CP_AHB_ERROR | \
+	 A6XX_RBBM_INT_0_MASK_RBBM_ATB_ASYNCFIFO_OVERFLOW | \
+	 A6XX_RBBM_INT_0_MASK_RBBM_ATB_BUS_OVERFLOW | \
+	 A6XX_RBBM_INT_0_MASK_UCHE_OOB_ACCESS | \
+	 A6XX_RBBM_INT_0_MASK_UCHE_TRAP_INTR | \
+	 A6XX_RBBM_INT_0_MASK_TSBWRITEERROR)
 
 #define A8XX_APRIV_MASK \
 	(A8XX_CP_APRIV_CNTL_PIPE_ICACHE | \
@@ -645,11 +696,7 @@ static int hw_init(struct msm_gpu *gpu)
 
 	gpu_write(gpu, REG_A6XX_RBBM_SECVID_TSB_CNTL, 0);
 
-	/*
-	 * Disable the trusted memory range - we don't actually supported secure
-	 * memory rendering at this point in time and we don't want to block off
-	 * part of the virtual memory space.
-	 */
+	/* Trusted memory range -- zeroed, no secure rendering */
 	gpu_write64(gpu, REG_A6XX_RBBM_SECVID_TSB_TRUSTED_BASE, 0x00000000);
 	gpu_write(gpu, REG_A6XX_RBBM_SECVID_TSB_TRUSTED_SIZE, 0x00000000);
 
@@ -790,14 +837,19 @@ static int hw_init(struct msm_gpu *gpu)
 	 * guessed wrong then access to the RBBM_SECVID_TRUST_CNTL register will
 	 * be blocked and a permissions violation will soon follow.
 	 */
+	/*
+	 */
+
 	ret = a6xx_zap_shader_init(gpu);
+
 	if (!ret) {
 		OUT_PKT7(gpu->rb[0], CP_SET_SECURE_MODE, 1);
 		OUT_RING(gpu->rb[0], 0x00000000);
 
 		a6xx_flush(gpu, gpu->rb[0]);
-		if (!a8xx_idle(gpu, gpu->rb[0]))
+		if (!a8xx_idle(gpu, gpu->rb[0])) {
 			return -EINVAL;
+		}
 	} else if (ret == -ENODEV) {
 		/*
 		 * This device does not use zap shader (but print a warning
@@ -828,6 +880,20 @@ static int hw_init(struct msm_gpu *gpu)
 
 	/* Enable hardware clockgating */
 	a8xx_set_hwcg(gpu, true);
+
+	/*
+	 * Re-apply the non-context reglist now that the
+	 * CP is up and non-secure. The early a8xx_nonctxt_config() at hw_init runs
+	 * BEFORE the SQE starts, and on gen8 the banked BR/BV PC config regs written
+	 * then read back as zero -- PC_VIS_STREAM_CNTL among them, which gates the
+	 * visibility stream and so costs every fragment.
+	 */
+	if (!ret) {
+		u32 gp = 0;
+
+		a8xx_nonctxt_config(gpu, &gp);
+		a8xx_aperture_clear(gpu);
+	}
 out:
 	/* Last step - yield the ringbuffer */
 	a8xx_preempt_start(gpu);
@@ -859,6 +925,7 @@ int a8xx_hw_init(struct msm_gpu *gpu)
 
 	return ret;
 }
+
 
 static void a8xx_dump(struct msm_gpu *gpu)
 {
@@ -1295,10 +1362,23 @@ void a8xx_bus_clear_pending_transactions(struct adreno_gpu *adreno_gpu, bool gx_
 {
 	struct msm_gpu *gpu = &adreno_gpu->base;
 
+	/*
+	 * The gx-side GBIF halt registers (RBBM_GBIF_HALT[_ACK]) live in the GX
+	 * power domain. On the GMU force-off / collapse path (a6xx_gmu_force_off
+	 * -> bus_halt(gx_off=true)) the GX rail may already be collapsing, so an
+	 * unguarded read of RBBM_GBIF_HALT_ACK faults on an unclocked access and
+	 * wedges the suspend worker. Only halt the GX side when GX is actually on
+	 * -- mirrors downstream gen8 (gen8_gmu_pwrctrl_suspend guards every GX
+	 * touch behind gen8_gmu_gx_is_on()). a8xx_gmu_gx_is_on() reads the
+	 * CX-domain GMU_PWR_CLK_STATUS, which is always safe while GMU CX is up.
+	 */
 	if (gx_off) {
-		/* Halt the gx side of GBIF */
-		gpu_write(gpu, REG_A8XX_RBBM_GBIF_HALT, 1);
-		spin_until(gpu_read(gpu, REG_A8XX_RBBM_GBIF_HALT_ACK) & 1);
+		if (adreno_gpu->funcs->gx_is_on(adreno_gpu)) {
+			/* Halt the gx side of GBIF */
+			gpu_write(gpu, REG_A8XX_RBBM_GBIF_HALT, 1);
+			spin_until(gpu_read(gpu, REG_A8XX_RBBM_GBIF_HALT_ACK) & 1);
+		} else {
+		}
 	}
 
 	/* Halt new client requests on GBIF */
