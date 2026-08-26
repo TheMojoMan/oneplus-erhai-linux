@@ -118,10 +118,16 @@
 		audio-routing = "IN1_HPHL", "HPHL_OUT",
 				"IN2_HPHR", "HPHR_OUT",
 				"AMIC2", "MIC BIAS2",
-				"VA DMIC0", "VA MIC BIAS3",
-				"VA DMIC1", "VA MIC BIAS3",
-				"VA DMIC2", "VA MIC BIAS1",
-				"VA DMIC3", "VA MIC BIAS1",
+				/* The internal mics hang off the va-macro's own
+				 * mic-bias (vdd-micb = vreg_l1b_1p8), NOT the
+				 * WCD9395's bias pins. Without these routes DAPM
+				 * never enables 7660000.codec-vdd-micb (0
+				 * consumers in regulator_summary) -> capture
+				 * runs but delivers all-zero samples. */
+				"VA DMIC0", "vdd-micb",
+				"VA DMIC1", "vdd-micb",
+				"VA DMIC2", "vdd-micb",
+				"VA DMIC3", "vdd-micb",
 				"TX SWR_INPUT1", "ADC2_OUTPUT";
 
 		wcd-playback-dai-link {
