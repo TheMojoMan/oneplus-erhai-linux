@@ -131,10 +131,12 @@
 				"DMIC2", "MIC BIAS3",
 				"DMIC3", "MIC BIAS1",
 				"DMIC4", "MIC BIAS1",
-				"TX SWR_INPUT0", "ADC1_OUTPUT",
-				"TX SWR_INPUT1", "ADC2_OUTPUT",
-				"TX SWR_INPUT2", "ADC3_OUTPUT",
-				"TX SWR_INPUT3", "ADC4_OUTPUT";
+				/* Slot numbers must match the TX SMIC MUX selection
+				 * in the UCM (SWR_MIC9 <- ADC1, SWR_MIC4 <- ADC4),
+				 * otherwise DAPM never bridges wcd939x -> tx-macro
+				 * and the ADCs stay unpowered during capture. */
+				"TX SWR_INPUT9", "ADC1_OUTPUT",
+				"TX SWR_INPUT4", "ADC4_OUTPUT";
 
 		wcd-playback-dai-link {
 			link-name = "WCD Playback";
