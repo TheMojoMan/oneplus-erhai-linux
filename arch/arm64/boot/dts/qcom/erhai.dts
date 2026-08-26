@@ -2214,6 +2214,9 @@
 /* ===== Audio Phase 1 (v273) — SoundWire codecs + LPASS macros ===== */
 
 &lpass_vamacro {
+	pinctrl-names = "default";
+	/* VA DMIC pins gpio6-9: without this mux the internal mics capture floating input */
+	pinctrl-0 = <&dmic01_default>, <&dmic23_default>;
 	vdd-micb-supply = <&vreg_l1b_1p8>;
 	qcom,dmic-sample-rate = <4800000>;
 };
