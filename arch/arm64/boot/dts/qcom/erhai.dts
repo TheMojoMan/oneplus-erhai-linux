@@ -118,16 +118,26 @@
 		audio-routing = "IN1_HPHL", "HPHL_OUT",
 				"IN2_HPHR", "HPHR_OUT",
 				"AMIC2", "MIC BIAS2",
-				/* The internal mics hang off the va-macro's own
-				 * mic-bias (vdd-micb = vreg_l1b_1p8), NOT the
-				 * WCD9395's bias pins. Without these routes DAPM
-				 * never enables 7660000.codec-vdd-micb (0
-				 * consumers in regulator_summary) -> capture
-				 * runs but delivers all-zero samples. */
-				"VA DMIC0", "vdd-micb",
-				"VA DMIC1", "vdd-micb",
-				"VA DMIC2", "vdd-micb",
-				"VA DMIC3", "vdd-micb",
+				/* Internal mics: Android ground truth (OxygenOS
+				 * dtbo/vendor_boot, decompiled 2026-08-26). They
+				 * are WCD9395 DIGITAL mics (bias = MIC BIAS3)
+				 * forwarded over SoundWire into the va-macro's
+				 * SWR inputs -> DEC muxes must select SWR_MIC,
+				 * and the VA SWR clock route is mandatory or
+				 * the capture graph never delivers data. */
+				"VA DMIC0", "Digital Mic0",
+				"VA DMIC1", "Digital Mic1",
+				"VA DMIC2", "Digital Mic2",
+				"VA DMIC3", "Digital Mic3",
+				"VA DMIC0", "VA MIC BIAS3",
+				"VA DMIC1", "VA MIC BIAS3",
+				"VA DMIC2", "VA MIC BIAS1",
+				"VA DMIC3", "VA MIC BIAS1",
+				"VA SWR_INPUT", "WCD_TX_OUTPUT",
+				"VA SWR_INPUT", "VA_SWR_CLK",
+				"VA_AIF1 CAP", "VA_SWR_CLK",
+				"VA_AIF2 CAP", "VA_SWR_CLK",
+				"VA_AIF3 CAP", "VA_SWR_CLK",
 				"TX SWR_INPUT1", "ADC2_OUTPUT";
 
 		wcd-playback-dai-link {
