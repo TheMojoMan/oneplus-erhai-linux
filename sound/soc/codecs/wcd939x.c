@@ -1101,13 +1101,24 @@ static int wcd939x_codec_enable_adc(struct snd_soc_dapm_widget *w,
 		set_bit(w->shift, &wcd939x->status_mask);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		snd_soc_component_write_field(component, WCD939X_DIGITAL_CDC_ANA_CLK_CTL,
-					      WCD939X_CDC_ANA_CLK_CTL_ANA_TX_DIV2_CLK_EN,
-					      false);
-		snd_soc_component_write_field(component, WCD939X_DIGITAL_CDC_ANA_CLK_CTL,
-					      WCD939X_CDC_ANA_CLK_CTL_ANA_TX_CLK_EN,
-					      false);
 		clear_bit(w->shift, &wcd939x->status_mask);
+		/*
+		 * Only gate the TX analog clocks when the LAST ADC powers
+		 * down: an unconditional clear here kills the clock for any
+		 * other ADC that is still streaming (erhai internal mics
+		 * use AMIC1/ADC1 + AMIC5/ADC4 concurrently and died after
+		 * ~1 s of capture).
+		 */
+		if (!wcd939x->status_mask) {
+			snd_soc_component_write_field(component,
+						      WCD939X_DIGITAL_CDC_ANA_CLK_CTL,
+						      WCD939X_CDC_ANA_CLK_CTL_ANA_TX_DIV2_CLK_EN,
+						      false);
+			snd_soc_component_write_field(component,
+						      WCD939X_DIGITAL_CDC_ANA_CLK_CTL,
+						      WCD939X_CDC_ANA_CLK_CTL_ANA_TX_CLK_EN,
+						      false);
+		}
 		break;
 	}
 
