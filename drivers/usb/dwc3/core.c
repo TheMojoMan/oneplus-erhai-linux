@@ -167,6 +167,27 @@ module_param(erhai_exit_pace_ms, uint, 0644);
 MODULE_PARM_DESC(erhai_exit_pace_ms,
 		 "ms delay inserted on host->device DRD switches (race probe)");
 
+int (*erhai_glue_clk_recover)(struct dwc3 *dwc);
+EXPORT_SYMBOL_GPL(erhai_glue_clk_recover);
+int (*erhai_session_sync)(bool arm);
+EXPORT_SYMBOL_GPL(erhai_session_sync);
+
+/*
+ * Set once the primary controller is fully probed, cleared on removal.
+ * Out-of-tree erhai drivers (otg_glink) use it to check whether a
+ * UCSI-owned host session is live before touching the data role. The
+ * role read is advisory (unlocked), only used to gate destructive
+ * detach handling.
+ */
+static struct dwc3 *erhai_dwc3_dev;
+
+bool erhai_dwc3_host_active(void)
+{
+	return erhai_dwc3_dev &&
+	       erhai_dwc3_dev->current_dr_role == DWC3_GCTL_PRTCAP_HOST;
+}
+EXPORT_SYMBOL_GPL(erhai_dwc3_host_active);
+
 bool erhai_dwc3_revive(struct dwc3 *dwc);
 
 static void __dwc3_set_mode(struct work_struct *work)
@@ -204,6 +225,8 @@ static void __dwc3_set_mode(struct work_struct *work)
 	case DWC3_GCTL_PRTCAP_HOST:
 		dwc3_host_exit(dwc);
 		dev_info(dwc->dev, "erhai drd: host exited\n");
+		if (erhai_session_sync)
+			erhai_session_sync(false);
 		break;
 	case DWC3_GCTL_PRTCAP_DEVICE:
 		dwc3_gadget_exit(dwc);
@@ -268,6 +291,8 @@ static void __dwc3_set_mode(struct work_struct *work)
 
 	switch (desired_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
+		if (erhai_session_sync)
+			erhai_session_sync(true);
 		ret = dwc3_host_init(dwc);
 		if (ret) {
 			dev_err(dwc->dev, "failed to initialize host\n");
@@ -2467,6 +2492,9 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 
 	dma_set_max_seg_size(dev, UINT_MAX);
 
+	/* Publish for erhai_dwc3_host_active(). */
+	erhai_dwc3_dev = dwc;
+
 	return 0;
 
 err_exit_debugfs:
@@ -2526,6 +2554,8 @@ static int dwc3_probe(struct platform_device *pdev)
 void dwc3_core_remove(struct dwc3 *dwc)
 {
 	pm_runtime_get_sync(dwc->dev);
+
+	erhai_dwc3_dev = NULL;
 
 	dwc3_core_exit_mode(dwc);
 	dwc3_debugfs_exit(dwc);
