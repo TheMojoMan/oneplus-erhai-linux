@@ -182,6 +182,9 @@ static void pmic_glink_altmode_enable_dp(struct pmic_glink_altmode *altmode,
 	struct typec_displayport_data dp_data = {};
 	int ret;
 
+	dev_info(altmode->dev,
+		 "erhai enable_dp request: mode=%u hpd=%u irq=%u\n",
+		 mode, hpd_state, hpd_irq);
 	dp_data.status = DP_STATUS_ENABLED;
 	if (hpd_state)
 		dp_data.status |= DP_STATUS_HPD_STATE;
@@ -331,6 +334,7 @@ static void pmic_glink_altmode_safe(struct pmic_glink_altmode *altmode,
 
 	port->state.alt = NULL;
 	port->state.data = NULL;
+	dev_info(altmode->dev, "erhai safe-mode request\n");
 	port->state.mode = TYPEC_STATE_SAFE;
 
 	ret = typec_mux_set(port->typec_mux, &port->state);
@@ -399,6 +403,9 @@ static void pmic_glink_altmode_worker(struct work_struct *work)
 	ret = pmic_glink_altmode_request(altmode, ALTMODE_PAN_ACK, alt_port->index);
 	if (ret)
 		dev_err(altmode->dev, "erhai altmode: PAN ACK request failed: %d\n", ret);
+	dev_info(altmode->dev,
+		 "erhai altmode worker done port=%u mux_ctrl=%u svid=%04x\n",
+		 alt_port->index, alt_port->mux_ctrl, alt_port->svid);
 }
 
 static enum typec_orientation pmic_glink_altmode_orientation(unsigned int orientation)
