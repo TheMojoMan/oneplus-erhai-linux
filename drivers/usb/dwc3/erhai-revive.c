@@ -2,12 +2,19 @@
 /*
  * erhai-revive.c - last-resort recovery for the SM8750 USB register island.
  *
- * Live /dev/mem forensics on the unplug wedge showed the dwc3/xhci block
- * reading 0x0 while clocks, GDSCs, interconnect votes and BCRs all verified
- * ON from software. Pulsing GCC_USB30_PRIM_BCR partially revived the block;
- * a GDSC collapse/restore cycle revived more. This is the same dance done
- * from kernel context so a wedged DRD transition can attempt recovery
- * instead of leaving a dead controller until the next hard reset.
+ * Live forensics on the unplug wedge (#21 capture): the dwc3/xhci block dies
+ * inside xhci unregister; all clocks/GDSC/ICC/BCR software state stays ON.
+ * A GCC_USB30_PRIM_BCR pulse revives the register fabric (GHWPARAMS0/FIFO
+ * regs read sane again) but the command engine stays dead (DEPCMD/xhci
+ * setup -110) until a proper core soft reset runs against LIVE hardware.
+ * Kernel #21 fired the pulse and continued mid-flight: gadget bound but
+ * every command timed out until the next full mode transition.
+ *
+ * revive-v2: pulse BCR -> dwc3_core_soft_reset() as the FUNCTIONAL gate
+ * (a soft reset against dead regs returns fake success, so this one runs
+ * only after the pulse) -> if that times out, full GDSC collapse/restore
+ * cycle -> soft reset again. Caller then continues device-mode entry with
+ * event buffers + gadget init against a reset, alive controller.
  */
 #include <linux/bits.h>
 #include <linux/sizes.h>
@@ -30,7 +37,7 @@ module_param(erhai_revive_enable, bool, 0444);
 MODULE_PARM_DESC(erhai_revive_enable,
 		 "attempt BCR/GDSC dance when the USB island reads dead");
 
-void erhai_dwc3_revive(struct dwc3 *dwc);
+bool erhai_dwc3_revive(struct dwc3 *dwc);
 
 static void erhai_dwc3_gcc_dance_once(struct dwc3 *dwc, bool full)
 {
@@ -56,7 +63,7 @@ static void erhai_dwc3_gcc_dance_once(struct dwc3 *dwc, bool full)
 		int i;
 
 		dev_info(dwc->dev,
-			 "erhai revive: BCR insufficient, cycling GDSC\n");
+			 "erhai revive: cycling USB30_PRIM GDSC\n");
 		writel(readl(gdscr) | GDSCR_SW_COLLAPSE, gdscr);
 		usleep_range(300000, 400000);
 		writel(readl(gdscr) & ~GDSCR_SW_COLLAPSE, gdscr);
@@ -71,24 +78,41 @@ static void erhai_dwc3_gcc_dance_once(struct dwc3 *dwc, bool full)
 	iounmap(g);
 }
 
-void erhai_dwc3_revive(struct dwc3 *dwc)
+bool erhai_dwc3_revive(struct dwc3 *dwc)
 {
 	u32 v;
-	int round;
+	int r;
 
 	if (!erhai_revive_enable || !dwc->regs)
-		return;
+		return false;
 	if (dwc3_readl(dwc, DWC3_GHWPARAMS0))
-		return;
+		return false;
 
 	dev_err(dwc->dev, "erhai revive: island dead (GHWPARAMS0=0)\n");
-	for (round = 1; round <= 2 && !dwc3_readl(dwc, DWC3_GHWPARAMS0); round++)
-		erhai_dwc3_gcc_dance_once(dwc, round == 2);
+
+	erhai_dwc3_gcc_dance_once(dwc, false);
+	if (!dwc3_readl(dwc, DWC3_GHWPARAMS0)) {
+		dev_info(dwc->dev,
+			 "erhai revive: BCR insufficient, cycling GDSC\n");
+		erhai_dwc3_gcc_dance_once(dwc, true);
+	}
+	r = dwc3_core_soft_reset(dwc);
+	if (r) {
+		dev_info(dwc->dev,
+			 "erhai revive: soft_reset=%d, cycling GDSC\n", r);
+		erhai_dwc3_gcc_dance_once(dwc, true);
+		r = dwc3_core_soft_reset(dwc);
+	}
 
 	v = dwc3_readl(dwc, DWC3_GHWPARAMS0);
-	if (v)
-		dev_info(dwc->dev, "erhai revive: SUCCESS GHWPARAMS0=%#x\n", v);
+	if (v && !r)
+		dev_info(dwc->dev,
+			 "erhai revive: SUCCESS GHWPARAMS0=%#x soft_reset=0\n",
+			 v);
 	else
 		dev_err(dwc->dev,
-			"erhai revive: island STILL DEAD after BCR+GDSC\n");
+			"erhai revive: INCOMPLETE GHWPARAMS0=%#x soft_reset=%d\n",
+			v, r);
+
+	return true;
 }
