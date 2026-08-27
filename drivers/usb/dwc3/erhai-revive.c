@@ -23,6 +23,7 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
+#include <linux/delay.h>
 #include <linux/moduleparam.h>
 #include <linux/phy/phy.h>
 
@@ -44,6 +45,21 @@ static bool erhai_phy_reinit = true;
 module_param(erhai_phy_reinit, bool, 0444);
 MODULE_PARM_DESC(erhai_phy_reinit,
 		 "power-cycle usb2/usb3 phys as last revive resort");
+
+static bool erhai_glue_cycle;
+module_param(erhai_glue_cycle, bool, 0644);
+MODULE_PARM_DESC(erhai_glue_cycle,
+		 "glue clock re-cycle in revive (BYPASSES the clock framework — "
+		 "breaks shared QMP pipe-clk accounting, DP stops retraining)");
+
+static unsigned int erhai_revive_retry_ms = 250;
+module_param(erhai_revive_retry_ms, uint, 0644);
+MODULE_PARM_DESC(erhai_revive_retry_ms, "ms between soft-reset retry polls");
+
+static unsigned int erhai_revive_retries = 32;
+module_param(erhai_revive_retries, uint, 0644);
+MODULE_PARM_DESC(erhai_revive_retries,
+		 "max soft-reset retry polls in revive (0 = single attempt)");
 
 bool erhai_dwc3_revive(struct dwc3 *dwc);
 
@@ -131,7 +147,15 @@ bool erhai_dwc3_revive(struct dwc3 *dwc)
 	if (!erhai_island_alive(dwc))
 		erhai_dwc3_gcc_dance_once(dwc, true);
 
-	if (erhai_glue_clk_recover) {
+	/*
+	 * v4: the glue-clock step gated RAW GCC writes that bypass the clock
+	 * framework and desynced the enable-count of
+	 * gcc_usb3_prim_phy_pipe_clk — a clock the DP half of the shared QMP
+	 * combo PHY also gates. The desync fired "pipe_clk already disabled"
+	 * WARNINGS in qmp_combo_dp_exit and DP never re-trained afterwards
+	 * (#24 boot log 19:52:56). Hook kept for experiments, default OFF.
+	 */
+	if (erhai_glue_cycle && erhai_glue_clk_recover) {
 		r = erhai_glue_clk_recover(dwc);
 		dev_info(dwc->dev, "erhai revive: glue clock cycle ret=%d\n",
 			 r);
@@ -143,6 +167,33 @@ bool erhai_dwc3_revive(struct dwc3 *dwc)
 			 "erhai revive: soft_reset=%d, re-initing phys\n", r);
 		erhai_dwc3_phy_cycle(dwc);
 		r = dwc3_core_soft_reset(dwc);
+	}
+
+	/*
+	 * v4: #24 evidence — after the BCR pulse the fabric reads alive but
+	 * the soft reset only starts completing tens of seconds later
+	 * (19:52:53 INCOMPLETE -> 19:53:58 soft_reset=0). Instead of
+	 * continuing device entry against maxpacket=0 endpoints (g_ncm -19,
+	 * dead command engine), poll for completion. Runs in the DRD mode
+	 * work; the bounded sleep replaces the -110 timeout storms that made
+	 * the tablet unresponsive for minutes.
+	 */
+	if (r && erhai_revive_retries) {
+		unsigned int i;
+
+		for (i = 0; i < erhai_revive_retries && r; i++) {
+			msleep(erhai_revive_retry_ms);
+			if (!erhai_island_alive(dwc)) {
+				dev_info(dwc->dev,
+					 "erhai revive: island still dead, re-pulsing BCR\n");
+				erhai_dwc3_gcc_dance_once(dwc, false);
+			}
+			r = dwc3_core_soft_reset(dwc);
+		}
+		if (!r)
+			dev_info(dwc->dev,
+				 "erhai revive: soft reset completed after %u retries\n",
+				 i);
 	}
 
 	v = dwc3_readl(dwc, DWC3_GHWPARAMS0);
