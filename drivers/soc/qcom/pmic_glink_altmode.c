@@ -351,6 +351,12 @@ static void pmic_glink_altmode_worker(struct work_struct *work)
 	struct pmic_glink_altmode_port *alt_port = work_to_altmode_port(work);
 	struct pmic_glink_altmode *altmode = alt_port->altmode;
 	enum drm_connector_status conn_status;
+	int ret;
+
+	dev_info(altmode->dev,
+		 "erhai altmode worker: port=%u svid=%04x mux_ctrl=%u mode=%u hpd=%u irq=%u\n",
+		 alt_port->index, alt_port->svid, alt_port->mux_ctrl,
+		 alt_port->mode, alt_port->hpd_state, alt_port->hpd_irq);
 
 	typec_switch_set(alt_port->typec_switch, alt_port->orientation);
 
@@ -390,7 +396,9 @@ static void pmic_glink_altmode_worker(struct work_struct *work)
 		pmic_glink_altmode_safe(altmode, alt_port);
 	}
 
-	pmic_glink_altmode_request(altmode, ALTMODE_PAN_ACK, alt_port->index);
+	ret = pmic_glink_altmode_request(altmode, ALTMODE_PAN_ACK, alt_port->index);
+	if (ret)
+		dev_err(altmode->dev, "erhai altmode: PAN ACK request failed: %d\n", ret);
 }
 
 static enum typec_orientation pmic_glink_altmode_orientation(unsigned int orientation)
@@ -451,6 +459,9 @@ static void pmic_glink_altmode_sc8180xp_notify(struct pmic_glink_altmode *altmod
 	alt_port->mode = mode;
 	alt_port->hpd_state = hpd_state;
 	alt_port->hpd_irq = hpd_irq;
+	dev_info(altmode->dev,
+		 "erhai altmode(sc8180x) notify: port=%u orient=%u mux=%u mode=%u hpd=%u irq=%u svid=%04x\n",
+		 port, orientation, mux, mode, hpd_state, hpd_irq, svid);
 	schedule_work(&alt_port->work);
 }
 
@@ -488,6 +499,9 @@ static void pmic_glink_altmode_sc8280xp_notify(struct pmic_glink_altmode *altmod
 	alt_port->orientation = pmic_glink_altmode_orientation(orientation);
 	alt_port->svid = svid;
 	alt_port->mux_ctrl = notify->mux_ctrl;
+	dev_info(altmode->dev,
+		 "erhai altmode(sc8280x) notify: port=%u orient=%u svid=%04x mux_ctrl=%u\n",
+		 port, orientation, svid, notify->mux_ctrl);
 
 	if (svid == USB_TYPEC_DP_SID) {
 		dp = &notify->extended_data.dp;
