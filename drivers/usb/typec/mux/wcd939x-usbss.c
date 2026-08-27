@@ -298,6 +298,11 @@ static int wcd939x_usbss_set(struct wcd939x_usbss *usbss)
 	usbss->dp_active = enable_dp;
 	usbss->fc_routed = false;
 
+	dev_info(&usbss->client->dev,
+		 "erhai usbss: set mode=%u svid=%04x orient=%d -> usb=%d dp=%d audio=%d dp_active=%d\n",
+		 usbss->mode, usbss->svid, usbss->orientation,
+		 enable_usb, enable_dp, enable_audio, usbss->dp_active);
+
 	/* Disable all switches */
 	ret = regmap_clear_bits(usbss->regmap, WCD_USBSS_SWITCH_SETTINGS_ENABLE,
 				WCD_USBSS_SWITCH_SETTINGS_ENABLE_DP_AUXP_TO_MGX_SWITCHES |

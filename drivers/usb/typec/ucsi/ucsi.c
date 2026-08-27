@@ -1374,6 +1374,9 @@ static void ucsi_partner_change(struct ucsi_connector *con)
 		UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN4)))))
 		u_role = USB_ROLE_NONE;
 
+	dev_info(con->ucsi->dev, "erhai ucsi: con%d partner_change role -> %d\n",
+		 con->num, u_role);
+
 	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);
 	if (ret)
 		dev_err(con->ucsi->dev, "con:%d: failed to set usb role:%d\n",
@@ -1955,6 +1958,9 @@ static int ucsi_register_port(struct ucsi *ucsi, struct ucsi_connector *con)
 	/* Only notify USB controller if partner supports USB data */
 	if (!(UCSI_CONSTAT(con, PARTNER_FLAG_USB)))
 		u_role = USB_ROLE_NONE;
+
+	dev_info(ucsi->dev, "erhai ucsi: con%d register role -> %d\n",
+		 con->num, u_role);
 
 	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);
 	if (ret) {
