@@ -2820,6 +2820,8 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 	 */
 	ret = pm_runtime_get_sync(dwc->dev);
 	if (!ret || ret < 0) {
+		dev_err(dwc->dev, "erhai dbg: pullup(%d): runtime resume failed %d\n",
+			is_on, ret);
 		pm_runtime_put(dwc->dev);
 		if (ret < 0)
 			pm_runtime_set_suspended(dwc->dev);
@@ -2837,6 +2839,10 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 		ret = dwc3_gadget_soft_disconnect(dwc);
 	else
 		ret = dwc3_gadget_soft_connect(dwc);
+
+	if (ret)
+		dev_err(dwc->dev, "erhai dbg: pullup(%d): soft_connect %d\n",
+			is_on, ret);
 
 	pm_runtime_put(dwc->dev);
 
