@@ -19,6 +19,7 @@
 #include "../host/xhci-caps.h"
 #include "../host/xhci-plat.h"
 #include "core.h"
+#include "io.h"
 
 #define XHCI_HCSPARAMS1		0x4
 #define XHCI_PORTSC_BASE	0x400
