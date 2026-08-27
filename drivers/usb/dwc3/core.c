@@ -162,6 +162,13 @@ void dwc3_set_prtcap(struct dwc3 *dwc, u32 mode, bool ignore_susphy)
 }
 EXPORT_SYMBOL_GPL(dwc3_set_prtcap);
 
+static unsigned int erhai_exit_pace_ms = 25;
+module_param(erhai_exit_pace_ms, uint, 0644);
+MODULE_PARM_DESC(erhai_exit_pace_ms,
+		 "ms delay inserted on host->device DRD switches (race probe)");
+
+void erhai_dwc3_revive(struct dwc3 *dwc);
+
 static void __dwc3_set_mode(struct work_struct *work)
 {
 	struct dwc3 *dwc = work_to_dwc(work);
@@ -238,6 +245,15 @@ static void __dwc3_set_mode(struct work_struct *work)
 		dwc3_writel(dwc, DWC3_GCTL, reg);
 	}
 
+	if (desired_dr_role == DWC3_GCTL_PRTCAP_DEVICE &&
+	    DWC3_GCTL_PRTCAP(dwc3_readl(dwc, DWC3_GCTL)) ==
+					DWC3_GCTL_PRTCAP_HOST &&
+	    erhai_exit_pace_ms) {
+		dev_info(dwc->dev, "erhai pace: %u ms before device entry\n",
+			 erhai_exit_pace_ms);
+		msleep(erhai_exit_pace_ms);
+	}
+
 	dev_info(dwc->dev, "erhai drd: pre-prtcap GHWPARAMS0=%#x\n",
 		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
 
@@ -279,6 +295,8 @@ static void __dwc3_set_mode(struct work_struct *work)
 			 ret, dwc3_readl(dwc, DWC3_GHWPARAMS0),
 			 dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0)),
 			 dwc3_readl(dwc, DWC3_GTXFIFOSIZ(1)));
+
+		erhai_dwc3_revive(dwc);
 
 		dwc3_event_buffers_setup(dwc);
 
