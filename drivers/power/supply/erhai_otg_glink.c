@@ -159,6 +159,7 @@ struct erhai_otg {
 	struct work_struct vbus_work;
 	struct delayed_work vbus_off_work;
 	bool vbus_on;
+	bool armed;
 
 	/* dwc3 USB data-role switch, looked up lazily by the dwc3 fwnode. */
 	struct usb_role_switch *role_sw;
@@ -345,6 +346,8 @@ static void erhai_otg_set_role(struct erhai_otg *otg, enum usb_role role)
  */
 static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 {
+	int ret;
+
 	mutex_lock(&otg->vbus_lock);
 	if (on == otg->vbus_on) {
 		mutex_unlock(&otg->vbus_lock);
@@ -357,16 +360,51 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 	 * enable. On disable VBUS goes off first, then role back to device.
 	 */
 	if (on) {
+		if (!otg->armed) {
+			/*
+			 * A DISABLE fully disarms the ADSP session (below);
+			 * an ENABLE therefore re-arms it first so the ADSP's
+			 * lane/VBUS state machine starts from a clean slate.
+			 */
+			ret = erhai_otg_set(otg, USB_OTG_AP_ENABLE, 1);
+			if (ret)
+				dev_err(otg->dev, "otg: AP_ENABLE failed %d\n", ret);
+			ret = erhai_otg_set(otg, USB_OTG_SWITCH, 1);
+			if (ret)
+				dev_err(otg->dev, "otg: SWITCH failed %d\n", ret);
+			otg->armed = (ret == 0);
+			msleep(100);
+			dev_info(otg->dev, "otg: session armed (attach)\n");
+		}
 		erhai_otg_set_role(otg, USB_ROLE_HOST);
 		/* Let dwc3_host_init + xhci settle before VBUS sources. */
 		msleep(OTG_HOST_SETTLE_MS);
+		dev_info(otg->dev, "otg: data-role host settled, boosting\n");
 		erhai_otg_set(otg, USB_OTG_BOOST_CURRENT, OTG_BOOST_CURR_MA);
+	} else {
+		dev_info(otg->dev, "otg: detach: VBUS off\n");
 	}
 
 	erhai_otg_set(otg, USB_OTG_VBUS_REGULATOR_ENABLE, on);
 
-	if (!on)
+	if (!on) {
+		msleep(500);
+		dev_info(otg->dev, "otg: detach: data-role device\n");
 		erhai_otg_set_role(otg, USB_ROLE_DEVICE);
+		msleep(200);
+
+		/* Fully disarm the ADSP OTG session until the next attach. */
+		if (otg->armed) {
+			ret = erhai_otg_set(otg, USB_OTG_SWITCH, 0);
+			if (ret)
+				dev_err(otg->dev, "otg: SWITCH off failed %d\n", ret);
+			ret = erhai_otg_set(otg, USB_OTG_AP_ENABLE, 0);
+			if (ret)
+				dev_err(otg->dev, "otg: AP_ENABLE off failed %d\n", ret);
+			otg->armed = false;
+			dev_info(otg->dev, "otg: session disarmed (detach)\n");
+		}
+	}
 
 	otg->vbus_on = on;
 	mutex_unlock(&otg->vbus_lock);
@@ -376,7 +414,6 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 static void erhai_otg_vbus_work(struct work_struct *work)
 {
 	struct erhai_otg *otg = container_of(work, struct erhai_otg, vbus_work);
-
 	erhai_otg_vbus_apply(otg, true);
 }
 
@@ -471,6 +508,8 @@ static void erhai_otg_arm_work(struct work_struct *work)
 	erhai_otg_notify_enable(otg);
 	erhai_otg_set(otg, USB_OTG_AP_ENABLE, 1);
 	erhai_otg_set(otg, USB_OTG_SWITCH, 1);
+	otg->armed = true;
+	dev_info(otg->dev, "otg: session armed at boot\n");
 }
 
 /* Called from pmic_glink under spinlock/irqsave -- must not sleep. */
