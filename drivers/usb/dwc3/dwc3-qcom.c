@@ -609,8 +609,18 @@ static struct dwc3_glue_ops dwc3_qcom_glue_ops = {
 	.pre_run_stop	= dwc3_qcom_run_stop_notifier,
 };
 
+static int erhai_qcom_clk_recover(struct dwc3 *dwc)
+{
+	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
+
+	clk_bulk_disable_unprepare(qcom->num_clocks, qcom->clks);
+	msleep(50);
+	return clk_bulk_prepare_enable(qcom->num_clocks, qcom->clks);
+}
+
 static int dwc3_qcom_probe(struct platform_device *pdev)
 {
+	erhai_glue_clk_recover = erhai_qcom_clk_recover;
 	struct dwc3_probe_data	probe_data = {};
 	struct device		*dev = &pdev->dev;
 	struct dwc3_qcom	*qcom;
@@ -734,6 +744,7 @@ clk_disable:
 
 static void dwc3_qcom_remove(struct platform_device *pdev)
 {
+	erhai_glue_clk_recover = NULL;
 	struct dwc3 *dwc = platform_get_drvdata(pdev);
 	struct dwc3_qcom *qcom = to_dwc3_qcom(dwc);
 
