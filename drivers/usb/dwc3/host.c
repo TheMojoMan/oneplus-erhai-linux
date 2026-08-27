@@ -229,7 +229,11 @@ void dwc3_host_exit(struct dwc3 *dwc)
 		device_init_wakeup(&dwc->xhci->dev, false);
 
 	dwc3_enable_susphy(dwc, true);
+	dev_info(dwc->dev, "erhai hexit: pre-unreg GHWPARAMS0=%#x\n",
+		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
 	platform_device_unregister(dwc->xhci);
+	dev_info(dwc->dev, "erhai hexit: post-unreg GHWPARAMS0=%#x\n",
+		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
 	dwc->xhci = NULL;
 }
 EXPORT_SYMBOL_GPL(dwc3_host_exit);
