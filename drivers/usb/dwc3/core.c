@@ -184,6 +184,9 @@ static void __dwc3_set_mode(struct work_struct *work)
 	if (!desired_dr_role)
 		goto out;
 
+	dev_info(dwc->dev, "erhai drd: switch %#x -> %#x\n",
+		 dwc->current_dr_role, desired_dr_role);
+
 	if (desired_dr_role == dwc->current_dr_role)
 		goto out;
 
@@ -193,10 +196,12 @@ static void __dwc3_set_mode(struct work_struct *work)
 	switch (dwc->current_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
 		dwc3_host_exit(dwc);
+		dev_info(dwc->dev, "erhai drd: host exited\n");
 		break;
 	case DWC3_GCTL_PRTCAP_DEVICE:
 		dwc3_gadget_exit(dwc);
 		dwc3_event_buffers_cleanup(dwc);
+		dev_info(dwc->dev, "erhai drd: gadget exited\n");
 		break;
 	case DWC3_GCTL_PRTCAP_OTG:
 		dwc3_otg_exit(dwc);
@@ -245,6 +250,7 @@ static void __dwc3_set_mode(struct work_struct *work)
 		if (ret) {
 			dev_err(dwc->dev, "failed to initialize host\n");
 		} else {
+			dev_info(dwc->dev, "erhai drd: host init ok\n");
 			if (dwc->usb2_phy)
 				otg_set_vbus(dwc->usb2_phy->otg, true);
 
@@ -261,7 +267,12 @@ static void __dwc3_set_mode(struct work_struct *work)
 		}
 		break;
 	case DWC3_GCTL_PRTCAP_DEVICE:
-		dwc3_core_soft_reset(dwc);
+		ret = dwc3_core_soft_reset(dwc);
+		dev_info(dwc->dev,
+			 "erhai drd: dev entry: soft_reset=%d GHWPARAMS0=%#x RXFIFOSIZ0=%#x TXFIFOSIZ1=%#x\n",
+			 ret, dwc3_readl(dwc, DWC3_GHWPARAMS0),
+			 dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0)),
+			 dwc3_readl(dwc, DWC3_GTXFIFOSIZ(1)));
 
 		dwc3_event_buffers_setup(dwc);
 
@@ -273,6 +284,7 @@ static void __dwc3_set_mode(struct work_struct *work)
 		ret = dwc3_gadget_init(dwc);
 		if (ret)
 			dev_err(dwc->dev, "failed to initialize peripheral\n");
+		dev_info(dwc->dev, "erhai drd: gadget init %d\n", ret);
 		break;
 	case DWC3_GCTL_PRTCAP_OTG:
 		dwc3_otg_init(dwc);
