@@ -167,7 +167,7 @@ module_param(erhai_exit_pace_ms, uint, 0644);
 MODULE_PARM_DESC(erhai_exit_pace_ms,
 		 "ms delay inserted on host->device DRD switches (race probe)");
 
-void erhai_dwc3_revive(struct dwc3 *dwc);
+bool erhai_dwc3_revive(struct dwc3 *dwc);
 
 static void __dwc3_set_mode(struct work_struct *work)
 {
