@@ -340,6 +340,7 @@ static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup)
 	u32 val;
 	int i, ret;
 
+	dev_info(qcom->dev, "erhai qcom: suspend (wakeup=%d)\n", wakeup);
 	if (qcom->is_suspended)
 		return 0;
 
@@ -374,6 +375,7 @@ static int dwc3_qcom_resume(struct dwc3_qcom *qcom, bool wakeup)
 	int ret;
 	int i;
 
+	dev_info(qcom->dev, "erhai qcom: resume (wakeup=%d)\n", wakeup);
 	if (!qcom->is_suspended)
 		return 0;
 

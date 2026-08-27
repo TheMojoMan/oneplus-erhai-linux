@@ -238,11 +238,17 @@ static void __dwc3_set_mode(struct work_struct *work)
 		dwc3_writel(dwc, DWC3_GCTL, reg);
 	}
 
+	dev_info(dwc->dev, "erhai drd: pre-prtcap GHWPARAMS0=%#x\n",
+		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
+
 	spin_lock_irqsave(&dwc->lock, flags);
 
 	dwc3_set_prtcap(dwc, desired_dr_role, false);
 
 	spin_unlock_irqrestore(&dwc->lock, flags);
+
+	dev_info(dwc->dev, "erhai drd: post-prtcap GHWPARAMS0=%#x\n",
+		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
 
 	switch (desired_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
@@ -345,9 +351,12 @@ int dwc3_core_soft_reset(struct dwc3 *dwc)
 		return 0;
 
 	reg = dwc3_readl(dwc, DWC3_DCTL);
+	dev_info(dwc->dev, "erhai sreset: entry DCTL=%#x\n", reg);
 	reg |= DWC3_DCTL_CSFTRST;
 	reg &= ~DWC3_DCTL_RUN_STOP;
 	dwc3_gadget_dctl_write_safe(dwc, reg);
+	dev_info(dwc->dev, "erhai sreset: post-write DCTL=%#x\n",
+		 dwc3_readl(dwc, DWC3_DCTL));
 
 	/*
 	 * For DWC_usb31 controller 1.90a and later, the DCTL.CSFRST bit
