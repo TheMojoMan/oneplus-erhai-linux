@@ -337,6 +337,12 @@ static void erhai_otg_set_role(struct erhai_otg *otg, enum usb_role role)
 		usb_role_switch_set_role(sw, role);
 }
 
+extern bool erhai_dwc3_host_active(void);
+
+static bool erhai_detach_gate_enable = true;
+module_param(erhai_detach_gate_enable, bool, 0644);
+MODULE_PARM_DESC(erhai_detach_gate_enable,
+		 "ignore ADSP OTG detach while a UCSI-owned host session is live");
 /*
  * Apply the requested VBUS-boost / data-role state. Idempotent: a repeat ENABLE
  * while a session is up (the ADSP blink) is a no-op that does NOT re-toggle VBUS
@@ -347,6 +353,24 @@ static void erhai_otg_set_role(struct erhai_otg *otg, enum usb_role role)
 static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 {
 	int ret;
+
+	if (!on && erhai_detach_gate_enable && erhai_dwc3_host_active()) {
+		/*
+		 * Charger-session churn (sc8547a VOOC/BC1.2 renegotiation
+		 * with a DP alt-mode partner) makes the ADSP withdraw
+		 * BC_OTG_ENABLE while UCSI still owns a live host session.
+		 * That is NOT a physical detach: the data-role flip below
+		 * tears xhci down mid-enumeration (hub + card reader killed
+		 * ~1 s after attach — boot5 storm log, 19:16). Suppress the
+		 * whole sequence and leave vbus_on/armed as they are so the
+		 * follow-up attach re-enable is an idempotent no-op. The DRD
+		 * host-exit path disarms the session via
+		 * erhai_otg_session_sync() when UCSI really exits.
+		 */
+		dev_info(otg->dev,
+			 "otg: detach suppressed: host session live (ucsi owns role)\n");
+		return;
+	}
 
 	mutex_lock(&otg->vbus_lock);
 	if (on == otg->vbus_on) {
@@ -408,6 +432,57 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 
 	otg->vbus_on = on;
 	mutex_unlock(&otg->vbus_lock);
+}
+
+static struct erhai_otg *erhai_otg_glink_dev;
+static bool erhai_session_sync_enable = true;
+module_param(erhai_session_sync_enable, bool, 0644);
+MODULE_PARM_DESC(erhai_session_sync_enable,
+		 "disarm/rearm the ADSP OTG session on DRD detach/attach");
+
+extern int (*erhai_session_sync)(bool arm);
+
+/*
+ * Vendor-flow parity for UCSI-driven role changes: the ADSP OTG session is
+ * disarmed per detach and re-armed per attach. Only touches the session
+ * pair (SWITCH/AP_ENABLE) — never VBUS boost or the data role, which stay
+ * owned by the ucsi/role-switch path.
+ */
+static int erhai_otg_session_sync(bool arm)
+{
+	struct erhai_otg *otg = erhai_otg_glink_dev;
+	int ret = 0;
+
+	if (!otg || !erhai_session_sync_enable)
+		return 0;
+
+	mutex_lock(&otg->vbus_lock);
+	if (arm) {
+		if (otg->armed) {
+			mutex_unlock(&otg->vbus_lock);
+			return 0;
+		}
+		ret = erhai_otg_set(otg, USB_OTG_AP_ENABLE, 1);
+		if (!ret)
+			ret = erhai_otg_set(otg, USB_OTG_SWITCH, 1);
+		if (ret)
+			erhai_otg_set(otg, USB_OTG_AP_ENABLE, 0);
+		else
+			otg->armed = true;
+		dev_info(otg->dev, "otg: session %s (drd sync, ret=%d)\n",
+			 ret ? "arm FAILED" : "armed", ret);
+	} else {
+		if (otg->armed) {
+			ret = erhai_otg_set(otg, USB_OTG_SWITCH, 0);
+			erhai_otg_set(otg, USB_OTG_AP_ENABLE, 0);
+			otg->armed = false;
+			dev_info(otg->dev,
+				 "otg: session disarmed (drd sync, ret=%d)\n",
+				 ret);
+		}
+	}
+	mutex_unlock(&otg->vbus_lock);
+	return ret;
 }
 
 /* BC_OTG_ENABLE: bring the OTG session up (immediate). */
@@ -576,6 +651,8 @@ static int erhai_otg_probe(struct auxiliary_device *adev,
 	otg->dev = dev;
 	mutex_init(&otg->lock);
 	mutex_init(&otg->vbus_lock);
+	erhai_otg_glink_dev = otg;
+	erhai_session_sync = erhai_otg_session_sync;
 	init_completion(&otg->ack);
 	INIT_WORK(&otg->arm_work, erhai_otg_arm_work);
 	INIT_WORK(&otg->vbus_work, erhai_otg_vbus_work);
@@ -607,6 +684,8 @@ static int erhai_otg_probe(struct auxiliary_device *adev,
 
 static void erhai_otg_remove(struct auxiliary_device *adev)
 {
+	erhai_session_sync = NULL;
+	erhai_otg_glink_dev = NULL;
 	struct erhai_otg *otg = auxiliary_get_drvdata(adev);
 
 	cancel_work_sync(&otg->arm_work);
