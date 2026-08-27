@@ -1641,6 +1641,9 @@ int dwc3_event_buffers_setup(struct dwc3 *dwc);
 void dwc3_event_buffers_cleanup(struct dwc3 *dwc);
 
 int dwc3_core_soft_reset(struct dwc3 *dwc);
+/* erhai out-of-band hooks; glue/aux drivers register at probe (may be NULL). */
+extern int (*erhai_glue_clk_recover)(struct dwc3 *dwc);
+extern int (*erhai_session_sync)(bool arm);
 void dwc3_enable_susphy(struct dwc3 *dwc, bool enable);
 
 static inline void dwc3_pre_set_role(struct dwc3 *dwc, enum usb_role role)
