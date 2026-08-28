@@ -697,14 +697,16 @@ int wcd939x_usbss_dpdm_switch_fast_charge(bool enable)
 		goto out;
 
 	/*
-	 * USB_SS_CNTL: RCO_EN + USB mode; fast charge clears STANDBY_STATE
-	 * (0x0d), normal USB sets it (0x1d), matching the vendor trace.
+	 * USB_SS_CNTL: RCO_EN + USB mode, never STANDBY_STATE. The old
+	 * behaviour set STANDBY for the "normal USB route" (matching a
+	 * misread vendor trace) which standby-ed the whole SS block at
+	 * every detach (fc-restore) and deafened the HS path for all
+	 * subsequent attaches (register diff A/B: 0x419 0d -> 1d).
 	 */
 	ret = regmap_write(usbss->regmap, WCD_USBSS_USB_SS_CNTL,
 			   WCD_USBSS_USB_SS_CNTL_RCO_EN |
 			   FIELD_PREP(WCD_USBSS_USB_SS_CNTL_USB_SS_MODE,
-				      WCD_USBSS_USB_SS_CNTL_USB_SS_MODE_USB) |
-			   (enable ? 0 : WCD_USBSS_USB_SS_CNTL_STANDBY_STATE));
+				      WCD_USBSS_USB_SS_CNTL_USB_SS_MODE_USB));
 	if (!ret)
 		usbss->fc_routed = enable;
 out:
