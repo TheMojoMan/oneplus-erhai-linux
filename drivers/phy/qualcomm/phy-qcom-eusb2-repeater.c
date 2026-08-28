@@ -199,9 +199,13 @@ static int eusb2_repeater_init(struct phy *phy)
 	/* DT param override sequences; host variant when initializing in
 	 * host mode (OPLUS_FEATURE_CHG_BASIC equivalent) */
 	eusb2_repeater_apply_seq(rptr, rptr->param_seq, rptr->param_seq_cnt);
-	if (rptr->mode == PHY_MODE_USB_HOST)
+	if (rptr->mode == PHY_MODE_USB_HOST) {
 		eusb2_repeater_apply_seq(rptr, rptr->host_param_seq,
 					 rptr->host_param_seq_cnt);
+		/* host 19.2MHz clock force, as in OSS init (PHY_HOST_MODE) */
+		regmap_write(regmap, base + EUSB2_FORCE_EN_5, F_CLK_19P2M_EN);
+		regmap_write(regmap, base + EUSB2_FORCE_VAL_5, V_CLK_19P2M_EN);
+	}
 
 	/* Override registers from devicetree values */
 	if (!of_property_read_u8(np, "qcom,tune-usb2-preem", &val))
