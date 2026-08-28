@@ -345,24 +345,6 @@
 	 * No board-level overrides needed here.
 	 */
 
-	/*
-	 * erhai: pstore/ramoops capture for hard resets (PMIC watchdog),
-	 * which otherwise leave no trace. Sits in the unused gap after
-	 * xbl_scass_mem (0xa3e80000 .. 0xb8000000).
-	 */
-	ramoops_mem: ramoops@a4000000 {
-		no-map;
-		reg = <0x00 0xa4000000 0x00 0x100000>;
-	};
-
-	ramoops: ramoops@a4000000 {
-		compatible = "ramoops";
-		reg = <0x00 0xa4000000 0x00 0x100000>;
-		record-size = <0x20000>;
-		console-size = <0x80000>;
-		pmsg-size = <0x40000>;
-	};
-
 	reserved_memory: reserved-memory {
 		#address-cells = <2>;
 		#size-cells = <2>;
