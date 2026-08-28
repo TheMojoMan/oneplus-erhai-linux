@@ -4011,6 +4011,9 @@ static int qmp_combo_com_init(struct qmp_combo *qmp, bool force)
 	int ret;
 	u32 val;
 
+	dev_info(qmp->dev, "erhai qmp: com_init force=%d count=%u usb=%u dp=%u\n",
+		 force, qmp->init_count, qmp->usb_init_count, qmp->dp_init_count);
+
 	if (!force && qmp->init_count++)
 		return 0;
 
@@ -4122,6 +4125,9 @@ static int qmp_combo_com_exit(struct qmp_combo *qmp, bool force)
 {
 	const struct qmp_phy_cfg *cfg = qmp->cfg;
 
+	dev_info(qmp->dev, "erhai qmp: com_exit force=%d count=%u usb=%u dp=%u\n",
+		 force, qmp->init_count, qmp->usb_init_count, qmp->dp_init_count);
+
 	if (!force && --qmp->init_count)
 		return 0;
 
@@ -4177,8 +4183,19 @@ static int qmp_combo_dp_power_on(struct phy *phy)
 	const struct qmp_phy_cfg *cfg = qmp->cfg;
 	void __iomem *tx = qmp->dp_tx;
 	void __iomem *tx2 = qmp->dp_tx2;
+	int healed;
 
 	mutex_lock(&qmp->phy_mutex);
+
+	/* erhai: self-heal a power_on without init (hpd replug after a
+	 * messy DP exit). Without this the DP PHY never trains and the
+	 * sink shows no signal. */
+	if (!qmp->dp_init_count) {
+		dev_info(qmp->dev, "erhai qmp: dp power_on without init — healing\n");
+		healed = qmp_combo_dp_init(phy);
+		if (healed)
+			dev_err(qmp->dev, "erhai qmp: dp heal init failed: %d\n", healed);
+	}
 
 	qmp_combo_dp_serdes_init(qmp);
 
@@ -4425,6 +4442,13 @@ static int __maybe_unused qmp_combo_runtime_suspend(struct device *dev)
 	if (!qmp->init_count) {
 		dev_vdbg(dev, "PHY not initialized, bailing out\n");
 		return 0;
+	}
+
+	/* erhai: never gate the common clocks under a live client. */
+	if (qmp->usb_init_count || qmp->dp_init_count) {
+		dev_info(dev, "erhai qmp: runtime suspend refused (usb=%u dp=%u)\n",
+			 qmp->usb_init_count, qmp->dp_init_count);
+		return -EBUSY;
 	}
 
 	qmp_combo_enable_autonomous_mode(qmp);
