@@ -165,7 +165,7 @@ static int pmic_glink_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 	hdr = data;
 
 	if (le32_to_cpu(hdr->owner) != PMIC_GLINK_OWNER_BATTMGR)
-		dev_info_ratelimited(pg->dev,
+		dev_dbg_ratelimited(pg->dev,
 			"erhai pglink: rx owner=%u type=%u opcode=%#x len=%d\n",
 			le32_to_cpu(hdr->owner), le32_to_cpu(hdr->type),
 			le32_to_cpu(hdr->opcode), len);
