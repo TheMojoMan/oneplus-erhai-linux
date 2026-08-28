@@ -74,6 +74,7 @@ struct pmic_glink_ucsi {
 
 	struct work_struct notify_work;
 	struct work_struct register_work;
+	struct delayed_work poll_work;
 	spinlock_t state_lock;
 	bool ucsi_registered;
 	bool pd_running;
@@ -310,6 +311,34 @@ static void pmic_glink_ucsi_notify(struct work_struct *work)
 	ucsi_notify_common(ucsi->ucsi, cci);
 }
 
+/*
+ * erhai: the ADSP stops sending USBC_NOTIFY_IND after a detach from a
+ * DP-alt-mode session (charger detaches are unaffected) — a replug within
+ * the following minutes produces ZERO pmic_glink traffic and the attach is
+ * invisible to the whole USB stack (#26 ingress capture, 06:13:40-06:15:58).
+ * Work around it by polling: ucsi_connector_change() makes the UCSI core
+ * issue GET_CONNECTOR_STATUS and process attach/detach/role changes exactly
+ * like a notification would. erhai_ucsi_poll_ms=0 disables the action (the
+ * tick keeps running so the knob can be re-enabled live).
+ */
+static unsigned int erhai_ucsi_poll_ms = 4000;
+module_param(erhai_ucsi_poll_ms, uint, 0644);
+MODULE_PARM_DESC(erhai_ucsi_poll_ms,
+		 "ms between UCSI connector-status polls (ADSP notify "
+		 "starvation workaround; 0 disables)");
+
+static void erhai_ucsi_poll(struct work_struct *work)
+{
+	struct pmic_glink_ucsi *ucsi =
+		container_of(work, struct pmic_glink_ucsi, poll_work.work);
+
+	if (ucsi->ucsi_registered && erhai_ucsi_poll_ms)
+		ucsi_connector_change(ucsi->ucsi, 1);
+
+	schedule_delayed_work(&ucsi->poll_work,
+			      msecs_to_jiffies(erhai_ucsi_poll_ms ?: 4000));
+}
+
 static void pmic_glink_ucsi_register(struct work_struct *work)
 {
 	struct pmic_glink_ucsi *ucsi = container_of(work, struct pmic_glink_ucsi, register_work);
@@ -408,6 +437,9 @@ static int pmic_glink_ucsi_probe(struct auxiliary_device *adev,
 
 	INIT_WORK(&ucsi->notify_work, pmic_glink_ucsi_notify);
 	INIT_WORK(&ucsi->register_work, pmic_glink_ucsi_register);
+	INIT_DELAYED_WORK(&ucsi->poll_work, erhai_ucsi_poll);
+	schedule_delayed_work(&ucsi->poll_work,
+			      msecs_to_jiffies(erhai_ucsi_poll_ms));
 	init_completion(&ucsi->read_ack);
 	init_completion(&ucsi->write_ack);
 	spin_lock_init(&ucsi->state_lock);
@@ -473,6 +505,7 @@ static void pmic_glink_ucsi_remove(struct auxiliary_device *adev)
 	struct pmic_glink_ucsi *ucsi = dev_get_drvdata(&adev->dev);
 
 	/* Unregister first to stop having read & writes */
+	cancel_delayed_work_sync(&ucsi->poll_work);
 	ucsi_unregister(ucsi->ucsi);
 }
 
