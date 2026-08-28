@@ -68,6 +68,10 @@ struct eusb2_repeater {
 	const struct eusb2_repeater_cfg *cfg;
 	u32 base;
 	enum phy_mode mode;
+	u8 *param_seq;
+	int param_seq_cnt;
+	u8 *host_param_seq;
+	int host_param_seq_cnt;
 };
 
 static const char * const pm8550b_vreg_l[] = {
@@ -138,6 +142,35 @@ static int eusb2_repeater_init_vregs(struct eusb2_repeater *rptr)
 	return devm_regulator_bulk_get(dev, num, rptr->vregs);
 }
 
+static void eusb2_repeater_apply_seq(struct eusb2_repeater *rptr,
+				     const u8 *seq, int cnt)
+{
+	int i;
+
+	if (!seq)
+		return;
+	for (i = 0; i + 1 < cnt; i += 2)
+		regmap_write(rptr->regmap, rptr->base + seq[i], seq[i + 1]);
+}
+
+static int eusb2_repeater_parse_seq(struct device *dev, const char *prop,
+				    u8 **seqp)
+{
+	int cnt = of_property_count_u8_elems(dev->of_node, prop);
+
+	*seqp = NULL;
+	if (cnt <= 0 || cnt % 2)
+		return 0;
+	*seqp = devm_kcalloc(dev, cnt, sizeof(u8), GFP_KERNEL);
+	if (!*seqp)
+		return 0;
+	if (of_property_read_u8_array(dev->of_node, prop, *seqp, cnt)) {
+		*seqp = NULL;
+		return 0;
+	}
+	return cnt;
+}
+
 static int eusb2_repeater_init(struct phy *phy)
 {
 	struct eusb2_repeater *rptr = phy_get_drvdata(phy);
@@ -163,6 +196,13 @@ static int eusb2_repeater_init(struct phy *phy)
 		regmap_write(regmap, base + rptr->cfg->init_tbl[i].reg,
 			     rptr->cfg->init_tbl[i].value);
 
+	/* DT param override sequences; host variant when initializing in
+	 * host mode (OPLUS_FEATURE_CHG_BASIC equivalent) */
+	eusb2_repeater_apply_seq(rptr, rptr->param_seq, rptr->param_seq_cnt);
+	if (rptr->mode == PHY_MODE_USB_HOST)
+		eusb2_repeater_apply_seq(rptr, rptr->host_param_seq,
+					 rptr->host_param_seq_cnt);
+
 	/* Override registers from devicetree values */
 	if (!of_property_read_u8(np, "qcom,tune-usb2-preem", &val))
 		regmap_write(regmap, base + EUSB2_TUNE_USB2_PREEM, val);
@@ -185,11 +225,26 @@ static int eusb2_repeater_init(struct phy *phy)
 		}
 	}
 
+	if (!of_property_read_u8(np, "qcom,tune-usb2-crossover", &val))
+		regmap_write(regmap, base + EUSB2_TUNE_USB2_CROSSOVER, val);
+	if (!of_property_read_u8(np, "qcom,tune-usb2-slew", &val))
+		regmap_write(regmap, base + EUSB2_TUNE_USB2_SLEW, val);
+	if (!of_property_read_u8(np, "qcom,tune-usb2-equ", &val))
+		regmap_write(regmap, base + EUSB2_TUNE_USB2_EQU, val);
+	if (!of_property_read_u8(np, "qcom,tune-usb2-hs-comp-cur", &val))
+		regmap_write(regmap, base + EUSB2_TUNE_USB2_HS_COMP_CUR, val);
+	if (!of_property_read_u8(np, "qcom,tune-eusb-slew", &val))
+		regmap_write(regmap, base + EUSB2_TUNE_EUSB_SLEW, val);
+	if (!of_property_read_u8(np, "qcom,tune-eusb-equ", &val))
+		regmap_write(regmap, base + EUSB2_TUNE_EUSB_EQU, val);
+	if (!of_property_read_u8(np, "qcom,tune-eusb-hs-comp-cur", &val))
+		regmap_write(regmap, base + EUSB2_TUNE_EUSB_HS_COMP_CUR, val);
+
 	/* Wait for status OK */
 	ret = regmap_read_poll_timeout(regmap, base + EUSB2_RPTR_STATUS, poll_val,
 				       poll_val & RPTR_OK, 10, 5);
-	if (ret)
-		dev_err(rptr->dev, "initialization timed-out\n");
+	dev_info(rptr->dev, "erhai rptr: status %s (mode=%d)\n",
+		 (poll_val & RPTR_OK) ? "OK" : "NOT OK", rptr->mode);
 
 	return ret;
 }
@@ -202,6 +257,7 @@ static int eusb2_repeater_set_mode(struct phy *phy,
 	u32 base = rptr->base;
 
 	dev_info(rptr->dev, "erhai rptr: set_mode mode=%d\n", mode);
+	rptr->mode = mode;
 
 	switch (mode) {
 	case PHY_MODE_USB_HOST:
@@ -234,7 +290,8 @@ static int eusb2_repeater_exit(struct phy *phy)
 {
 	struct eusb2_repeater *rptr = phy_get_drvdata(phy);
 
-	dev_info(rptr->dev, "erhai rptr: exit\n");
+	dev_info(rptr->dev, "erhai rptr: exit (hold in reset)\n");
+	regmap_write(rptr->regmap, rptr->base + EUSB2_EN_CTL1, 0);
 	return regulator_bulk_disable(rptr->cfg->num_vregs, rptr->vregs);
 }
 
@@ -274,6 +331,11 @@ static int eusb2_repeater_probe(struct platform_device *pdev)
 		return ret;
 
 	rptr->base = res;
+
+	rptr->param_seq_cnt = eusb2_repeater_parse_seq(dev,
+			"qcom,param-override-seq", &rptr->param_seq);
+	rptr->host_param_seq_cnt = eusb2_repeater_parse_seq(dev,
+			"qcom,host-param-override-seq", &rptr->host_param_seq);
 
 	ret = eusb2_repeater_init_vregs(rptr);
 	if (ret < 0) {
