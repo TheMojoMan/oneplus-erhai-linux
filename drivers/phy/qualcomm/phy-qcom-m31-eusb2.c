@@ -172,10 +172,18 @@ static int m31eusb2_phy_write_sequence(struct m31eusb2_phy *phy,
 static int m31eusb2_phy_set_mode(struct phy *uphy, enum phy_mode mode, int submode)
 {
 	struct m31eusb2_phy *phy = phy_get_drvdata(uphy);
+	int ret;
 
 	phy->mode = mode;
+	dev_info(&uphy->dev, "erhai m31: set_mode mode=%d submode=%d\n",
+		 mode, submode);
 
-	return phy_set_mode_ext(phy->repeater, mode, submode);
+	ret = phy_set_mode_ext(phy->repeater, mode, submode);
+	if (ret)
+		dev_err(&uphy->dev, "erhai m31: repeater set_mode failed %d\n",
+			ret);
+
+	return ret;
 }
 
 static int m31eusb2_phy_init(struct phy *uphy)
@@ -184,6 +192,7 @@ static int m31eusb2_phy_init(struct phy *uphy)
 	const struct m31_eusb2_priv_data *data = phy->data;
 	int ret;
 
+	dev_info(&uphy->dev, "erhai m31: init\n");
 	ret = regulator_bulk_enable(M31_EUSB_NUM_VREGS, phy->vregs);
 	if (ret) {
 		dev_err(&uphy->dev, "failed to enable regulator, %d\n", ret);
@@ -228,6 +237,7 @@ static int m31eusb2_phy_exit(struct phy *uphy)
 {
 	struct m31eusb2_phy *phy = phy_get_drvdata(uphy);
 
+	dev_info(&uphy->dev, "erhai m31: exit\n");
 	clk_disable_unprepare(phy->clk);
 	regulator_bulk_disable(M31_EUSB_NUM_VREGS, phy->vregs);
 	phy_exit(phy->repeater);
