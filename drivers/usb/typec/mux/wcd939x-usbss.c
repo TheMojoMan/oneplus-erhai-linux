@@ -599,7 +599,17 @@ static int wcd939x_usbss_mux_set(struct typec_mux_dev *mux,
 	 * so the cached mode no longer describes the hardware — reprogram even
 	 * when the requested state is unchanged (erhai).
 	 */
-	if (usbss->mode != state->mode || usbss->fc_routed) {
+	/*
+	 * Idempotence (erhai): the UCSI poll (erhai_ucsi_poll_ms) calls us
+	 * every 4 s with an UNCHANGED state. Reprogramming the crossbar then
+	 * steals D+/D- from the charge-pump path and kills SVOOC delivery
+	 * (2026-08-28: CHG_EN self-clear at CP enable, margin < 150 mV).
+	 * Only reprogram when the requested mode actually changed, or when
+	 * the charge path owns the crossbar AND DP is coming up (we must
+	 * take the crossbar back for AUX routing).
+	 */
+	if (usbss->mode != state->mode ||
+	    (usbss->fc_routed && state->mode >= TYPEC_STATE_MODAL)) {
 		usbss->mode = state->mode;
 
 		if (state->alt)
