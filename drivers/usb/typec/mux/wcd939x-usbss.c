@@ -564,14 +564,15 @@ static int wcd939x_usbss_switch_set(struct typec_switch_dev *sw,
 				    enum typec_orientation orientation)
 {
 	struct wcd939x_usbss *usbss = typec_switch_get_drvdata(sw);
-	dev_info(&usbss->client->dev,
-		 "erhai usbss: switch_set orient=%d\n", orientation);
 	int ret = 0;
 
 	mutex_lock(&usbss->lock);
 
 	if (usbss->orientation != orientation) {
 		usbss->orientation = orientation;
+
+		dev_info(&usbss->client->dev,
+			 "erhai usbss: switch_set orient=%d\n", orientation);
 
 		ret = wcd939x_usbss_set(usbss);
 	}
