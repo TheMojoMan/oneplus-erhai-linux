@@ -4336,6 +4336,48 @@ out_unlock:
 	return ret;
 }
 
+/*
+ * erhai: force a full common-block teardown + powerup, bypassing the
+ * phy-core init_count bookkeeping (which can be stale after the
+ * DP-only teardown left the hardware down). Used by erhai-revive to
+ * make the dwc3 soft reset complete again: the CSF poll needs the
+ * pipe clock this re-establishes.
+ */
+int qmp_combo_force_recover(struct phy *phy)
+{
+	struct qmp_combo *qmp;
+	int ret = 0;
+
+	if (!phy || IS_ERR(phy))
+		return -EINVAL;
+	qmp = phy_get_drvdata(phy);
+	if (!qmp)
+		return -EINVAL;
+
+	pm_runtime_resume_and_get(qmp->dev);
+
+	mutex_lock(&qmp->phy_mutex);
+
+	dev_info(qmp->dev, "erhai qmp: FORCE recover (count=%u usb=%u dp=%u)\n",
+		 qmp->init_count, qmp->usb_init_count, qmp->dp_init_count);
+
+	qmp_combo_com_exit(qmp, true);
+	qmp_combo_com_init(qmp, true);
+
+	if (qmp->usb_init_count) {
+		int r = qmp_combo_usb_power_on(qmp->usb_phy);
+		if (r)
+			ret = r;
+	}
+	if (qmp->dp_init_count)
+		qmp->cfg->dp_aux_init(qmp);
+
+	mutex_unlock(&qmp->phy_mutex);
+	pm_runtime_put_sync(qmp->dev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qmp_combo_force_recover);
+
 static int qmp_combo_usb_exit(struct phy *phy)
 {
 	struct qmp_combo *qmp = phy_get_drvdata(phy);
