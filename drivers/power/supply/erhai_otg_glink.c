@@ -98,6 +98,21 @@
 #define OTG_DISABLE_DEBOUNCE_MS		1500
 
 /*
+ * Self-heal delay after a detach-edge disarm. The drd-sync disarm kills
+ * the ADSP session, and CC attach detection dies with it. Userspace
+ * (erhai-otg-rearm.service) re-arms on the detach edge, but that can lose a
+ * race when the host-exit is slow (2026-08-28: userspace re-arm at T+3 s,
+ * dwc3 host-exit drd sync disarm at T+4 s ate it -- every later plug was
+ * invisible until a manual debugfs re-arm). Re-arm once after this delay if
+ * the session is still down; an attach in the meantime sets armed=true and
+ * makes it a no-op. 0 disables the self-heal.
+ */
+static int erhai_rearm_delay_ms = 2000;
+module_param(erhai_rearm_delay_ms, int, 0644);
+MODULE_PARM_DESC(erhai_rearm_delay_ms,
+		 "re-arm the ADSP OTG session this long after a detach disarm (0=off)");
+
+/*
  * Max-SoC charge limit. When 1..99, charging is inhibited at/above this SoC
  * (battery held, system runs from input via USB_CHARGE_OUTPUT_SUSPEND) and
  * resumed once SoC falls ERHAI_CHGLIM_HYST below it. 0 or 100 disables the
@@ -158,6 +173,12 @@ struct erhai_otg {
 	struct mutex vbus_lock;
 	struct work_struct vbus_work;
 	struct delayed_work vbus_off_work;
+	/*
+	 * Detach-edge self-heal: re-arm the ADSP session a short while after a
+	 * disarm so a lost re-arm race (or no userspace re-arm at all) cannot
+	 * leave CC attach detection dead. See erhai_otg_rearm_work().
+	 */
+	struct delayed_work rearm_work;
 	bool vbus_on;
 	bool armed;
 
@@ -428,6 +449,10 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 			otg->armed = false;
 			dev_info(otg->dev, "otg: session disarmed (detach)\n");
 		}
+		/* Self-heal: revive CC attach detection (see erhai_rearm_delay_ms). */
+		if (erhai_rearm_delay_ms > 0)
+			mod_delayed_work(system_wq, &otg->rearm_work,
+					 msecs_to_jiffies(erhai_rearm_delay_ms));
 	}
 
 	otg->vbus_on = on;
@@ -479,10 +504,38 @@ static int erhai_otg_session_sync(bool arm)
 			dev_info(otg->dev,
 				 "otg: session disarmed (drd sync, ret=%d)\n",
 				 ret);
+			/*
+			 * Self-heal: this disarm can land on top of (and eat)
+			 * a userspace detach-edge re-arm when the host-exit is
+			 * slow, leaving CC attach detection dead. Re-arm once
+			 * later if the session is still down.
+			 */
+			if (erhai_rearm_delay_ms > 0)
+				mod_delayed_work(system_wq, &otg->rearm_work,
+						 msecs_to_jiffies(erhai_rearm_delay_ms));
 		}
 	}
 	mutex_unlock(&otg->vbus_lock);
 	return ret;
+}
+
+/*
+ * Detach-edge self-heal: runs erhai_rearm_delay_ms after the last disarm.
+ * No-op when an attach already recovered the session (armed=true, or a live
+ * host session exists), otherwise re-arms so the ADSP keeps seeing CC
+ * attaches after a detach no matter which disarm path fired.
+ */
+static void erhai_otg_rearm_work(struct work_struct *work)
+{
+	struct erhai_otg *otg = container_of(to_delayed_work(work),
+					     struct erhai_otg, rearm_work);
+
+	if (!otg->service_up || erhai_rearm_delay_ms <= 0)
+		return;
+	if (erhai_detach_gate_enable && erhai_dwc3_host_active())
+		return;	/* host session is back: attach recovered already */
+	if (!otg->armed)
+		erhai_otg_session_sync(true);
 }
 
 /* BC_OTG_ENABLE: bring the OTG session up (immediate). */
@@ -628,6 +681,17 @@ static ssize_t erhai_otg_cmd_write(struct file *file, const char __user *ubuf,
 	if (ret < 0)
 		return ret;
 
+	/*
+	 * Keep the kernel's armed flag coherent with manual userspace
+	 * re-arms/disarms, otherwise a later drd-sync disarm happily kills a
+	 * session userspace just armed (2026-08-28 detach race).
+	 */
+	if (opcode == BC_USB_PROPERTY_SET && property == USB_OTG_SWITCH) {
+		mutex_lock(&otg->vbus_lock);
+		otg->armed = (value != 0);
+		mutex_unlock(&otg->vbus_lock);
+	}
+
 	return count;
 }
 
@@ -657,6 +721,7 @@ static int erhai_otg_probe(struct auxiliary_device *adev,
 	INIT_WORK(&otg->arm_work, erhai_otg_arm_work);
 	INIT_WORK(&otg->vbus_work, erhai_otg_vbus_work);
 	INIT_DELAYED_WORK(&otg->vbus_off_work, erhai_otg_vbus_off_work);
+	INIT_DELAYED_WORK(&otg->rearm_work, erhai_otg_rearm_work);
 	INIT_DELAYED_WORK(&otg->chglim_work, erhai_otg_chglim_work);
 	otg->chglim_state = -1;
 	/* Start the charge-limit poller after a settle delay (ADSP PDR + gauge). */
@@ -691,6 +756,7 @@ static void erhai_otg_remove(struct auxiliary_device *adev)
 	cancel_work_sync(&otg->arm_work);
 	cancel_work_sync(&otg->vbus_work);
 	cancel_delayed_work_sync(&otg->vbus_off_work);
+	cancel_delayed_work_sync(&otg->rearm_work);
 	cancel_delayed_work_sync(&otg->chglim_work);
 	usb_role_switch_put(otg->role_sw);
 	debugfs_remove_recursive(otg->debugfs);
