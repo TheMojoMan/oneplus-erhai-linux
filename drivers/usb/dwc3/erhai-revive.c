@@ -36,6 +36,9 @@
 #define GDSCR_SW_COLLAPSE	BIT(0)
 #define CFG_POWER_UP_COMPLETE	BIT(16)
 
+static bool erhai_qmp_force;
+module_param_named(qmp_force, erhai_qmp_force, bool, 0644);
+
 static bool erhai_revive_enable = true;
 module_param(erhai_revive_enable, bool, 0444);
 MODULE_PARM_DESC(erhai_revive_enable,
@@ -127,8 +130,10 @@ static void erhai_dwc3_phy_cycle(struct dwc3 *dwc)
 	 * pipe clock). The USB2 (M31 + eUSB2 repeater) side is unaffected
 	 * and keeps the plain cycle.
 	 */
-	ret = qmp_combo_force_recover(phys[1]);
-	dev_info(dwc->dev, "erhai revive: qmp force recover ret=%d\n", ret);
+	if (erhai_qmp_force) {
+		ret = qmp_combo_force_recover(phys[1]);
+		dev_info(dwc->dev, "erhai revive: qmp force recover ret=%d\n", ret);
+	}
 
 	if (!phys[0] || IS_ERR(phys[0]))
 		return;
