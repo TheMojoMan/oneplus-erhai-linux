@@ -5299,6 +5299,21 @@ static int qmp_combo_get_dt_usb3_orientation(struct device *dev,
 	return 0;
 }
 
+/*
+ * erhai: single USB-C port on this board, so a single instance pointer is
+ * enough. Lets the dwc3 host-exit path wait for the DP client of the
+ * shared QMP PHY to be fully gone before tearing USB down (serialization).
+ */
+static struct qmp_combo *erhai_qmp_instance;
+
+bool qmp_combo_dp_active(void)
+{
+	struct qmp_combo *qmp = erhai_qmp_instance;
+
+	return qmp && smp_load_acquire(&qmp->dp_init_count) > 0;
+}
+EXPORT_SYMBOL_GPL(qmp_combo_dp_active);
+
 static int qmp_combo_probe(struct platform_device *pdev)
 {
 	struct qmp_combo *qmp;
@@ -5440,6 +5455,8 @@ static int qmp_combo_probe(struct platform_device *pdev)
 
 	of_node_put(usb_np);
 	of_node_put(dp_np);
+
+	erhai_qmp_instance = qmp;
 
 	pm_runtime_put(dev);
 
