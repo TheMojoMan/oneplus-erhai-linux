@@ -277,6 +277,22 @@ static void __dwc3_set_mode(struct work_struct *work)
 		msleep(erhai_exit_pace_ms);
 	}
 
+	/*
+	 * erhai #41: after a host exit, the global RAM (GRXFIFOSIZ0) reads
+	 * 0 for a while even though GHWPARAMS0 is alive; charging into the
+	 * soft reset then fails (-110, "FIFO0=0" half-dead state) and the
+	 * 30-s revive cannot fix it. Wait for the RAM to settle before
+	 * switching roles (host entry 6 s later always worked — settle
+	 * time, not damage).
+	 */
+	{
+		unsigned long fifo_deadline = jiffies + msecs_to_jiffies(2000);
+
+		while (dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0)) == 0 &&
+		       time_before(jiffies, fifo_deadline))
+			msleep(50);
+	}
+
 	dev_info(dwc->dev, "erhai drd: pre-prtcap GHWPARAMS0=%#x\n",
 		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
 
