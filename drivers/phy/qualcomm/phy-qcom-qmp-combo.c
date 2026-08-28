@@ -4361,7 +4361,14 @@ int qmp_combo_force_recover(struct phy *phy)
 	dev_info(qmp->dev, "erhai qmp: FORCE recover (count=%u usb=%u dp=%u)\n",
 		 qmp->init_count, qmp->usb_init_count, qmp->dp_init_count);
 
-	qmp_combo_com_exit(qmp, true);
+	/*
+	 * v2: do NOT com_exit(force=1) here. Asserting the QMP resets and
+	 * dropping the vregs mid-recovery coincided with an instant
+	 * PMIC-level hard reset on the next device entry (2026-08-28,
+	 * 16:53, no kernel trace). com_init(force=1) alone re-runs the
+	 * full powerup (regulators, reset assert/deassert pulse, clocks,
+	 * COM overrides) which is enough to restore the pipe clock.
+	 */
 	qmp_combo_com_init(qmp, true);
 
 	if (qmp->usb_init_count) {
