@@ -334,6 +334,9 @@ static void pmic_glink_ucsi_callback(const void *data, size_t len, void *priv)
 	struct pmic_glink_ucsi *ucsi = priv;
 	const struct pmic_glink_hdr *hdr = data;
 
+	dev_info_ratelimited(ucsi->dev, "erhai ucsi: rx opcode=%#x\n",
+			     le32_to_cpu(hdr->opcode));
+
 	switch (le32_to_cpu(hdr->opcode)) {
 	case UC_UCSI_READ_BUF_REQ:
 		pmic_glink_ucsi_read_ack(ucsi, data, len);
