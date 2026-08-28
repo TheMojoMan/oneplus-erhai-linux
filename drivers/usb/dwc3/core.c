@@ -301,6 +301,17 @@ static void __dwc3_set_mode(struct work_struct *work)
 		 * sequences. Runs before host_init, so xhci is not attached to
 		 * the phys yet.
 		 */
+		/* erhai #31: set host mode BEFORE the recycle so the
+		 * eUSB2 repeater re-initializes host-aware (the OSS
+		 * glue sets PHY_HOST_MODE prior to powerup/reset/init) */
+		for (i = 0; i < dwc->num_usb2_ports; i++)
+			if (dwc->usb2_generic_phy[i])
+				phy_set_mode(dwc->usb2_generic_phy[i],
+					     PHY_MODE_USB_HOST);
+		for (i = 0; i < dwc->num_usb3_ports; i++)
+			if (dwc->usb3_generic_phy[i])
+				phy_set_mode(dwc->usb3_generic_phy[i],
+					     PHY_MODE_USB_HOST);
 		for (i = 0; i < dwc->num_usb2_ports; i++) {
 			if (!dwc->usb2_generic_phy[i])
 				continue;
