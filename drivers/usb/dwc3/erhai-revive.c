@@ -108,6 +108,9 @@ static void erhai_dwc3_gcc_dance_once(struct dwc3 *dwc, bool full)
 	iounmap(g);
 }
 
+/* provided by phy-qcom-qmp-combo.c; bypasses stale phy-core counts */
+int qmp_combo_force_recover(struct phy *phy);
+
 static void erhai_dwc3_phy_cycle(struct dwc3 *dwc)
 {
 	struct phy *phys[2];
@@ -116,17 +119,25 @@ static void erhai_dwc3_phy_cycle(struct dwc3 *dwc)
 	phys[0] = dwc->usb2_generic_phy[0];
 	phys[1] = dwc->usb3_generic_phy[0];
 
-	for (i = 0; i < 2; i++) {
-		if (!phys[i] || IS_ERR(phys[i]))
-			continue;
-		phy_power_off(phys[i]);
-		phy_exit(phys[i]);
-		ret = phy_init(phys[i]);
-		if (!ret)
-			ret = phy_power_on(phys[i]);
-		dev_info(dwc->dev, "erhai revive: phy%d reinit ret=%d\n",
-			 i, ret);
-	}
+	/*
+	 * v6: the USB3 (QMP combo) side is cycled through a dedicated
+	 * force-recover call: the phy-core init_count is stale across the
+	 * DP-only teardown, so the refcounted phy_exit/phy_init below
+	 * silently no-oped and the dwc3 soft reset never completed (no
+	 * pipe clock). The USB2 (M31 + eUSB2 repeater) side is unaffected
+	 * and keeps the plain cycle.
+	 */
+	ret = qmp_combo_force_recover(phys[1]);
+	dev_info(dwc->dev, "erhai revive: qmp force recover ret=%d\n", ret);
+
+	if (!phys[0] || IS_ERR(phys[0]))
+		return;
+	phy_power_off(phys[0]);
+	phy_exit(phys[0]);
+	ret = phy_init(phys[0]);
+	if (!ret)
+		ret = phy_power_on(phys[0]);
+	dev_info(dwc->dev, "erhai revive: phy0 reinit ret=%d\n", ret);
 }
 
 bool erhai_dwc3_revive(struct dwc3 *dwc)
