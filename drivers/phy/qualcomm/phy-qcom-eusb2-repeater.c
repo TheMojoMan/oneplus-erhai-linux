@@ -141,6 +141,8 @@ static int eusb2_repeater_init_vregs(struct eusb2_repeater *rptr)
 static int eusb2_repeater_init(struct phy *phy)
 {
 	struct eusb2_repeater *rptr = phy_get_drvdata(phy);
+
+	dev_info(rptr->dev, "erhai rptr: init\n");
 	struct device_node *np = rptr->dev->of_node;
 	struct regmap *regmap = rptr->regmap;
 	u32 base = rptr->base;
@@ -199,6 +201,8 @@ static int eusb2_repeater_set_mode(struct phy *phy,
 	struct regmap *regmap = rptr->regmap;
 	u32 base = rptr->base;
 
+	dev_info(rptr->dev, "erhai rptr: set_mode mode=%d\n", mode);
+
 	switch (mode) {
 	case PHY_MODE_USB_HOST:
 		/*
@@ -230,6 +234,7 @@ static int eusb2_repeater_exit(struct phy *phy)
 {
 	struct eusb2_repeater *rptr = phy_get_drvdata(phy);
 
+	dev_info(rptr->dev, "erhai rptr: exit\n");
 	return regulator_bulk_disable(rptr->cfg->num_vregs, rptr->vregs);
 }
 

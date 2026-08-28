@@ -291,6 +291,26 @@ static void __dwc3_set_mode(struct work_struct *work)
 
 	switch (desired_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
+		/*
+		 * erhai: the M31 eUSB2 PHY + PMIC eUSB2 repeater keep stale
+		 * device-mode state across DRD switches (HS dead after detach
+		 * cycles, SS unaffected). Force a full exit/init of the usb2
+		 * phys on every host entry so the repeater really re-modes to
+		 * host. phy_exit/init are refcounted: this unwinds the single
+		 * init from dwc3_core_init and re-runs the m31 + repeater init
+		 * sequences. Runs before host_init, so xhci is not attached to
+		 * the phys yet.
+		 */
+		for (i = 0; i < dwc->num_usb2_ports; i++) {
+			if (!dwc->usb2_generic_phy[i])
+				continue;
+			dev_info(dwc->dev, "erhai phy: recycle usb2 phy %d\n", i);
+			phy_exit(dwc->usb2_generic_phy[i]);
+			ret = phy_init(dwc->usb2_generic_phy[i]);
+			if (ret)
+				dev_err(dwc->dev,
+					"erhai phy: usb2 recycle failed %d\n", ret);
+		}
 		if (erhai_session_sync)
 			erhai_session_sync(true);
 		ret = dwc3_host_init(dwc);
