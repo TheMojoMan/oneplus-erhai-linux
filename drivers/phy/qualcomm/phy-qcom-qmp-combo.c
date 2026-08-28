@@ -4168,6 +4168,12 @@ static int qmp_combo_dp_exit(struct phy *phy)
 
 	mutex_lock(&qmp->phy_mutex);
 
+	if (!qmp->dp_init_count) {
+		dev_info(qmp->dev, "erhai qmp: dp_exit without init - skipped (underflow guard)\n");
+		mutex_unlock(&qmp->phy_mutex);
+		return 0;
+	}
+
 	qmp_combo_com_exit(qmp, false);
 
 	qmp->dp_init_count--;
@@ -4336,6 +4342,13 @@ static int qmp_combo_usb_exit(struct phy *phy)
 	int ret;
 
 	mutex_lock(&qmp->phy_mutex);
+
+	if (!qmp->usb_init_count) {
+		dev_info(qmp->dev, "erhai qmp: usb_exit without init - skipped (underflow guard)\n");
+		mutex_unlock(&qmp->phy_mutex);
+		return 0;
+	}
+
 	ret = qmp_combo_usb_power_off(phy);
 	if (ret)
 		goto out_unlock;
@@ -4888,16 +4901,17 @@ static int qmp_combo_typec_mux_set(struct typec_mux_dev *mux, struct typec_mux_s
 		/* Now everything's powered down, power up the right PHYs */
 		qmp_combo_com_init(qmp, true);
 
-		if (new_mode == QMPPHY_MODE_DP_ONLY) {
-			if (qmp->usb_init_count)
-				qmp->usb_init_count--;
-		}
+		/*
+		 * erhai: do NOT steal usb_init_count here (vendor hack).
+		 * The dwc3 host keeps its phy reference; stealing made the
+		 * later usb_exit underflow the count and run an extra full
+		 * com teardown (reset asserts, regulators off) while DP was
+		 * still winding down -> dwc3 island death on every
+		 * DP-active detach. The clients own their counts.
+		 */
 
-		if (new_mode == QMPPHY_MODE_USB3DP || new_mode == QMPPHY_MODE_USB3_ONLY) {
+		if (new_mode == QMPPHY_MODE_USB3DP || new_mode == QMPPHY_MODE_USB3_ONLY)
 			qmp_combo_usb_power_on(qmp->usb_phy);
-			if (!qmp->usb_init_count)
-				qmp->usb_init_count++;
-		}
 
 		if (new_mode == QMPPHY_MODE_DP_ONLY || new_mode == QMPPHY_MODE_USB3DP) {
 			if (qmp->dp_init_count)
