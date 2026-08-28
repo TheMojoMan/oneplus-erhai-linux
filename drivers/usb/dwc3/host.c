@@ -224,12 +224,30 @@ err:
 }
 EXPORT_SYMBOL_GPL(dwc3_host_init);
 
+bool qmp_combo_dp_active(void);
+
 void dwc3_host_exit(struct dwc3 *dwc)
 {
 	if (dwc->sys_wakeup)
 		device_init_wakeup(&dwc->xhci->dev, false);
 
 	dwc3_enable_susphy(dwc, true);
+
+	/*
+	 * erhai: wait for the DP side of the shared QMP combo PHY to be
+	 * fully gone before removing xhci. The DRM-side disable can lag the
+	 * ADSP safe-mode by seconds; tearing the USB power/clock domain down
+	 * while DP still streams through the shared PHY left the dwc3 island
+	 * half-dead (GHWPARAMS0 alive, FIFO reads 0) and the following device
+	 * entry never recovered (island race, #21-#39 saga).
+	 */
+	if (dwc->usb3_generic_phy[0] && !IS_ERR(dwc->usb3_generic_phy[0])) {
+		unsigned long deadline = jiffies + msecs_to_jiffies(5000);
+
+		while (qmp_combo_dp_active() && time_before(jiffies, deadline))
+			msleep(50);
+	}
+
 	dev_info(dwc->dev, "erhai hexit: pre-unreg GHWPARAMS0=%#x\n",
 		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
 	platform_device_unregister(dwc->xhci);
