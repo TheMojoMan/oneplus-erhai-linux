@@ -4174,7 +4174,11 @@ static int qmp_combo_dp_exit(struct phy *phy)
 		return 0;
 	}
 
-	qmp_combo_com_exit(qmp, false);
+	/* erhai keep-alive: see usb_exit. */
+	if (qmp->init_count <= 1)
+		dev_info(qmp->dev, "erhai qmp: keep-alive, com block stays up\n");
+	else
+		qmp_combo_com_exit(qmp, false);
 
 	qmp->dp_init_count--;
 
@@ -4402,9 +4406,21 @@ static int qmp_combo_usb_exit(struct phy *phy)
 	if (ret)
 		goto out_unlock;
 
-	ret = qmp_combo_com_exit(qmp, false);
-	if (ret)
-		goto out_unlock;
+	/*
+	 * erhai keep-alive: never tear the common block down. The full
+	 * teardown (reset asserts + vreg drops) landed exactly when the
+	 * next dev/host entry needed the pipe clock: the dwc3 soft reset
+	 * then never completed (-110) and the recovery path hard-reset
+	 * the board (2026-08-28, #36-#38). Leaving the block up costs a
+	 * few mW and keeps the soft reset working.
+	 */
+	if (qmp->init_count <= 1)
+		dev_info(qmp->dev, "erhai qmp: keep-alive, com block stays up\n");
+	else {
+		ret = qmp_combo_com_exit(qmp, false);
+		if (ret)
+			goto out_unlock;
+	}
 
 	qmp->usb_init_count--;
 
