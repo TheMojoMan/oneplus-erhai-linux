@@ -78,6 +78,7 @@ struct pmic_glink_ucsi {
 	spinlock_t state_lock;
 	bool ucsi_registered;
 	bool pd_running;
+	bool rescan_pending;
 
 	u8 read_buf[UCSI_BUF_V2_SIZE];
 };
@@ -327,10 +328,22 @@ MODULE_PARM_DESC(erhai_ucsi_poll_ms,
 		 "ms between UCSI connector-status polls (ADSP notify "
 		 "starvation workaround; 0 disables)");
 
+static int erhai_ucsi_rescan;
+module_param(erhai_ucsi_rescan, int, 0644);
+MODULE_PARM_DESC(erhai_ucsi_rescan,
+		 "write 1: full UCSI unregister/re-register to kick the "
+		 "wedged ADSP CC state machine (auto-clears)");
+
 static void erhai_ucsi_poll(struct work_struct *work)
 {
 	struct pmic_glink_ucsi *ucsi =
 		container_of(work, struct pmic_glink_ucsi, poll_work.work);
+
+	if (READ_ONCE(erhai_ucsi_rescan)) {
+		WRITE_ONCE(erhai_ucsi_rescan, 0);
+		ucsi->rescan_pending = true;
+		schedule_work(&ucsi->register_work);
+	}
 
 	if (ucsi->ucsi_registered && erhai_ucsi_poll_ms)
 		ucsi_connector_change(ucsi->ucsi, 1);
@@ -349,6 +362,20 @@ static void pmic_glink_ucsi_register(struct work_struct *work)
 	pd_running = ucsi->pd_running;
 	spin_unlock_irqrestore(&ucsi->state_lock, flags);
 
+	/*
+	 * erhai: explicit rescan kick. After an alt-mode detach the ADSP's
+	 * CC attach detection can stay wedged forever (answers "not
+	 * connected" to GET_CONNECTOR_STATUS while a device is attached,
+	 * no self-recovery — #27/#28). Drop the UCSI registration so the
+	 * PPM re-handshakes from scratch. Trigger: echo 1 >
+	 * /sys/module/ucsi_glink/parameters/erhai_ucsi_rescan
+	 */
+	if (ucsi->rescan_pending && ucsi->ucsi_registered) {
+		ucsi->rescan_pending = false;
+		ucsi_unregister(ucsi->ucsi);
+		ucsi->ucsi_registered = false;
+	}
+
 	if (!ucsi->ucsi_registered && pd_running) {
 		ucsi_register(ucsi->ucsi);
 		ucsi->ucsi_registered = true;
@@ -363,7 +390,7 @@ static void pmic_glink_ucsi_callback(const void *data, size_t len, void *priv)
 	struct pmic_glink_ucsi *ucsi = priv;
 	const struct pmic_glink_hdr *hdr = data;
 
-	dev_info_ratelimited(ucsi->dev, "erhai ucsi: rx opcode=%#x\n",
+	dev_dbg_ratelimited(ucsi->dev, "erhai ucsi: rx opcode=%#x\n",
 			     le32_to_cpu(hdr->opcode));
 
 	switch (le32_to_cpu(hdr->opcode)) {
