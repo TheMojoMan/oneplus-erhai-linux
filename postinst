@@ -1,0 +1,112 @@
+#!/bin/bash
+# oneplus-erhai-linux postinst: turn the installed vmlinuz + DTB into a Unified
+# Kernel Image and put it on the ESP, where rEFInd picks it up.
+#
+# The boot chain is: power-on / reboot -> multiboot loader in boot_a -> Mu-erhai
+# (UEFI) -> rEFInd -> the entry the user picks. There is no bootloader config to
+# update; rEFInd scans EFI/ubuntu, so installing the .efi there is the whole job.
+set -e
+
+# 1. Kernel version = this package's version minus the "+b<N>" Debian revision
+#    that build-kernel.sh appends to the .deb Version only (so apt sees
+#    rebuilds of the same kernelrelease as upgrades). The revision is NOT part
+#    of the kernelrelease.
+KVER=$(dpkg-query --show --showformat='${Version}' "$DPKG_MAINTSCRIPT_PACKAGE")
+KVER="${KVER%%+b*}"
+
+if [ -z "$KVER" ]; then
+    echo "Error: Could not determine kernel version."
+    exit 1
+fi
+
+# 2. Root partition label, so the cmdline follows whichever partition we booted
+#    from instead of a hard-coded /dev/sdaN (UFS enumeration order is not fixed).
+ROOT_LABEL=$(lsblk -no PARTLABEL "$(findmnt -no SOURCE /)")
+
+if [ -z "$ROOT_LABEL" ]; then
+    echo "Warning: Could not find PARTLABEL for /. Using 'linux' as fallback."
+    ROOT_LABEL="linux"
+fi
+
+# 3. EFI filename and kernel command line.
+#
+#    usbcore.autosuspend=-1 is load-bearing, not tuning: with autosuspend on,
+#    USB-OTG HID devices enumerate, work for a few seconds and then die in an
+#    EPROTO (-71) reset storm on the first resume.
+#
+#    Do NOT add fw_devlink=permissive here. It lets DSI probe ahead of its
+#    regulators, which turns into a racy PLL-lock failure and a boot that wedges
+#    before the rootfs.
+CLEAN_KVER="${KVER//-sm8750-themojoman/}"
+OUTPUT_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
+CMDLINE="root=PARTLABEL=$ROOT_LABEL rootwait rw rootfstype=ext4 fw_devlink=off \
+earlycon=efifb console=tty0 loglevel=4 clk_ignore_unused pd_ignore_unused \
+panic=30 consoleblank=0 usbcore.autosuspend=-1 log_buf_len=8M"
+
+BOOT_DIR="/boot"
+KERNEL_IMG="$BOOT_DIR/vmlinuz-$KVER"
+DTB_FILE="$BOOT_DIR/dtb-$KVER"
+
+UKIFY_BIN=$(which ukify)
+
+# 4. Module dependencies for the new kernel.
+if [ -d "/lib/modules/$KVER" ] && command -v depmod > /dev/null; then
+    depmod -a "$KVER" || true
+fi
+
+# 5. Print full details in the requested format
+echo "Post-install: Generating UKI..."
+echo " - Kernel:  $KERNEL_IMG"
+echo " - DTB:     $DTB_FILE"
+echo " - Output:  $OUTPUT_EFI"
+echo " - Cmdline: $CMDLINE"
+
+# 6. Build the UKI. The DTB is always embedded: Mu-erhai hands us no device
+#    tree, so a kernel without one gets nowhere.
+if [ -f "$KERNEL_IMG" ] && [ -x "$UKIFY_BIN" ]; then
+    "$UKIFY_BIN" build \
+        --linux "$KERNEL_IMG" \
+        --devicetree "$DTB_FILE" \
+        --efi-arch aa64 \
+        --cmdline "$CMDLINE" \
+        --output "$OUTPUT_EFI"
+else
+    echo "Error: Kernel image or ukify not found. Skipping UKI generation."
+    exit 0
+fi
+
+# 7. Install it on the ESP. /boot/efi is normally NOT mounted (that fstab entry
+#    is commented out), so mount the ESP by partlabel here.
+ESP_PART="/dev/disk/by-partlabel/esp"
+MNT_TMP=$(mktemp -d)
+DEST_DIR="$MNT_TMP/EFI/ubuntu"
+MOUNT_SUCCESS=false
+
+if [ -b "$ESP_PART" ]; then
+    for i in 1 2 3; do
+        echo "Attempt $i: Mounting ESP ($ESP_PART)..."
+        if mount "$ESP_PART" "$MNT_TMP" 2>/dev/null; then
+            MOUNT_SUCCESS=true
+            break
+        fi
+        sleep 1
+    done
+fi
+
+if [ "$MOUNT_SUCCESS" = true ]; then
+    mkdir -p "$DEST_DIR"
+    cp "$OUTPUT_EFI" "$DEST_DIR/"
+    sync
+    echo "Success: $OUTPUT_EFI copied to ESP (EFI/ubuntu)."
+    echo "Pick it in the rEFInd menu on the next boot."
+    umount "$MNT_TMP"
+else
+    echo "Notice: ESP not available or mount failed. Copied .efi file to /boot/"
+    cp "$OUTPUT_EFI" /boot/
+fi
+
+# 8. Cleanup
+rm -rf "$MNT_TMP"
+rm -f "$OUTPUT_EFI"
+
+exit 0
