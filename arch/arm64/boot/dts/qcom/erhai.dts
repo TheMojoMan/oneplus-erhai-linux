@@ -1941,26 +1941,28 @@
 
 		firmware-name = "brhbtnv20.bin", "brhbtfw20.tlv";
 
-		/* The WCN7880's NVM BD address is the WCN7850 config DEFAULT
-		 * (78:55:00:01:5A:AD), so qca_check_bdaddr() sets
-		 * HCI_QUIRK_USE_BDADDR_PROPERTY and the controller would otherwise
-		 * register UNCONFIGURED -> hciconfig brings it up in RAW (unmanaged)
-		 * mode -> bluez ignores it ("No default controller") -> GNOME greys
-		 * out Bluetooth. The btmgmt-at-boot workaround was racy (the first
-		 * btmgmt public-addr hangs on bluetoothd mgmt-socket contention while
-		 * hci0 is still enumerating, poisoning the socket for the retry loop).
+		/*
+		 * BD address policy (v239) - firmware/OTP path:
 		 *
-		 * Providing local-bd-address here is the clean fix: hci_dev_setup_sync()
-		 * reads it (hci_dev_get_bd_addr_from_property), programs it via the qca
-		 * set_bdaddr op, and clears invalid_bdaddr -> the controller is NEVER
-		 * marked HCI_UNCONFIGURED -> it comes up MANAGED (non-RAW) and bluez /
-		 * GNOME see it with no btmgmt at all.
+		 * Stock Android reports the OnePlus factory (OTP) address
+		 * 7C:F0:E5:9B:4B:E4 (shared base with the WLAN MLD MAC). Ground
+		 * truth: the brhbtnv20*.bin NVM blobs captured from the running
+		 * tablet are byte-identical to ours and NONE of them contain the
+		 * factory MAC, and stock sun-peach-bt.dtsi has no local-bd-address
+		 * property either - so the address lives in the chip's OTP and no
+		 * host override exists on Android.
 		 *
-		 * Byte order is LSB-first (read straight into bdaddr_t.b[0..5], no
-		 * BDADDR_PROPERTY_BROKEN quirk on qca), so these bytes read back as the
-		 * MAC C0:FF:EE:13:1E:1A. Swap for the real factory BT MAC when recovered.
+		 * We therefore mirror that: no local-bd-address property here.
+		 * If the controller reports its OTP address it is used as-is.
+		 * If it still reports the WCN7850 NVM default 78:55:00:01:5A:AD
+		 * (the BD_ADDR tag inside brhbtnv20.bin) or an all-zero address,
+		 * qca_check_bdaddr() in btqca.c now programs the fixed fallback
+		 * 7C:F0:E5:79:55:54, so hci0 always registers MANAGED (non-RAW)
+		 * and bluez/GNOME see it without any btmgmt workaround.
+		 *
+		 * (Historical v238 workaround: hardcoded C0:FF:EE:13:1E:1A via
+		 * local-bd-address - removed because it masked the OTP path.)
 		 */
-		local-bd-address = /bits/ 8 <0x1a 0x1e 0x13 0xee 0xff 0xc0>;
 
 		status = "okay";
 	};
