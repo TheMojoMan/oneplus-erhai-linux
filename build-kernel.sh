@@ -108,21 +108,50 @@ build_kernel() {
 }
 
 # ----------------------------------------------------------------- package ---
+# Debian revision: the kernelrelease stays frozen at 7.2.0-sm8750-themojoman
+# (stable vermagic, module paths and UKI name), so the .deb Version cannot be
+# the kernelrelease alone -- two builds would compare equal and apt would
+# never offer an upgrade. A "+b<N>" Debian revision is therefore appended to
+# the .deb Version ONLY (never to the kernelrelease); postinst/postrm strip
+# it again before deriving KVER. N auto-increments past the highest revision
+# already visible in the PPA suites; override with DEB_REV=<n>.
+next_deb_rev() {
+	local pkg="$1" max=0 root f v n
+	root="$HERE/../themojoman.github.io/ppa/oneplus-erhai/ubuntu"
+	if [ -d "$root" ]; then
+		# Published metadata (may lag behind freshly moved .debs) ...
+		for f in "$root"/*/Packages; do
+			[ -f "$f" ] || continue
+			while read -r v; do
+				case "$v" in *+b[0-9]*) n="${v##*+b}" ;; *) continue ;; esac
+				if [ "$n" -gt "$max" ] 2>/dev/null; then max="$n"; fi
+			done < <(awk -v pkg="$pkg" '
+				$1 == "Package:" { inp = ($2 == pkg); next }
+				inp && $1 == "Version:" { print $2; inp = 0 }' "$f")
+		done
+		# ... and the actual .deb files sitting in the suites.
+		for f in "$root"/*/"${pkg}"_*_arm64.deb; do
+			[ -f "$f" ] || continue
+			v="${f##*/}"; v="${v#"${pkg}"_}"; v="${v%_arm64.deb}"
+			case "$v" in *+b[0-9]*) n="${v##*+b}" ;; *) continue ;; esac
+			if [ "$n" -gt "$max" ] 2>/dev/null; then max="$n"; fi
+		done
+	fi
+	echo $((max + 1))
+}
+
 build_deb() {
-	# Version is the kernelrelease string verbatim, because the postinst reads
-	# it back with dpkg-query and uses it to find /boot/vmlinuz-<KVER> and
-	# /lib/modules/<KVER>. Consequence for the apt repo: two builds of the same
-	# release carry the same version and apt sees no upgrade -- bump
-	# CONFIG_LOCALVERSION in the kernel repo, or pass PKG_SUFFIX=-b2, to get a
-	# distinct one.
 	PKG_NAME="oneplus-erhai-linux-${short_version}"
 	PKG_DIR="$HERE/${PKG_NAME}${PKG_SUFFIX}"
 	rm -rf "$PKG_DIR"
 	mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/boot"
 
+	DEB_REV="${DEB_REV:-$(next_deb_rev "$PKG_NAME")}"
+	DEB_VERSION="${kernel_version_full}+b${DEB_REV}"
+
 	cat > "$PKG_DIR/DEBIAN/control" <<EOF
 Package: ${PKG_NAME}
-Version: ${kernel_version_full}
+Version: ${DEB_VERSION}
 Architecture: arm64
 Maintainer: TheMojoMan <themojoman@gmx.net>
 Section: kernel
@@ -153,9 +182,9 @@ EOF
 
 	find "$PKG_DIR" -type d -exec chmod 755 {} +
 	dpkg-deb --build --root-owner-group "$PKG_DIR" \
-		"$HERE/${PKG_NAME}_${kernel_version_full}_arm64.deb"
+		"$HERE/${PKG_NAME}_${DEB_VERSION}_arm64.deb"
 
-	echo "built ${PKG_NAME}_${kernel_version_full}_arm64.deb"
+	echo "built ${PKG_NAME}_${DEB_VERSION}_arm64.deb (kernelrelease ${kernel_version_full})"
 }
 
 # ------------------------------------------------------------------ execute --
@@ -175,6 +204,7 @@ if [ -n "${GITHUB_ENV:-}" ]; then
 		echo "base_version=${base_version}"
 		echo "short_version=${short_version}"
 		echo "package_name=${PKG_NAME}"
+		echo "deb_version=${DEB_VERSION}"
 		echo "patches_applied=${patches_applied:-false}"
 	} >> "$GITHUB_ENV"
 fi
