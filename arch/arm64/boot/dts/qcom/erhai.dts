@@ -726,6 +726,74 @@
 			};
 		};
 	};
+	/*
+	 * OPLUS sensor subsystem nodes — ground truth: stock Android
+	 * devicetree, dtbo_a entry04 ("Qualcomm Technologies, Inc. Sun
+	 * MTP,erhai") fragment@83, identical to erhai-sensor-24924.dtsi in
+	 * the OnePlus OSS devicetree repo (android_kernel_modules_and_
+	 * devicetree_oneplus_sm8750, branch oneplus/sm8750_b_16.0.0_pad_3;
+	 * same trio in all 16 erhai dtbo variants).
+	 *
+	 * Architecture on erhai (verified 2026-09-06): the physical
+	 * sensors (accel, gyro, ALS/PS, SAR) have NO AP-side I2C/SPI
+	 * nodes — they hang off the SSC, whose user PD runs ON THE ADSP
+	 * (SM8750 has no separate SLPI remoteproc; the sun DTB only has
+	 * spss/adsp/mss/cdsp/soccp, and sensor_feedback.c maps an
+	 * "ADSP_ISLAND" SMEM 613). Android's sensor data path is
+	 * USERSPACE: sensors HAL <-> QMI "sensral" over QRTR <-> SSC user
+	 * PD, loaded from dsp_a:/adsp (fastrpc_shell_0 + libsns_*_skel.so)
+	 * via FastRPC — the libssc/hexagonrpcd model proven on Xiaomi
+	 * nabu (github CFM880/nabu-accelerometer) applies. Live probe
+	 * (tmp/qrtr-lookup.c): ADSP QRTR node already up with servreg;
+	 * sensral appears once a userspace PD loader runs.
+	 * The kernel-side oplus drivers (sensor_feedback / ssc_interact /
+	 * sensor devinfo) are TELEMETRY/interactive plumbing only
+	 * (SMEM 608 stats, panel->SSC brightness hints) — not the data
+	 * path. These nodes are therefore inert until that plumbing is
+	 * ported; they carry the ground truth for it.
+	 * Rails: erhai-sensor-24924.dtsi additionally votes the ldob9
+	 * sensor rail (Android name pm_humu_l9) to fixed 2.8 V HPM via a
+	 * second rpmh regulator node. ldob9 is the SAME rpmh resource
+	 * already in-tree as vreg_l9b_2p9 (camera vaf consumer, 2.96-3.0 V
+	 * range): rpmh consumers vote their own voltage on enable, so
+	 * adding a duplicate node for the same resource is wrong here —
+	 * a future sensor driver simply supplies <&vreg_l9b_2p9>.
+	 */
+	sensor_fb: sensor_fb {
+		compatible = "oplus,sensor-feedback";
+		master-id = <3>;
+		smem-id = <608>;
+	};
+
+	ssc_interactive {
+		sup-power-fb;
+		sup-hbm-mode = <1>;
+		need_lb_algo = <1>;
+		receive_screenshot_info = <1>;
+		report_blank_mode = <1>;
+
+		primary_lb_brl_info {
+			brl_thrd_num = <1>;
+			brl_thrd = <1>;
+			brl_l2h_thrd = <1>;
+		};
+	};
+
+	oplus_sensor {
+		compatible = "oplus,sensor-devinfo";
+
+		/* virtual magnetometer-fusion sensor */
+		mag_fusion {
+			sensor-type = <6>; /* OPLUS_MAG_FUSION */
+			is-virtual-sensor;
+			fusion-type = <0>; /* OPLUS_FUSION */
+			fold-feature = <0>;
+			drop_zero = <1>;
+		};
+	};
+};
+
+&apps_rsc {
 };
 
 &apps_rsc {
@@ -1583,7 +1651,11 @@
 /*
  * Hall sensor — erhai is a tablet; the hall sensor detects cover/folio
  * position.  GPIO/I2C address matches the erhai Android DTS.
- * Kept in place from dodge; verify GPIO 17 is correct for erhai.
+ * NOTE (2026-09-06 ground truth): NO ak09970/dhall node exists anywhere in
+ * the erhai Android devicetree (neither the vendor_boot Sun SoC DTB nor any
+ * of the 16 dtbo variants) — this node was carried over from dodge and its
+ * compatible has no in-tree driver, so it is inert. Kept as-is pending a
+ * verified GPIO/address for the erhai hall IC.
  */
 &i2c_hub_9 {
 	status = "okay";
