@@ -95,6 +95,8 @@ struct pogo_kbd {
 
 	struct input_dev *kbd;
 	struct input_dev *touchpad;
+	struct input_dev *switch_dev;
+	bool tablet_mode;
 
 	u32 tp_x_max, tp_y_max, tp_x_res, tp_y_res;
 	bool touch_support;
@@ -572,6 +574,58 @@ static int pogo_kbd_register_touchpad(struct pogo_kbd *kb)
 	return input_register_device(dev);
 }
 
+/*
+ * SW_TABLET_MODE: mutter/gnome only allow screen auto-rotation while the seat
+ * is in touch mode, which follows this switch (no switch present => pointer
+ * attached => laptop mode => no rotation). The keyboard is what turns the
+ * tablet into a laptop, so report tablet mode whenever the keyboard stream is
+ * not alive, and laptop mode while it is attached. This also gates the native
+ * Rotation Lock quick toggle.
+ */
+static int pogo_kbd_register_switch(struct pogo_kbd *kb)
+{
+	struct input_dev *dev;
+	int ret;
+
+	dev = devm_input_allocate_device(kb->dev);
+	if (!dev)
+		return -ENOMEM;
+
+	dev->name = "OnePlus Pad 3 Tablet Mode Switch";
+	dev->phys = "pogo-kbd/input2";
+	dev->id.bustype = BUS_HOST;
+	dev->id.vendor = 0x22d9;
+	dev->id.product = 0x3869;
+	dev->id.version = 0x0010;
+
+	__set_bit(EV_SW, dev->evbit);
+	__set_bit(SW_TABLET_MODE, dev->swbit);
+
+	/* The keyboard only streams after the detect poll powers it: we start
+	 * detached, i.e. in tablet mode. */
+	kb->tablet_mode = true;
+
+	kb->switch_dev = dev;
+	ret = input_register_device(dev);
+	if (ret)
+		return ret;
+
+	input_report_switch(dev, SW_TABLET_MODE, 1);
+	input_sync(dev);
+	return 0;
+}
+
+static void pogo_kbd_report_tablet_mode(struct pogo_kbd *kb, bool tablet)
+{
+	if (kb->tablet_mode == tablet)
+		return;
+
+	kb->tablet_mode = tablet;
+	input_report_switch(kb->switch_dev, SW_TABLET_MODE, tablet);
+	input_sync(kb->switch_dev);
+	dev_info(kb->dev, "%s mode\n", tablet ? "tablet" : "laptop");
+}
+
 #define POGO_OFF_MS		1000	/* rail-off time to force a keyboard reset */
 #define POGO_POLL_MS		3000	/* keepalive / detect cadence */
 #define POGO_RX_TIMEOUT_MS	6000	/* no frame this long => detached */
@@ -599,6 +653,9 @@ static void pogo_kbd_poll_work(struct work_struct *work)
 	bool alive = kb->got_data &&
 		     time_before(jiffies,
 				 kb->last_rx + msecs_to_jiffies(POGO_RX_TIMEOUT_MS));
+
+	/* Keyboard attached => laptop mode, detached => tablet mode. */
+	pogo_kbd_report_tablet_mode(kb, !alive);
 
 	if (!alive) {
 		if (kb->got_data)
@@ -682,6 +739,9 @@ static int pogo_kbd_probe(struct serdev_device *serdev)
 		if (ret)
 			return dev_err_probe(dev, ret, "register touchpad failed\n");
 	}
+	ret = pogo_kbd_register_switch(kb);
+	if (ret)
+		return dev_err_probe(dev, ret, "register tablet-mode switch failed\n");
 
 	serdev_device_set_client_ops(serdev, &pogo_kbd_serdev_ops);
 	ret = devm_serdev_device_open(dev, serdev);
