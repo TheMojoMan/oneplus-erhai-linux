@@ -615,17 +615,6 @@ static int pogo_kbd_register_switch(struct pogo_kbd *kb)
 	return 0;
 }
 
-static void pogo_kbd_report_tablet_mode(struct pogo_kbd *kb, bool tablet)
-{
-	if (kb->tablet_mode == tablet)
-		return;
-
-	kb->tablet_mode = tablet;
-	input_report_switch(kb->switch_dev, SW_TABLET_MODE, tablet);
-	input_sync(kb->switch_dev);
-	dev_info(kb->dev, "%s mode\n", tablet ? "tablet" : "laptop");
-}
-
 #define POGO_OFF_MS		1000	/* rail-off time to force a keyboard reset */
 #define POGO_POLL_MS		3000	/* keepalive / detect cadence */
 #define POGO_RX_TIMEOUT_MS	6000	/* no frame this long => detached */
@@ -655,7 +644,19 @@ static void pogo_kbd_poll_work(struct work_struct *work)
 				 kb->last_rx + msecs_to_jiffies(POGO_RX_TIMEOUT_MS));
 
 	/* Keyboard attached => laptop mode, detached => tablet mode. */
-	pogo_kbd_report_tablet_mode(kb, !alive);
+	if (kb->tablet_mode != !alive) {
+		kb->tablet_mode = !alive;
+		dev_info(kb->dev, "%s mode\n", !alive ? "tablet" : "laptop");
+	}
+
+	/*
+	 * Re-assert the current switch state every poll cycle: compositors
+	 * (mutter) only learn switch state from toggle events and never query
+	 * it, so a state set before the compositor started would otherwise be
+	 * invisible forever. Duplicate reports are harmless.
+	 */
+	input_report_switch(kb->switch_dev, SW_TABLET_MODE, kb->tablet_mode);
+	input_sync(kb->switch_dev);
 
 	if (!alive) {
 		if (kb->got_data)
