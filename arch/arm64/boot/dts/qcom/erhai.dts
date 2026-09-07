@@ -2772,6 +2772,13 @@
 				cam_vdig-supply = <&vreg_l1i_1p2>;
 				cam_vaf-supply  = <&vreg_l9b_2p9>;
 
+				/* Rear AF voice-coil motor (CN3927-
+				 * compatible, CCI0-m1 slave 0x0c). Lets
+				 * libcamera attach a lens object to this
+				 * sensor; the VCM subdev keeps its own
+				 * VAF regulator reference. */
+				lens-focus = <&vcm>;
+
 				/* MIPI CSI-2 D-PHY 4-lane out -> CAMSS CSIPHY4 */
 				port {
 					sc1320cs_ep: endpoint {
@@ -2788,6 +2795,24 @@
 						link-frequencies = /bits/ 64 <600000000>;
 					};
 				};
+			};
+
+			/*
+			 * Rear-camera AF voice-coil motor, CCI master 1,
+			 * slave 0x0c.  CN3927-compatible protocol: unlock
+			 * 0xed, params 0x06/0x07/0x08, 10-bit DAC position
+			 * at regs 0x03 (MSB[1:0]) / 0x04 (LSB) — verified
+			 * with i2ctransfer (erhai-cam-focus.sh).  The VAF
+			 * rail is shared with the sensor; the regulator
+			 * core refcounts it, so the VCM subdev can also
+			 * power it while no preview is streaming.
+			 */
+			vcm: lens@c {
+				compatible = "chipnext,cn3927";
+				reg = <0x0c>;
+
+				vio-supply = <&vreg_l4b_1p8>;
+				vaf-supply = <&vreg_l9b_2p9>;
 			};
 		};
 	};
