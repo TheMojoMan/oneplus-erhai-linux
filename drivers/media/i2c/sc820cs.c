@@ -325,13 +325,14 @@ static const struct cci_reg_sequence sc820cs_mode_3264x2448[] = {
 	{ CCI_REG8(0x578d), 0x40 },
 	{ CCI_REG8(0x57aa), 0xeb },
 	/*
-	 * 0x3221[6:5]=flip (V), [2:1]=mirror (H). Clear the H-mirror -> 0x60
-	 * (Android streams 0x66; V-flip kept). Measured GNOME Snapshot behaviour
-	 * on this soft-ISP path: with DT orientation=FRONT it mirrors the preview
-	 * only (capture stays un-mirrored); with orientation=BACK it mirrors
-	 * NEITHER. So the un-mirrored-both combo is orientation=<1> (BACK) here +
-	 * 0x60 (both transforms off). Bayer phase is preserved across the mirror
-	 * toggle (SC-series mirrors in 2-pixel groups), so SBGGR10 stays valid.
+	 * 0x3221[6:5]=flip (V), [2:1]=mirror (H). 0x60 = both transforms
+	 * off (Android streams 0x66; V-flip kept): the natural, un-mirrored
+	 * readout of the scene. Selfie-preview mirroring is an application
+	 * convention, applied above this driver: with DT orientation=FRONT,
+	 * GNOME Snapshot mirrors the preview only and keeps captures
+	 * un-mirrored (erhai.dts now reports the sensor honestly). Bayer
+	 * phase is preserved across the mirror toggle (SC-series mirrors in
+	 * 2-pixel groups), so SBGGR10 stays valid.
 	 */
 	{ CCI_REG8(0x3221), 0x60 },
 	{ CCI_REG8(0x301f), 0x0e },
