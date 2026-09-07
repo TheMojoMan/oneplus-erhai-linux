@@ -971,6 +971,15 @@ config VIDEO_DW9807_VCM
 	  capability. This is designed for linear control of
 	  voice coil motors, controlled via I2C serial interface.
 
+config VIDEO_CN3927
+	tristate "Chipnext CN3927 lens voice coil support"
+	help
+	  This is a driver for the CN3927 camera lens voice coil.
+	  CN3927 is a 10 bit DAC controlled via I2C with an unlock
+	  register at 0xed and the DAC position split across
+	  registers 0x03/0x04.  Used for the OnePlus Pad 3 (erhai)
+	  rear-camera autofocus actuator (CN3927-compatible protocol).
+
 endif
 
 menu "Flash devices"
