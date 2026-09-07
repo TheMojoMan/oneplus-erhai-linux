@@ -2826,9 +2826,9 @@
  * Ground truth: captures/camera-bringup-2026-07-11/erhai_camera_overlay_common_evb.dtsi
  * (qcom,cam-sensor1) + CAMERA-GROUNDTRUTH.md.
  *
- * Phase-A = probe + chip-id over GENI only; the 3264x2448 streaming register
- * table is not yet captured (front rides GENI, not the CCI the rear trace saw),
- * so the sensor detects but does not stream (see sc820cs.c Phase-B note).
+ * The 3264x2448 streaming register table is captured; the sensor streams
+ * at native resolution only (verified in GNOME Snapshot). Selfie mirroring
+ * is left to applications via the honest orientation property below.
  */
 &i2c9 {
 	status = "okay";
@@ -2848,13 +2848,13 @@
 
 		reset-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
 
-		/* orientation=BACK (1) so GNOME Snapshot applies NO mirror to
-		 * either preview or capture (measured: FRONT mirrors the preview
-		 * only, BACK mirrors neither); paired with sensor 0x3221=0x60
-		 * (H-mirror off) the front image lands un-mirrored on screen and
-		 * on disk. (Cost: libcamera reports this front sensor as location
-		 * back — cosmetic; the requirement is an un-mirrored image.) */
-		orientation = <1>;
+		/* Front-facing (selfie) module. The driver exports
+		 * V4L2_CID_CAMERA_ORIENTATION=FRONT so libcamera reports
+		 * location=front and applications apply the selfie-preview
+		 * mirror themselves (the sensor's H-mirror stays OFF in
+		 * sc820cs.c, so raw frames — preview, capture and video —
+		 * are un-mirrored). */
+		orientation = <0>;
 		rotation = <0>;
 
 		cam_vana-supply = <&vreg_l16b_2p8>;
