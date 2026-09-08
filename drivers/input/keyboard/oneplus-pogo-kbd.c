@@ -584,12 +584,28 @@ static int pogo_kbd_register_touchpad(struct pogo_kbd *kb)
 }
 
 /*
- * SW_TABLET_MODE: mutter/gnome only allow screen auto-rotation while the seat
- * is in touch mode, which follows this switch (no switch present => pointer
- * attached => laptop mode => no rotation). The keyboard is what turns the
- * tablet into a laptop, so report tablet mode whenever the keyboard stream is
- * not alive, and laptop mode while it is attached. This also gates the native
- * Rotation Lock quick toggle.
+ * SW_TABLET_MODE: the switch is PINNED to tablet mode (always reported
+ * active). Mutter only treats the seat as touch-mode — and thus allows
+ * display auto-rotation — while the tablet-mode switch is on, and its seat
+ * learns switch state from toggle events only. A switch that flips off with
+ * the keyboard attached would therefore lock the pad into laptop mode until
+ * the next boot (and the seat state is never re-queried), which permanently
+ * hid rotation behind the keyboard hardware state. Pinning it on keeps
+ * mutter's rotation machinery available at all times; whether rotation is
+ * actually applied is gated in userspace instead: the erhai-sensors GNOME
+ * extension forces gsd's orientation-lock on keyboard attach (user
+ * preference saved) and recovers it on detach — and the user may freely
+ * re-enable rotation while the keyboard stays attached (e.g. for a portrait
+ * photo without detaching the folio).
+ *
+ * libinput's touchpad suspension while a tablet-mode switch is active does
+ * not bite because the pogo touchpad is tagged
+ * ID_INPUT_TOUCHPAD_INTEGRATION=external by a udev rule shipped in
+ * oneplus-erhai-desktop (also enables disable-while-typing against the
+ * folio keyboard via the matching libinput quirk file).
+ *
+ * The live keyboard-stream state is exported as the "attached" sysfs
+ * attribute for the OSK watcher (erhai-pogo-osk.py) and the extension.
  */
 static int pogo_kbd_register_switch(struct pogo_kbd *kb)
 {
@@ -610,8 +626,9 @@ static int pogo_kbd_register_switch(struct pogo_kbd *kb)
 	__set_bit(EV_SW, dev->evbit);
 	__set_bit(SW_TABLET_MODE, dev->swbit);
 
-	/* The keyboard only streams after the detect poll powers it: we start
-	 * detached, i.e. in tablet mode. */
+	/* The keyboard only streams after the detect poll powers it: the
+	 * stream starts down (not attached). Note this tracks the keyboard
+	 * stream only — the SW_TABLET_MODE switch itself is pinned on. */
 	kb->tablet_mode = true;
 
 	kb->switch_dev = dev;
@@ -623,6 +640,21 @@ static int pogo_kbd_register_switch(struct pogo_kbd *kb)
 	input_sync(dev);
 	return 0;
 }
+
+/* sysfs: live keyboard-attached state ("1" while the OWB stream is alive).
+ * Read by erhai-pogo-osk.py and the erhai-sensors GNOME extension. */
+static ssize_t attached_show(struct device *dev,
+			     struct device_attribute *attr, char *buf)
+{
+	struct pogo_kbd *kb = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", !kb->tablet_mode);
+}
+static DEVICE_ATTR_RO(attached);
+
+static const struct attribute_group pogo_kbd_attr_group = {
+	.attrs = (struct attribute *[]){ &dev_attr_attached.attr, NULL },
+};
 
 #define POGO_OFF_MS		1000	/* rail-off time to force a keyboard reset */
 #define POGO_DEEP_OFF_MS	3000	/* longer rail-off for the periodic deep reset */
@@ -654,19 +686,20 @@ static void pogo_kbd_poll_work(struct work_struct *work)
 		     time_before(jiffies,
 				 kb->last_rx + msecs_to_jiffies(POGO_RX_TIMEOUT_MS));
 
-	/* Keyboard attached => laptop mode, detached => tablet mode. */
+	/* Track the keyboard stream state for the "attached" sysfs attribute
+	 * (userspace rotation gating + OSK watcher). */
 	if (kb->tablet_mode != !alive) {
 		kb->tablet_mode = !alive;
-		dev_info(kb->dev, "%s mode\n", !alive ? "tablet" : "laptop");
+		dev_info(kb->dev, "%s mode\n", alive ? "laptop" : "tablet");
 	}
 
 	/*
-	 * Re-assert the current switch state every poll cycle: compositors
+	 * Re-assert the PINNED tablet-mode state every poll cycle: compositors
 	 * (mutter) only learn switch state from toggle events and never query
 	 * it, so a state set before the compositor started would otherwise be
 	 * invisible forever. Duplicate reports are harmless.
 	 */
-	input_report_switch(kb->switch_dev, SW_TABLET_MODE, kb->tablet_mode);
+	input_report_switch(kb->switch_dev, SW_TABLET_MODE, 1);
 	input_sync(kb->switch_dev);
 
 	if (!alive) {
@@ -775,6 +808,11 @@ static int pogo_kbd_probe(struct serdev_device *serdev)
 	ret = pogo_kbd_register_switch(kb);
 	if (ret)
 		return dev_err_probe(dev, ret, "register tablet-mode switch failed\n");
+
+
+	ret = devm_device_add_group(dev, &pogo_kbd_attr_group);
+	if (ret)
+		return dev_err_probe(dev, ret, "create sysfs attributes failed\n");
 
 	serdev_device_set_client_ops(serdev, &pogo_kbd_serdev_ops);
 	ret = devm_serdev_device_open(dev, serdev);
