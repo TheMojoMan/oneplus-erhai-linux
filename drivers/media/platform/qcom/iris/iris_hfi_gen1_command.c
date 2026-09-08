@@ -148,6 +148,13 @@ static int iris_hfi_gen1_session_close(struct iris_inst *inst)
 	return iris_hfi_queue_cmd_write(inst->core, &packet, packet.shdr.hdr.size);
 }
 
+static int iris_hfi_gen1_set_decode_order(struct iris_inst *inst)
+{
+	/* gen1 decode-order output is not wired up; clients fall back to
+	 * display-order semantics */
+	return 0;
+}
+
 static int iris_hfi_gen1_session_start(struct iris_inst *inst, u32 plane)
 {
 	struct iris_core *core = inst->core;
@@ -1129,6 +1136,7 @@ static const struct iris_hfi_session_ops iris_hfi_gen1_session_ops = {
 	.session_release_buf = iris_hfi_gen1_session_unset_buffers,
 	.session_resume_drc = iris_hfi_gen1_session_continue,
 	.session_stop = iris_hfi_gen1_session_stop,
+	.session_set_decode_order = iris_hfi_gen1_set_decode_order,
 	.session_drain = iris_hfi_gen1_session_drain,
 	.session_close = iris_hfi_gen1_session_close,
 };
