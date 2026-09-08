@@ -184,6 +184,11 @@ EOF
 	dpkg-deb --build --root-owner-group "$PKG_DIR" \
 		"$HERE/${PKG_NAME}_${DEB_VERSION}_arm64.deb"
 
+	# The unpacked staging tree is root-owned (modules_install) and huge;
+	# only the .deb matters after the build, so remove the tree right away
+	# (it must never leak into e.g. the PPA suites or git status).
+	rm -rf "$PKG_DIR"
+
 	echo "built ${PKG_NAME}_${DEB_VERSION}_arm64.deb (kernelrelease ${kernel_version_full})"
 }
 
@@ -193,7 +198,6 @@ apply_patches
 build_kernel
 build_deb
 
-tar -cf "$HERE/${PKG_NAME}${PKG_SUFFIX}.tar" -C "$HERE" "$(basename "$PKG_DIR")"
 echo "kernelrelease: $kernel_version_full"
 echo "package:       ${PKG_NAME}"
 
