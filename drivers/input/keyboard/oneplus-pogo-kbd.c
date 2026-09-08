@@ -95,8 +95,7 @@ struct pogo_kbd {
 
 	struct input_dev *kbd;
 	struct input_dev *touchpad;
-	struct input_dev *switch_dev;
-	bool tablet_mode;
+	bool attached;		/* OWB keyboard stream alive (sysfs) */
 
 	/* detection diagnostics (per poll cycle) */
 	u32 rx_frames;		/* completed OWB frames since probe */
@@ -584,71 +583,32 @@ static int pogo_kbd_register_touchpad(struct pogo_kbd *kb)
 }
 
 /*
- * SW_TABLET_MODE: the switch is PINNED to tablet mode (always reported
- * active). Mutter only treats the seat as touch-mode — and thus allows
- * display auto-rotation — while the tablet-mode switch is on, and its seat
- * learns switch state from toggle events only. A switch that flips off with
- * the keyboard attached would therefore lock the pad into laptop mode until
- * the next boot (and the seat state is never re-queried), which permanently
- * hid rotation behind the keyboard hardware state. Pinning it on keeps
- * mutter's rotation machinery available at all times; whether rotation is
- * actually applied is gated in userspace instead: the erhai-sensors GNOME
- * extension forces gsd's orientation-lock on keyboard attach (user
- * preference saved) and recovers it on detach — and the user may freely
- * re-enable rotation while the keyboard stays attached (e.g. for a portrait
- * photo without detaching the folio).
+ * sysfs: live keyboard-attached state ("1" while the OWB stream is alive).
+ * Read by erhai-pogo-osk.py and the erhai-sensors GNOME extension.
  *
- * libinput's touchpad suspension while a tablet-mode switch is active does
- * not bite because the pogo touchpad is tagged
+ * NOTE: this driver deliberately does NOT create a SW_TABLET_MODE input
+ * switch — being a tablet is a property of the pad, not of whatever (if
+ * any) keyboard is clipped onto it. The pinned tablet-mode switch that
+ * keeps mutter's touch mode (and thus its rotation machinery) active is
+ * provided by the erhai-tablet-mode service in oneplus-erhai-sensors
+ * (virtual uinput device). Whether display rotation is actually applied
+ * is gated in userspace: the erhai-sensors GNOME extension forces gsd's
+ * orientation-lock on keyboard attach (user preference saved) and
+ * recovers it on detach — and the user may freely re-enable rotation
+ * while the keyboard stays attached.
+ *
+ * libinput's touchpad suspension while a tablet-mode switch is active
+ * does not bite because the pogo touchpad is tagged
  * ID_INPUT_TOUCHPAD_INTEGRATION=external by a udev rule shipped in
  * oneplus-erhai-desktop (also enables disable-while-typing against the
  * folio keyboard via the matching libinput quirk file).
- *
- * The live keyboard-stream state is exported as the "attached" sysfs
- * attribute for the OSK watcher (erhai-pogo-osk.py) and the extension.
  */
-static int pogo_kbd_register_switch(struct pogo_kbd *kb)
-{
-	struct input_dev *dev;
-	int ret;
-
-	dev = devm_input_allocate_device(kb->dev);
-	if (!dev)
-		return -ENOMEM;
-
-	dev->name = "OnePlus Pad 3 Tablet Mode Switch";
-	dev->phys = "pogo-kbd/input2";
-	dev->id.bustype = BUS_HOST;
-	dev->id.vendor = 0x22d9;
-	dev->id.product = 0x3869;
-	dev->id.version = 0x0010;
-
-	__set_bit(EV_SW, dev->evbit);
-	__set_bit(SW_TABLET_MODE, dev->swbit);
-
-	/* The keyboard only streams after the detect poll powers it: the
-	 * stream starts down (not attached). Note this tracks the keyboard
-	 * stream only — the SW_TABLET_MODE switch itself is pinned on. */
-	kb->tablet_mode = true;
-
-	kb->switch_dev = dev;
-	ret = input_register_device(dev);
-	if (ret)
-		return ret;
-
-	input_report_switch(dev, SW_TABLET_MODE, 1);
-	input_sync(dev);
-	return 0;
-}
-
-/* sysfs: live keyboard-attached state ("1" while the OWB stream is alive).
- * Read by erhai-pogo-osk.py and the erhai-sensors GNOME extension. */
 static ssize_t attached_show(struct device *dev,
 			     struct device_attribute *attr, char *buf)
 {
 	struct pogo_kbd *kb = dev_get_drvdata(dev);
 
-	return sysfs_emit(buf, "%d\n", !kb->tablet_mode);
+	return sysfs_emit(buf, "%d\n", kb->attached);
 }
 static DEVICE_ATTR_RO(attached);
 
@@ -687,20 +647,12 @@ static void pogo_kbd_poll_work(struct work_struct *work)
 				 kb->last_rx + msecs_to_jiffies(POGO_RX_TIMEOUT_MS));
 
 	/* Track the keyboard stream state for the "attached" sysfs attribute
-	 * (userspace rotation gating + OSK watcher). */
-	if (kb->tablet_mode != !alive) {
-		kb->tablet_mode = !alive;
-		dev_info(kb->dev, "%s mode\n", alive ? "laptop" : "tablet");
+	 * (userspace rotation gating + OSK watcher). The stream only starts
+	 * after the detect poll powers the keyboard, so it starts down. */
+	if (kb->attached != alive) {
+		kb->attached = alive;
+		dev_info(kb->dev, "keyboard %s\n", alive ? "attached" : "detached");
 	}
-
-	/*
-	 * Re-assert the PINNED tablet-mode state every poll cycle: compositors
-	 * (mutter) only learn switch state from toggle events and never query
-	 * it, so a state set before the compositor started would otherwise be
-	 * invisible forever. Duplicate reports are harmless.
-	 */
-	input_report_switch(kb->switch_dev, SW_TABLET_MODE, 1);
-	input_sync(kb->switch_dev);
 
 	if (!alive) {
 		if (kb->got_data)
@@ -805,10 +757,6 @@ static int pogo_kbd_probe(struct serdev_device *serdev)
 		if (ret)
 			return dev_err_probe(dev, ret, "register touchpad failed\n");
 	}
-	ret = pogo_kbd_register_switch(kb);
-	if (ret)
-		return dev_err_probe(dev, ret, "register tablet-mode switch failed\n");
-
 
 	ret = devm_device_add_group(dev, &pogo_kbd_attr_group);
 	if (ret)
