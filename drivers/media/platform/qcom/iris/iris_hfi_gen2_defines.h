@@ -132,8 +132,9 @@ enum hfi_flip {
 #define HFI_PROP_DEC_DEFAULT_HEADER		0x03000168
 #define HFI_PROP_DEC_START_FROM_RAP_FRAME	0x03000169
 #define HFI_PROP_NO_OUTPUT			0x0300016a
-/* Qualcomm downstream: enables firmware decode-order output (payload u32, 1=on) */
-#define HFI_PROP_DECODE_ORDER_OUTPUT		0x0300016b
+/* Qualcomm downstream (hfi_property.h 0x0300015b): enables firmware
+ * decode-order output (payload u32, 1=on; OUTPUT_ORDER cap value) */
+#define HFI_PROP_DECODE_ORDER_OUTPUT		0x0300015b
 #define HFI_PROP_BUFFER_MARK			0x0300016c
 #define HFI_PROP_WORST_COMPRESSION_RATIO	0x03000174
 #define HFI_PROP_WORST_COMPLEXITY_FACTOR	0x03000175
