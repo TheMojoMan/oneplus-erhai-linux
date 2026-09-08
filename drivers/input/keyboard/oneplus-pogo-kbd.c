@@ -98,6 +98,12 @@ struct pogo_kbd {
 	struct input_dev *switch_dev;
 	bool tablet_mode;
 
+	/* detection diagnostics (per poll cycle) */
+	u32 rx_frames;		/* completed OWB frames since probe */
+	u32 rx_bad;		/* completed frames that failed CRC */
+	u32 rx_frames_mark;	/* rx_frames at the last dead poll */
+	u32 rx_bad_mark;	/* rx_bad at the last dead poll */
+
 	u32 tp_x_max, tp_y_max, tp_x_res, tp_y_res;
 	bool touch_support;
 	u16 crc_init;
@@ -476,7 +482,10 @@ static void pogo_kbd_recv(struct pogo_kbd *kb, const u8 *buf, size_t len)
 					/* strip [F1,src,dst] head + [FE,AA,AA] tail */
 					pogo_kbd_dispatch(kb, &kb->recv_buf[3],
 							  kb->idx - 6);
+				} else {
+					kb->rx_bad++;
 				}
+				kb->rx_frames++;
 				kb->idx = 0;
 			}
 		}
@@ -616,10 +625,12 @@ static int pogo_kbd_register_switch(struct pogo_kbd *kb)
 }
 
 #define POGO_OFF_MS		1000	/* rail-off time to force a keyboard reset */
+#define POGO_DEEP_OFF_MS	3000	/* longer rail-off for the periodic deep reset */
+#define POGO_DEEP_CYCLES	20	/* deep reset every Nth failed cycle */
 #define POGO_POLL_MS		3000	/* keepalive / detect cadence */
 #define POGO_RX_TIMEOUT_MS	6000	/* no frame this long => detached */
 #define POGO_BACKOFF_CYCLES	8	/* slow down after this many empty cycles */
-#define POGO_BACKOFF_MS		15000
+#define POGO_BACKOFF_MS		5000	/* idle poll cadence (short: snappy attach) */
 
 /*
  * Self-healing power/detect poll (no plug IRQ — gpio96 floats and storms when
@@ -663,9 +674,30 @@ static void pogo_kbd_poll_work(struct work_struct *work)
 			dev_info(kb->dev, "keyboard stream lost; re-detecting\n");
 		kb->got_data = false;
 
-		/* power-cycle to (re)detect */
+		/*
+		 * Diagnostics for the "attached but never recognised" state:
+		 * completed OWB frames with bad CRC mean the OWB line is alive
+		 * and the keyboard is streaming garbage (rebooting, or noise),
+		 * while total frame silence means it is not powered at all.
+		 */
+		if (kb->rx_frames != kb->rx_frames_mark)
+			dev_info(kb->dev,
+				 "detect: %u OWB frames since last poll (%u bad CRC)\n",
+				 kb->rx_frames - kb->rx_frames_mark,
+				 kb->rx_bad - kb->rx_bad_mark);
+		kb->rx_frames_mark = kb->rx_frames;
+		kb->rx_bad_mark = kb->rx_bad;
+
+		/* drop any partial frame across the rail bounce */
+		kb->recv_start = false;
+		kb->idx = 0;
+		kb->head_sync_cnt = 0;
+
+		/* power-cycle to (re)detect; periodic deep reset for a wedged keyboard */
 		gpiod_set_value_cansleep(kb->power_gpio, 0);
-		msleep(POGO_OFF_MS);
+		msleep(kb->fail_cycles &&
+		       kb->fail_cycles % POGO_DEEP_CYCLES == 0 ?
+		       POGO_DEEP_OFF_MS : POGO_OFF_MS);
 		gpiod_set_value_cansleep(kb->power_gpio, 1);
 
 		if (kb->fail_cycles++ > POGO_BACKOFF_CYCLES)
