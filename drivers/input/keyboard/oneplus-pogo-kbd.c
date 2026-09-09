@@ -119,6 +119,7 @@ struct pogo_kbd {
 	u16 mm_old[2];
 	u16 mm_new[2];
 	u16 mm_reported[2];	/* keycode emitted at press, per mm slot */
+	u16 gen_emitted[KEYBOARD_NUM_KEYS];	/* general path: scancode -> keycode reported while down */
 	bool fn_held;		/* magnifier key held => Fn modifier active */
 
 	/* touchpad state */
@@ -206,6 +207,22 @@ static const u16 pogo_fn_remap[][2] = {
 	{0xe9,  KEY_F12},	/* volume up		*/
 };
 
+/*
+ * Fn + keyboard-path top-row keys. The keyboard firmware sends four of the
+ * top-row keys (mic, touchpad-toggle, screenshot, lock) as PLAIN HID
+ * scancodes on the general-key path -- F13 (0x68), F17 (0x6c),
+ * PrintScreen (0x46) and F24 (0x73), evtest-verified with Fn held -- while
+ * the rest of the top row arrives as media reports (handled by
+ * pogo_fn_remap above). With the magnifier (Fn) key held they must yield
+ * F3..F6 (physical top-row order, left to right).
+ */
+static const u16 pogo_fn_gen_remap[][2] = {
+	{0x68, KEY_F3},	/* F13		-> mic / settings	*/
+	{0x6c, KEY_F4},	/* F17		-> touchpad toggle	*/
+	{0x46, KEY_F5},	/* PrintScreen	-> screenshot		*/
+	{0x73, KEY_F6},	/* F24		-> lock			*/
+};
+
 /* resolve a media scancode to a Linux keycode, honouring the Fn modifier.
  * returns 0 if the scancode is unknown. */
 static u16 pogo_kbd_mm_lookup(struct pogo_kbd *kb, u16 kw)
@@ -222,6 +239,19 @@ static u16 pogo_kbd_mm_lookup(struct pogo_kbd *kb, u16 kw)
 			return mm_keymap[j][1];
 
 	return 0;
+}
+
+/* resolve a general-key-path HID scancode to a Linux keycode, honouring Fn */
+static u16 pogo_kbd_gen_lookup(struct pogo_kbd *kb, u8 sc)
+{
+	int j;
+
+	if (kb->fn_held)
+		for (j = 0; j < ARRAY_SIZE(pogo_fn_gen_remap); j++)
+			if (pogo_fn_gen_remap[j][0] == sc)
+				return pogo_fn_gen_remap[j][1];
+
+	return pogo_keymap[sc];
 }
 
 /* ---- CRC-16/IBM (app_compute_crc16 / app_crc16_get) ---- */
@@ -256,20 +286,43 @@ static void pogo_kbd_report_keys(struct pogo_kbd *kb, const u8 *buf)
 	for (i = 0; i < 8; i++)
 		input_report_key(dev, pogo_keymap[i + 224], (kb->cur[0] >> i) & 1);
 
+	/* settle the Fn (magnifier) modifier state BEFORE resolving keys:
+	 * the magnifier and a combo key can appear in the same report. */
+	if (memscan(kb->cur + 2, POGO_FN_HID_SCANCODE, 6) != kb->cur + 8)
+		kb->fn_held = true;	/* magnifier: Fn modifier down */
+	else if (memscan(kb->old + 2, POGO_FN_HID_SCANCODE, 6) != kb->old + 8)
+		kb->fn_held = false;	/* magnifier released */
+
 	for (i = 2; i < 8; i++) {
 		if (kb->old[i] > 3 &&
 		    memscan(kb->cur + 2, kb->old[i], 6) == kb->cur + 8) {
+			u16 code;
+
 			if (kb->old[i] == POGO_FN_HID_SCANCODE)
-				kb->fn_held = false;	/* magnifier: Fn modifier */
-			else if (pogo_keymap[kb->old[i]])
-				input_report_key(dev, pogo_keymap[kb->old[i]], 0);
+				continue;	/* Fn modifier, silent */
+			/*
+			 * Release the keycode that was emitted at press time
+			 * (gen_emitted); the Fn state may have changed while
+			 * the key was held (Fn+F13-held -> F3, Fn released,
+			 * key released -> must emit F3 release, not F13).
+			 */
+			code = kb->gen_emitted[kb->old[i]] ?:
+			       (u16)pogo_keymap[kb->old[i]];
+			if (code && code != unk)
+				input_report_key(dev, code, 0);
+			kb->gen_emitted[kb->old[i]] = 0;
 		}
 		if (kb->cur[i] > 3 &&
 		    memscan(kb->old + 2, kb->cur[i], 6) == kb->old + 8) {
+			u16 code;
+
 			if (kb->cur[i] == POGO_FN_HID_SCANCODE)
-				kb->fn_held = true;	/* magnifier: Fn modifier */
-			else if (pogo_keymap[kb->cur[i]])
-				input_report_key(dev, pogo_keymap[kb->cur[i]], 1);
+				continue;	/* Fn modifier, silent */
+			code = pogo_kbd_gen_lookup(kb, kb->cur[i]);
+			if (code && code != unk) {
+				input_report_key(dev, code, 1);
+				kb->gen_emitted[kb->cur[i]] = code;
+			}
 		}
 	}
 
