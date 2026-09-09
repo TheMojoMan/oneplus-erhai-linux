@@ -118,6 +118,7 @@ struct pogo_kbd {
 	u8 cur[8];
 	u16 mm_old[2];
 	u16 mm_new[2];
+	bool fn_held;		/* magnifier key held => Fn modifier active */
 
 	/* touchpad state */
 	u32 touch_down;
@@ -174,6 +175,51 @@ static const unsigned short mm_keymap[KEYBOARD_MM_NUM_KEYS][2] = {
 	{unk,   unk},
 };
 
+/*
+ * The magnifier key is consumed by the driver and used as the Fn modifier.
+ * It arrives on the general-key path as HID scancode 186, which the keymap
+ * maps to KEY_F23 (verified by evtest on the real hardware).
+ */
+#define POGO_FN_HID_SCANCODE	186
+
+/*
+ * Fn + media key -> F1..F12, in physical key order left to right:
+ * br-, br+, mic, touchpad-toggle, screenshot, lock,
+ * rewind, play/pause, forward, mute, vol-, vol+
+ */
+static const u16 pogo_fn_remap[][2] = {
+	{0x70,  KEY_F1},	/* brightness down	*/
+	{0x6f,  KEY_F2},	/* brightness up	*/
+	{0x391, KEY_F3},	/* microphone/settings	*/
+	{0x392, KEY_F4},	/* touchpad on/off	*/
+	{0x390, KEY_F5},	/* screen capture	*/
+	{0x38e, KEY_F6},	/* lock			*/
+	{0xb6,  KEY_F7},	/* rewind		*/
+	{0xcd,  KEY_F8},	/* play/pause		*/
+	{0xb5,  KEY_F9},	/* forward		*/
+	{0xe2,  KEY_F10},	/* mute			*/
+	{0xea,  KEY_F11},	/* volume down		*/
+	{0xe9,  KEY_F12},	/* volume up		*/
+};
+
+/* resolve a media scancode to a Linux keycode, honouring the Fn modifier.
+ * returns 0 if the scancode is unknown. */
+static u16 pogo_kbd_mm_lookup(struct pogo_kbd *kb, u16 kw)
+{
+	int j;
+
+	if (kb->fn_held)
+		for (j = 0; j < ARRAY_SIZE(pogo_fn_remap); j++)
+			if (pogo_fn_remap[j][0] == kw)
+				return pogo_fn_remap[j][1];
+
+	for (j = 0; j < KEYBOARD_MM_NUM_KEYS; j++)
+		if (mm_keymap[j][0] == kw)
+			return mm_keymap[j][1];
+
+	return 0;
+}
+
 /* ---- CRC-16/IBM (app_compute_crc16 / app_crc16_get) ---- */
 static u16 owb_crc16(const u8 *buf, int len, u16 init)
 {
@@ -209,12 +255,16 @@ static void pogo_kbd_report_keys(struct pogo_kbd *kb, const u8 *buf)
 	for (i = 2; i < 8; i++) {
 		if (kb->old[i] > 3 &&
 		    memscan(kb->cur + 2, kb->old[i], 6) == kb->cur + 8) {
-			if (pogo_keymap[kb->old[i]])
+			if (kb->old[i] == POGO_FN_HID_SCANCODE)
+				kb->fn_held = false;	/* magnifier: Fn modifier */
+			else if (pogo_keymap[kb->old[i]])
 				input_report_key(dev, pogo_keymap[kb->old[i]], 0);
 		}
 		if (kb->cur[i] > 3 &&
 		    memscan(kb->old + 2, kb->cur[i], 6) == kb->old + 8) {
-			if (pogo_keymap[kb->cur[i]])
+			if (kb->cur[i] == POGO_FN_HID_SCANCODE)
+				kb->fn_held = true;	/* magnifier: Fn modifier */
+			else if (pogo_keymap[kb->cur[i]])
 				input_report_key(dev, pogo_keymap[kb->cur[i]], 1);
 		}
 	}
@@ -242,27 +292,24 @@ static void *memscan_ex(void *addr, int c, size_t size)
 static void pogo_kbd_report_mm(struct pogo_kbd *kb, const u8 *buf)
 {
 	struct input_dev *dev = kb->kbd;
-	int i, j;
+	int i;
+	u16 code;
 
 	memcpy(kb->mm_new, &buf[1], 4);
 	for (i = 0; i < 2; i++) {
 		u16 kw = kb->mm_old[i];
 
-		if (memscan_ex(kb->mm_new, kw, 4) == (void *)(kb->mm_new + 2) && kw) {
-			for (j = 0; j < KEYBOARD_MM_NUM_KEYS; j++)
-				if (kw == mm_keymap[j][0])
-					break;
-			if (j < KEYBOARD_MM_NUM_KEYS)
-				input_report_key(dev, mm_keymap[j][1], 0);
+		if (kw && memscan_ex(kb->mm_new, kw, 4) == (void *)(kb->mm_new + 2)) {
+			code = pogo_kbd_mm_lookup(kb, kw);
+			if (code)
+				input_report_key(dev, code, 0);
 		}
 
 		kw = kb->mm_new[i];
-		if (memscan_ex(kb->mm_old, kw, 4) == (void *)(kb->mm_old + 2) && kw) {
-			for (j = 0; j < KEYBOARD_MM_NUM_KEYS; j++)
-				if (kw == mm_keymap[j][0])
-					break;
-			if (j < KEYBOARD_MM_NUM_KEYS)
-				input_report_key(dev, mm_keymap[j][1], 1);
+		if (kw && memscan_ex(kb->mm_old, kw, 4) == (void *)(kb->mm_old + 2)) {
+			code = pogo_kbd_mm_lookup(kb, kw);
+			if (code)
+				input_report_key(dev, code, 1);
 		}
 	}
 
@@ -533,6 +580,9 @@ static int pogo_kbd_register_kbd(struct pogo_kbd *kb)
 	for (i = 0; i < KEYBOARD_MM_NUM_KEYS; i++)
 		if (mm_keymap[i][1] && mm_keymap[i][1] != unk)
 			__set_bit(mm_keymap[i][1], dev->keybit);
+
+	for (i = 0; i < ARRAY_SIZE(pogo_fn_remap); i++)
+		__set_bit(pogo_fn_remap[i][1], dev->keybit);
 
 	kb->kbd = dev;
 	return input_register_device(dev);
