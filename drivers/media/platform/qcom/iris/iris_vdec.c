@@ -95,15 +95,12 @@ static bool check_format(struct iris_inst *inst, u32 pixfmt, u32 type)
 	if (i == size)
 		return false;
 
-	if (type == V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE) {
-		if (iris_fmt_is_8bit(pixfmt) &&
-		    inst->fw_caps[BIT_DEPTH].value == BIT_DEPTH_10)
-			return false;
-
-		if (iris_fmt_is_10bit(pixfmt) &&
-		    inst->fw_caps[BIT_DEPTH].value != BIT_DEPTH_10)
-			return false;
-	}
+	/* CAPTURE bit-depth gating intentionally removed: clients (iris-vaapi)
+	 * preconfigure CAPTURE before OUTPUT STREAMON so their exported
+	 * buffers are sized correctly, and at that point the firmware has not
+	 * parsed the stream yet (fw_caps[BIT_DEPTH] is still the 8-bit
+	 * default). iris_vdec_s_fmt_input()/the SOURCE_CHANGE handler adjust
+	 * fmt_dst to the real bit depth once the firmware reports it. */
 
 	return true;
 }
