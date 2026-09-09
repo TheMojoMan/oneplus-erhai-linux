@@ -142,11 +142,80 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	return 0;
 }
 
+/*
+ * For SoundWire capture backends the ADSP codec_dma interface must be told
+ * which LPASS intf channel carries each logical PCM channel. The codec
+ * get_channel_map() returns master_channel_map[] indexed by master port
+ * with a bitmask of active channels per port; for codec_dma each active
+ * master port feeds the intf channel with the same number, so the BE
+ * channel map is the ascending list of ports that have active channels
+ * (e.g. wcd939x ADC1->port2, ADC4->port3 => map {2,3}, matching the
+ * OxygenOS ground truth "CODEC_DMA-LPAIF_RXTX-TX-3 Channel Map {02,03}").
+ *
+ * Must run in prepare(): the q6apmbedai cpu dai's hw_params resets the map
+ * to the sequential default, and its prepare() sends the media format to
+ * the ADSP — snd_soc_link_prepare (here) runs between the two.
+ */
+static int sc8280xp_snd_set_cpu_tx_channel_map(struct snd_soc_pcm_runtime *rtd,
+					       struct snd_soc_dai *cpu_dai)
+{
+	unsigned int tx_ch[SDW_MAX_PORTS], rx_ch[SDW_MAX_PORTS];
+	unsigned int ch_map[SDW_MAX_PORTS];
+	struct snd_soc_dai *codec_dai;
+	unsigned int tx_num = 0, rx_num;
+	int ret, i, j, n = 0;
+
+	for_each_rtd_codec_dais(rtd, i, codec_dai) {
+		ret = snd_soc_dai_get_channel_map(codec_dai, &tx_num, tx_ch,
+						  &rx_num, rx_ch);
+		if (ret == -ENOTSUPP)
+			continue;
+		if (ret) {
+			dev_err(rtd->dev, "Failed to get codec chan map %s\n",
+				codec_dai->name);
+			return ret;
+		}
+		break;
+	}
+
+	for (j = 0; j < tx_num; j++) {
+		if (tx_ch[j])
+			ch_map[n++] = j;
+	}
+
+	if (!n)
+		return 0;
+
+	ret = snd_soc_dai_set_channel_map(cpu_dai, n, ch_map, 0, NULL);
+	if (ret)
+		dev_err(rtd->dev, "Failed to set cpu channel map %s: %d\n",
+			cpu_dai->name, ret);
+
+	return ret;
+}
+
 static int sc8280xp_snd_prepare(struct snd_pcm_substream *substream)
 {
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	int ret = 0;
+
+	switch (cpu_dai->id) {
+	case TX_CODEC_DMA_TX_0:
+	case TX_CODEC_DMA_TX_1:
+	case TX_CODEC_DMA_TX_2:
+	case TX_CODEC_DMA_TX_3:
+	case TX_CODEC_DMA_TX_4:
+	case TX_CODEC_DMA_TX_5:
+		ret = sc8280xp_snd_set_cpu_tx_channel_map(rtd, cpu_dai);
+		break;
+	default:
+		break;
+	}
+
+	if (ret)
+		return ret;
 
 	return qcom_snd_sdw_prepare(substream, &data->stream_prepared[cpu_dai->id]);
 }

@@ -22,7 +22,7 @@
 #include "wcd939x.h"
 #include "wcd-common.h"
 
-static const struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
+static struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
 	WCD_SDW_CH(WCD939X_HPH_L, WCD939X_HPH_PORT, BIT(0)),
 	WCD_SDW_CH(WCD939X_HPH_R, WCD939X_HPH_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_CLSH, WCD939X_CLSH_PORT, BIT(0)),
@@ -35,11 +35,19 @@ static const struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
 	WCD_SDW_CH(WCD939X_HIFI_PCM_R, WCD939X_HIFI_PCM_PORT, BIT(1)),
 };
 
-static const struct wcd_sdw_ch_info wcd939x_sdw_tx_ch_info[] = {
-	WCD_SDW_CH(WCD939X_ADC1, WCD939X_ADC_1_4_PORT, BIT(0)),
+/*
+ * Vendor (downstream) TX port layout — verified against OxygenOS ground
+ * truth (ADC1 ChMap = SWRM_TX2_CH1, ADC4 ChMap = SWRM_TX3_CH2): one ADC
+ * channel per slave port, NOT four ADCs on port 1 like the upstream
+ * default. With qcom,tx-port-mapping = <2 2 3 4> this lands ADC1 on
+ * master port 2 and ADC4 on master port 3, matching the ADSP BE
+ * channel map {2,3} that the codec_dma RXTX-TX3 interface expects.
+ */
+static struct wcd_sdw_ch_info wcd939x_sdw_tx_ch_info[] = {
+	WCD_SDW_CH(WCD939X_ADC1, WCD939X_ADC_DMIC_1_2_PORT, BIT(0)),
 	WCD_SDW_CH(WCD939X_ADC2, WCD939X_ADC_1_4_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_ADC3, WCD939X_ADC_1_4_PORT, BIT(2)),
-	WCD_SDW_CH(WCD939X_ADC4, WCD939X_ADC_1_4_PORT, BIT(3)),
+	WCD_SDW_CH(WCD939X_ADC4, WCD939X_DMIC_0_3_MBHC_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_DMIC0, WCD939X_DMIC_0_3_MBHC_PORT, BIT(0)),
 	WCD_SDW_CH(WCD939X_DMIC1, WCD939X_DMIC_0_3_MBHC_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_MBHC, WCD939X_DMIC_0_3_MBHC_PORT, BIT(2)),
@@ -1339,7 +1347,9 @@ static int wcd9390_probe(struct sdw_slave *pdev, const struct sdw_device_id *id)
 {
 	struct device *dev = &pdev->dev;
 	struct wcd939x_sdw_priv *wcd;
-	int ret;
+	u8 master_ch_mask[WCD939X_MAX_SWR_CH_IDS];
+	int master_ch_mask_size = 0;
+	int ret, i;
 
 	wcd = devm_kzalloc(dev, sizeof(*wcd), GFP_KERNEL);
 	if (!wcd)
@@ -1372,18 +1382,44 @@ static int wcd9390_probe(struct sdw_slave *pdev, const struct sdw_device_id *id)
 				   SDW_SCP_INT1_BUS_CLASH | SDW_SCP_INT1_PARITY;
 	pdev->prop.lane_control_support = true;
 	pdev->prop.simple_clk_stop_capable = true;
+
+	memset(master_ch_mask, 0, WCD939X_MAX_SWR_CH_IDS);
+
+	if (wcd->is_tx) {
+		master_ch_mask_size = of_property_count_u8_elems(dev->of_node,
+								"qcom,tx-channel-mapping");
+
+		if (master_ch_mask_size > 0)
+			ret = of_property_read_u8_array(dev->of_node,
+							"qcom,tx-channel-mapping",
+							master_ch_mask,
+							master_ch_mask_size);
+	} else {
+		master_ch_mask_size = of_property_count_u8_elems(dev->of_node,
+								"qcom,rx-channel-mapping");
+
+		if (master_ch_mask_size > 0)
+			ret = of_property_read_u8_array(dev->of_node,
+							"qcom,rx-channel-mapping",
+							master_ch_mask,
+							master_ch_mask_size);
+	}
+
+	if (ret < 0)
+		dev_info(dev, "Static channel mapping not specified using device channel maps\n");
+
 	if (wcd->is_tx) {
 		pdev->prop.source_ports = GENMASK(WCD939X_MAX_TX_SWR_PORTS - 1, 0);
 		pdev->prop.src_dpn_prop = wcd939x_tx_dpn_prop;
 		wcd->ch_info = &wcd939x_sdw_tx_ch_info[0];
 		pdev->prop.wake_capable = true;
-	} else {
-		pdev->prop.sink_ports = GENMASK(WCD939X_MAX_RX_SWR_PORTS - 1, 0);
-		pdev->prop.sink_dpn_prop = wcd939x_rx_dpn_prop;
-		wcd->ch_info = &wcd939x_sdw_rx_ch_info[0];
-	}
 
-	if (wcd->is_tx) {
+		for (i = 0; i < master_ch_mask_size; i++) {
+			if (master_ch_mask[i])
+				wcd->ch_info[i].master_ch_mask =
+					WCD939X_SWRM_CH_MASK(master_ch_mask[i]);
+		}
+
 		wcd->regmap = devm_regmap_init_sdw(pdev, &wcd939x_regmap_config);
 		if (IS_ERR(wcd->regmap))
 			return dev_err_probe(dev, PTR_ERR(wcd->regmap),
@@ -1391,6 +1427,16 @@ static int wcd9390_probe(struct sdw_slave *pdev, const struct sdw_device_id *id)
 
 		/* Start in cache-only until device is enumerated */
 		regcache_cache_only(wcd->regmap, true);
+	} else {
+		pdev->prop.sink_ports = GENMASK(WCD939X_MAX_RX_SWR_PORTS - 1, 0);
+		pdev->prop.sink_dpn_prop = wcd939x_rx_dpn_prop;
+		wcd->ch_info = &wcd939x_sdw_rx_ch_info[0];
+
+		for (i = 0; i < master_ch_mask_size; i++) {
+			if (master_ch_mask[i])
+				wcd->ch_info[i].master_ch_mask =
+					WCD939X_SWRM_CH_MASK(master_ch_mask[i]);
+		}
 	}
 
 	ret = component_add(dev, &wcd_sdw_component_ops);
