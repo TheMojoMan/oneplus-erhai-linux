@@ -414,28 +414,37 @@ static int wcd939x_io_init(struct snd_soc_component *component)
 	return 0;
 }
 
-static int wcd939x_sdw_connect_port(const struct wcd_sdw_ch_info *ch_info,
+static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
+				    const struct wcd_sdw_ch_info *ch_info,
 				    struct sdw_port_config *port_config,
 				    u8 enable)
 {
+	struct sdw_slave *sdev = wcd->sdev;
 	u8 ch_mask, port_num;
+	u8 mstr_port_num, mstr_ch_mask;
 
 	port_num = ch_info->port_num;
 	ch_mask = ch_info->ch_mask;
 
 	port_config->num = port_num;
 
-	if (enable)
+	mstr_port_num = sdev->m_port_map[port_num];
+	mstr_ch_mask = ch_info->master_ch_mask;
+
+	if (enable) {
 		port_config->ch_mask |= ch_mask;
-	else
+		wcd->master_channel_map[mstr_port_num] |= mstr_ch_mask;
+	} else {
 		port_config->ch_mask &= ~ch_mask;
+		wcd->master_channel_map[mstr_port_num] &= ~mstr_ch_mask;
+	}
 
 	return 0;
 }
 
 static int wcd939x_connect_port(struct wcd939x_sdw_priv *wcd, u8 port_num, u8 ch_id, u8 enable)
 {
-	return wcd939x_sdw_connect_port(&wcd->ch_info[ch_id],
+	return wcd939x_sdw_connect_port(wcd, &wcd->ch_info[ch_id],
 					&wcd->port_config[port_num - 1],
 					enable);
 }
@@ -3256,10 +3265,51 @@ static int wcd939x_codec_set_sdw_stream(struct snd_soc_dai *dai,
 	return wcd939x_sdw_set_sdw_stream(wcd, dai, stream, direction);
 }
 
+static int wcd939x_get_channel_map(const struct snd_soc_dai *dai,
+				   unsigned int *tx_num, unsigned int *tx_slot,
+				   unsigned int *rx_num, unsigned int *rx_slot)
+{
+	struct wcd939x_priv *wcd939x = dev_get_drvdata(dai->dev);
+	struct wcd939x_sdw_priv *wcd = wcd939x->sdw_priv[dai->id];
+	int i;
+
+	switch (dai->id) {
+	case AIF1_PB:
+		if (!rx_slot || !rx_num) {
+			dev_err(dai->dev, "Invalid rx_slot %p or rx_num %p\n",
+				rx_slot, rx_num);
+			return -EINVAL;
+		}
+
+		for (i = 0; i < SDW_MAX_PORTS; i++)
+			rx_slot[i] = wcd->master_channel_map[i];
+
+		*rx_num = i;
+		break;
+	case AIF1_CAP:
+		if (!tx_slot || !tx_num) {
+			dev_err(dai->dev, "Invalid tx_slot %p or tx_num %p\n",
+				tx_slot, tx_num);
+			return -EINVAL;
+		}
+
+		for (i = 0; i < SDW_MAX_PORTS; i++)
+			tx_slot[i] = wcd->master_channel_map[i];
+
+		*tx_num = i;
+		break;
+	default:
+		break;
+	}
+
+	return 0;
+}
+
 static const struct snd_soc_dai_ops wcd939x_sdw_dai_ops = {
 	.hw_params = wcd939x_codec_hw_params,
 	.hw_free = wcd939x_codec_free,
 	.set_stream = wcd939x_codec_set_sdw_stream,
+	.get_channel_map = wcd939x_get_channel_map,
 };
 
 static struct snd_soc_dai_driver wcd939x_dais[] = {

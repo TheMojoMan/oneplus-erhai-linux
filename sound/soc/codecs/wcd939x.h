@@ -843,6 +843,7 @@
 #define WCD939X_MAX_REGISTER				   (WCD939X_DSD_HPHR_CFG5)
 
 #define WCD939X_MAX_SWR_CH_IDS		(15)
+#define WCD939X_SWRM_CH_MASK(ch_idx)	BIT((ch_idx) - 1)
 
 enum wcd939x_tx_sdw_ports {
 	WCD939X_ADC_1_4_PORT = 1,
@@ -898,8 +899,10 @@ struct wcd939x_sdw_priv {
 	struct sdw_stream_config sconfig;
 	struct sdw_stream_runtime *sruntime;
 	struct sdw_port_config port_config[WCD939X_MAX_SWR_PORTS];
-	const struct wcd_sdw_ch_info *ch_info;
+	struct wcd_sdw_ch_info *ch_info;
 	bool port_enable[WCD939X_MAX_SWR_CH_IDS];
+	/* per master port: bitmask of channels carrying data (get_channel_map) */
+	unsigned int master_channel_map[SDW_MAX_PORTS];
 	int active_ports;
 	bool is_tx;
 	struct wcd939x_priv *wcd939x;
