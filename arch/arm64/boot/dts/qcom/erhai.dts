@@ -2328,6 +2328,16 @@
 		compatible = "sdw20217010e00";
 		reg = <0 3>;
 		qcom,tx-port-mapping = <2 2 3 4>;
+		/*
+		 * Master channel per slave TX channel, in ch_info order
+		 * (adc1, adc2, adc3, adc4, ...): OxygenOS programs
+		 * ADC1 -> SWRM_TX2_CH1 (master ch2) and ADC4 -> SWRM_TX3_CH2
+		 * (master ch3); the ADSP BE then needs the intf map {2,3},
+		 * which the machine driver derives from get_channel_map().
+		 * Later entries (dmics) are omitted -> default == slave
+		 * ch_mask, and 0 keeps the default for that channel.
+		 */
+		qcom,tx-channel-mapping = /bits/ 8 <2 0 0 3>;
 	};
 };
 

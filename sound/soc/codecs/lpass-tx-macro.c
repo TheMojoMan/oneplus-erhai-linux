@@ -740,12 +740,44 @@ static int tx_macro_mclk_event(struct snd_soc_dapm_widget *w,
 {
 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
+	int ret;
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		return tx_macro_mclk_enable(tx, true);
+	case SND_SOC_DAPM_POST_PMU:
+		/*
+		 * Vendor-parity: downstream programs the SWR mic clocks for
+		 * AMIC paths after the macro clocks come up (the macro block
+		 * is in reset while idle, so earlier writes would be lost).
+		 * SWR_CTRL 0x60 + AMIC0/1 divider 0x0E is what OxygenOS
+		 * programs during internal-mic (wcd939x AMIC over swr2)
+		 * capture; the upstream defaults (0x00) deliver silence.
+		 */
+		if (tx->data->ver > LPASS_VER_9_0_0) {
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_CTRL, 0x60);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_AMIC0_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_AMIC1_CTL,
+						0x0E);
+		}
+		break;
 	case SND_SOC_DAPM_POST_PMD:
-		return tx_macro_mclk_enable(tx, false);
+		ret = tx_macro_mclk_enable(tx, false);
+		if (tx->data->ver > LPASS_VER_9_0_0) {
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_CTRL, 0x0);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_AMIC0_CTL,
+						CDC_TX_SWR_MIC_CLK_DEFAULT);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_AMIC1_CTL,
+						CDC_TX_SWR_MIC_CLK_DEFAULT);
+		}
+		return ret;
 	default:
 		break;
 	}
