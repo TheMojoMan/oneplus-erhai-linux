@@ -118,6 +118,7 @@ struct pogo_kbd {
 	u8 cur[8];
 	u16 mm_old[2];
 	u16 mm_new[2];
+	u16 mm_reported[2];	/* keycode emitted at press, per mm slot */
 	bool fn_held;		/* magnifier key held => Fn modifier active */
 
 	/* touchpad state */
@@ -177,10 +178,13 @@ static const unsigned short mm_keymap[KEYBOARD_MM_NUM_KEYS][2] = {
 
 /*
  * The magnifier key is consumed by the driver and used as the Fn modifier.
- * It arrives on the general-key path as HID scancode 186, which the keymap
- * maps to KEY_F23 (verified by evtest on the real hardware).
+ * It arrives on the general-key path as HID scancode 114 (HID usage 0x72),
+ * which pogo_keymap maps to KEY_F23 (193) -- verified by evtest on the real
+ * hardware (pressing the key emits KEY_F23). NOTE: scancode 186 would map
+ * to KEY_UNKNOWN and never appears in the reports; 186 was the wrong value
+ * and broke the whole Fn remap (fn_held never set, F23 leaked to userspace).
  */
-#define POGO_FN_HID_SCANCODE	186
+#define POGO_FN_HID_SCANCODE	114
 
 /*
  * Fn + media key -> F1..F12, in physical key order left to right:
@@ -299,17 +303,28 @@ static void pogo_kbd_report_mm(struct pogo_kbd *kb, const u8 *buf)
 	for (i = 0; i < 2; i++) {
 		u16 kw = kb->mm_old[i];
 
+		/*
+		 * Release: report the same keycode that was emitted at press
+		 * time (mm_reported). Falling back to a fresh lookup would be
+		 * wrong if the Fn modifier changed while the key was held
+		 * (Fn+vol-up held, Fn released, vol-up released -> must emit
+		 * KEY_F12 release, not a stray KEY_VOLUMEUP release).
+		 */
 		if (kw && memscan_ex(kb->mm_new, kw, 4) == (void *)(kb->mm_new + 2)) {
-			code = pogo_kbd_mm_lookup(kb, kw);
+			code = kb->mm_reported[i] ?:
+			       pogo_kbd_mm_lookup(kb, kw);
 			if (code)
 				input_report_key(dev, code, 0);
+			kb->mm_reported[i] = 0;
 		}
 
 		kw = kb->mm_new[i];
 		if (kw && memscan_ex(kb->mm_old, kw, 4) == (void *)(kb->mm_old + 2)) {
 			code = pogo_kbd_mm_lookup(kb, kw);
-			if (code)
+			if (code) {
 				input_report_key(dev, code, 1);
+				kb->mm_reported[i] = code;
+			}
 		}
 	}
 
