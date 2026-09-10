@@ -2338,6 +2338,14 @@
 	 * the ADCs ride (3,4), else master/slave sample cadences mismatch
 	 * and the intf delivers full-rate garbage (2026-09-10). Ports 1/2
 	 * unused for internal-mic capture. */
+	/* Payload packing (2026-09-10): the SDW core derives slave
+	 * BlockCtrl1 (word length) from stream->params.bps, and the qcom
+	 * master from qcom,ports-word-length. Both sides must be 16-bit
+	 * PCM (0x0f = 16-1) or the intf assembles garbage. Block offsets:
+	 * core starts port_bo=1; port3/DP1 = 1, port4/DP2 = 1+16 = 17
+	 * (0x11) with bps=16, ch_count=1. */
+	qcom,ports-word-length = /bits/ 8 <0xff 0xff 0x0f 0x0f>;
+	qcom,ports-offset1 = /bits/ 8 <0x00 0x00 0x01 0x11>;
 	/* Master SI must EQUAL the slave SampCtrl interval the SDW core
 	 * programs: sample_int = curr_dr_freq/rate = 9.6MHz/48k = 200,
 	 * SampCtrl = interval-1 = 199 (0xC7). Empirical ladder: 0x03 ->
