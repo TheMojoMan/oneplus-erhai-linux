@@ -2332,6 +2332,14 @@
 &swr2 {
 	status = "okay";
 
+	/* 48 kHz PCM capture: SI = cols-per-sample. sm8750.dtsi's default
+	 * si=0x03 (SI=4) is for PDM-style layouts; at the 2x48-col frame
+	 * 48 kHz needs SI = 48 (reg value 47 = 0x2F) for the master ports
+	 * the ADCs ride (3,4), else master/slave sample cadences mismatch
+	 * and the intf delivers full-rate garbage (2026-09-10). Ports 1/2
+	 * unused for internal-mic capture. */
+	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0x2F 0x2F>;
+
 	wcd_tx: codec@0,3 {
 		compatible = "sdw20217010e00";
 		reg = <0 3>;
