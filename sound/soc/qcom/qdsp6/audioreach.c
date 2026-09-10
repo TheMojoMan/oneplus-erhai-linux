@@ -709,6 +709,7 @@ static int audioreach_codec_dma_set_media_format(struct q6apm_graph *graph,
 	int fs_sz = APM_FS_CFG_PSIZE;
 	int pm_sz = APM_HW_EP_PMODE_CFG_PSIZE;
 	int size = ic_sz + ep_sz + fs_sz + pm_sz;
+	int i;
 	void *p;
 
 	struct gpr_pkt *pkt __free(kfree) = audioreach_alloc_apm_cmd_pkt(size, APM_CMD_SET_CFG, 0);
@@ -748,7 +749,24 @@ static int audioreach_codec_dma_set_media_format(struct q6apm_graph *graph,
 
 	intf_cfg->cfg.lpaif_type = module->hw_interface_type;
 	intf_cfg->cfg.intf_index = module->hw_interface_idx;
-	intf_cfg->cfg.active_channels_mask = (1 << cfg->num_channels) - 1;
+	/*
+	 * The BE channel map (snd_soc_dai_set_channel_map on the cpu dai)
+	 * selects which LPASS intf channel carries each PCM channel. The
+	 * intf must ENABLE exactly those channels: e.g. the wcd939x TX
+	 * capture BE uses intf channels 2 and 3 (master SoundWire ports
+	 * 2 and 3), so the sequential 1..N default mask would enable intf
+	 * channels that carry no data. Fall back to the sequential mask
+	 * when no explicit map was set.
+	 */
+	intf_cfg->cfg.active_channels_mask = 0;
+	for (i = 0; i < cfg->num_channels; i++) {
+		if (cfg->channel_map[i] > 1)
+			intf_cfg->cfg.active_channels_mask |=
+					BIT(cfg->channel_map[i] - 1);
+	}
+	if (!intf_cfg->cfg.active_channels_mask)
+		intf_cfg->cfg.active_channels_mask =
+				(1 << cfg->num_channels) - 1;
 	p += ic_sz;
 
 	pm_cfg = p;
