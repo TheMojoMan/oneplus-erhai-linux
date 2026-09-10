@@ -3297,6 +3297,9 @@ static int wcd939x_get_channel_map(const struct snd_soc_dai *dai,
 			tx_slot[i] = wcd->master_channel_map[i];
 
 		*tx_num = i;
+		/* TEMP DEBUG (mic bringup, +b22) */
+		dev_info(dai->dev, "MICDBG get_channel_map: tx_num=%u map[1..4]=%u %u %u %u\n",
+			 *tx_num, tx_slot[1], tx_slot[2], tx_slot[3], tx_slot[4]);
 		break;
 	default:
 		break;
