@@ -228,11 +228,16 @@ config ERHAI_OTG_GLINK
 	  to the ADSP once the charger protection domain is up. Without this,
 	  the ADSP never sources OTG VBUS. It also raises the boost current
 	  limit, flips the dwc3 data-role to host, and enforces a max-SoC
-	  charge limit against the bq27z561 gauge.
+	  charge limit (bq27z561 gauge, falling back to the ADSP SoC on
+	  gauge-absent units).
 
 	  This targets the same single pmic_glink "power-supply" aux device as
 	  BATTERY_QCOM_BATTMGR, so only one of the two can own it; enable this
-	  when USB-OTG host support is wanted.
+	  when USB-OTG host support is wanted. On SKUs without the pack-side
+	  bq27z561 gauge (Qualcomm QBG variants) this driver additionally
+	  registers an ADSP-backed battery/USB power supply so the desktop
+	  battery icon works there too; on pack-gauge units the bq27xxx
+	  battery stays untouched.
 
 config BATTERY_OLPC
 	tristate "One Laptop Per Child battery"
