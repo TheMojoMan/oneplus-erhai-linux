@@ -36,18 +36,21 @@ static struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
 };
 
 /*
- * Vendor (downstream) TX port layout — verified against OxygenOS ground
- * truth (ADC1 ChMap = SWRM_TX2_CH1, ADC4 ChMap = SWRM_TX3_CH2): one ADC
- * channel per slave port, NOT four ADCs on port 1 like the upstream
- * default. With qcom,tx-port-mapping = <2 2 3 4> this lands ADC1 on
- * master port 2 and ADC4 on master port 3, matching the ADSP BE
- * channel map {2,3} that the codec_dma RXTX-TX3 interface expects.
+ * Vendor TX port layout — from OxygenOS erhai-24924 sun-audio DTS +
+ * runtime ChMap ground truth (ADC1 ChMap = SWRM_TX2_CH1 = master port3
+ * ch1, ADC4 ChMap = SWRM_TX3_CH2 = master port4 ch2):
+ *   ADC1 -> slave DP1 ch1, ADC4 -> slave DP2 ch2
+ * and with qcom,tx-channel-mapping = <3 4 0 0> (slave port -> master
+ * port) the master port ch_mask is the slave ch_mask passthrough, so
+ * ADC1 rides master port3 ch1 and ADC4 master port4 ch2. The ADSP TX3
+ * intf map {02,03} reads intf ch N = master port N+1, so PCM ch0 = ADC1
+ * and PCM ch1 = ADC4 — exactly the vendor capture topology.
  */
 static struct wcd_sdw_ch_info wcd939x_sdw_tx_ch_info[] = {
-	WCD_SDW_CH(WCD939X_ADC1, WCD939X_ADC_DMIC_1_2_PORT, BIT(0)),
+	WCD_SDW_CH(WCD939X_ADC1, WCD939X_ADC_1_4_PORT, BIT(0)),
 	WCD_SDW_CH(WCD939X_ADC2, WCD939X_ADC_1_4_PORT, BIT(1)),
-	WCD_SDW_CH(WCD939X_ADC3, WCD939X_ADC_1_4_PORT, BIT(2)),
-	WCD_SDW_CH(WCD939X_ADC4, WCD939X_DMIC_0_3_MBHC_PORT, BIT(1)),
+	WCD_SDW_CH(WCD939X_ADC3, WCD939X_ADC_DMIC_1_2_PORT, BIT(0)),
+	WCD_SDW_CH(WCD939X_ADC4, WCD939X_ADC_DMIC_1_2_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_DMIC0, WCD939X_DMIC_0_3_MBHC_PORT, BIT(0)),
 	WCD_SDW_CH(WCD939X_DMIC1, WCD939X_DMIC_0_3_MBHC_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_MBHC, WCD939X_DMIC_0_3_MBHC_PORT, BIT(2)),

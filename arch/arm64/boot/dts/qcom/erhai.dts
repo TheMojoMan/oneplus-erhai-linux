@@ -2335,17 +2335,20 @@
 	wcd_tx: codec@0,3 {
 		compatible = "sdw20217010e00";
 		reg = <0 3>;
-		qcom,tx-port-mapping = <2 2 3 4>;
-		/*
-		 * Master channel per slave TX channel, in ch_info order
-		 * (adc1, adc2, adc3, adc4, ...): OxygenOS programs
-		 * ADC1 -> SWRM_TX2_CH1 (master ch2) and ADC4 -> SWRM_TX3_CH2
-		 * (master ch3); the ADSP BE then needs the intf map {2,3},
-		 * which the machine driver derives from get_channel_map().
-		 * Later entries (dmics) are omitted -> default == slave
-		 * ch_mask, and 0 keeps the default for that channel.
-		 */
-		qcom,tx-channel-mapping = /bits/ 8 <2 0 0 3>;
+		/* OxygenOS runtime ChMap ground truth: ADC1 rides master
+		 * port 3 (SWRM_TX2_CH1) and ADC4 master port 4 (SWRM_TX3_CH2);
+		 * slave side: ADC1 -> DP1 ch1, ADC4 -> DP2 ch2 (see
+		 * wcd939x_sdw_tx_ch_info). Property is indexed by SLAVE
+		 * port number. DP3/DP4 (dmics) fall back to auto-allocation. */
+		qcom,tx-port-mapping = <3 4 0 0>;
+		/* Master channel per slave TX channel id, in ch_info order
+		 * (adc1, adc2, adc3, adc4, ...): ADC1 -> master ch1
+		 * (SWRM_TX2_CH1), ADC4 -> master ch2 (SWRM_TX3_CH2).
+		 * The ADSP TX3 intf map {02,03} (intf ch N = master port
+		 * N+1) then yields PCM ch0 = ADC1, ch1 = ADC4 — the exact
+		 * vendor capture wiring. 0 keeps the default for that
+		 * channel. */
+		qcom,tx-channel-mapping = /bits/ 8 <1 0 0 2>;
 	};
 };
 
