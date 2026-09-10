@@ -43,6 +43,7 @@
 #include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/i2c.h>
 #include <linux/math.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -384,14 +385,15 @@ static int erhai_otg_soc_pct(int raw)
 
 /*
  * Charge-limiter SoC source: the reliable AP-I2C bq27z561 gauge when
- * fitted (pack-gauge SKUs), else the ADSP gauge (QBG SKUs — units with
- * no pack chip; see power_gauge-2026-09-10.md).
+ * fitted and working (pack-gauge SKUs), else the ADSP gauge (QBG SKUs).
+ * Fall back on ANY read error, not just a missing gauge: the friend's
+ * QBG unit still binds bq27xxx but its status reads fail (-ENODATA).
  */
 static int erhai_otg_chglimit_soc(struct erhai_otg *otg)
 {
 	int soc = erhai_otg_gauge_soc();
 
-	if (soc == -ENODEV)
+	if (soc < 0)
 		soc = erhai_otg_soc_pct(erhai_otg_adsp_soc(otg));
 	return soc;
 }
@@ -902,9 +904,25 @@ static const struct power_supply_desc erhai_adsp_usb_psy_desc = {
 static void erhai_otg_psy_init(struct erhai_otg *otg)
 {
 	struct power_supply_config cfg = { };
+	int ret;
 
 	if (otg->psy_registered)
 		return;
+
+	/*
+	 * Handshake first: only expose the ADSP battery when the firmware
+	 * actually answers battery property GETs. Registering a psy whose
+	 * reads fail would recreate exactly the bug this driver fixes,
+	 * mirrored on the other side (dead bq27z561 on the QBG unit).
+	 */
+	ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET, BC_BATT_STATUS);
+	if (ret < 0) {
+		dev_warn(otg->dev,
+			 "ADSP battery handshake failed (ret=%d); no ADSP battery psy registered\n",
+			 ret);
+		return;
+	}
+	dev_info(otg->dev, "ADSP battery handshake ok (status=%d)\n", ret);
 
 	cfg.drv_data = otg;
 
@@ -933,21 +951,59 @@ static void erhai_otg_psy_init(struct erhai_otg *otg)
 		 "no bq27z561 pack gauge: ADSP battery/USB psy registered (QBG SKU)\n");
 }
 
+/*
+ * Detach the dead bq27xxx instance so UPower/GNOME only ever see the
+ * working ADSP battery (mirrors a manual sysfs unbind of the i2c client).
+ * The thermal zone wired to the gauge is already failing and stays
+ * disabled, so nothing else loses functionality.
+ */
+static void erhai_otg_detach_dead_gauge(void)
+{
+	struct device *dev = bus_find_device_by_name(&i2c_bus_type, NULL,
+						     "1-0055");
+
+	if (!dev)
+		return;
+	device_release_driver(dev);
+	put_device(dev);
+}
+
 static void erhai_otg_arm_work(struct work_struct *work)
 {
 	struct erhai_otg *otg = container_of(work, struct erhai_otg, arm_work);
+	bool gauge_ok = false;
 	struct power_supply *psy;
 
-	/* SKU arbitration: ADSP bat+usb psy only when no pack gauge fitted. */
+	/*
+	 * SKU arbitration: the ADSP bat+usb psy is registered only when no
+	 * USABLE pack gauge exists. The friend's QBG unit (DMI 24976) still
+	 * ACKs the bq27z561 at 1-0055 and bq27xxx binds, but its status reads
+	 * fail with -ENODATA — the pack gauge is fitted yet effectively dead
+	 * (Android drives the ADSP gauge there), and UPower refuses to show
+	 * a battery it cannot read (2026-09-10 boot log, hostname "ari").
+	 * So probe the gauge before letting bq27xxx own the battery; a dead
+	 * gauge gets detached and the ADSP battery used instead.
+	 */
 	psy = power_supply_get_by_name("bq27z561-0");
 	if (psy) {
+		union power_supply_propval v;
+		int ret;
+
+		ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_STATUS,
+						&v);
+		gauge_ok = ret == 0 && v.intval != POWER_SUPPLY_STATUS_UNKNOWN;
 		power_supply_put(psy);
-	} else {
-		erhai_otg_psy_init(otg);
-		if (!otg->psy_registered)
+
+		if (!gauge_ok) {
 			dev_warn(otg->dev,
-				 "no pack gauge and ADSP psy init failed\n");
+				 "bq27z561-0 present but unreadable (status ret=%d); detaching dead gauge, using ADSP\n",
+				 ret);
+			erhai_otg_detach_dead_gauge();
+		}
 	}
+
+	if (!gauge_ok)
+		erhai_otg_psy_init(otg);
 
 	/* Register for the BC_OTG_ENABLE/DISABLE notifications, then arm OTG. */
 	erhai_otg_notify_enable(otg);
