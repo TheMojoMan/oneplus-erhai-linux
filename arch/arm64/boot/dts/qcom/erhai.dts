@@ -2338,7 +2338,9 @@
 	 * the ADCs ride (3,4), else master/slave sample cadences mismatch
 	 * and the intf delivers full-rate garbage (2026-09-10). Ports 1/2
 	 * unused for internal-mic capture. */
-	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0x2F 0x2F>;
+	/* Vendor master SI: bus tier 0.6MHz (agg 2x48k), sinterval =
+	 * (600k*2)/48k - 1 = 24 (0x18). Master ports 3,4 (ADC1, ADC4). */
+	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0x18 0x18>;
 
 	wcd_tx: codec@0,3 {
 		compatible = "sdw20217010e00";
