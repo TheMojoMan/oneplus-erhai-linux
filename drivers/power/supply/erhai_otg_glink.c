@@ -30,12 +30,20 @@
  * A debugfs knob (erhai_otg/cmd: "<property> <value> [opcode]") drives an
  * arbitrary property SET, used to raise the ADSP input current limit so the
  * tablet charges while acting as a data host on a powered hub.
+ *
+ * On gauge-absent SKUs (Qualcomm QBG battery gauge — e.g. DMI 24976 units
+ * with no pack-side bq27z561 fitted) the same glink edge answers battery
+ * property GETs; when the bq27z561 psy never shows up this driver also
+ * registers ADSP-backed "erhai-adsp-bat"/"erhai-adsp-usb" power supplies,
+ * so the desktop battery icon works on both hardware variants
+ * (2026-09-10, see power_gauge-2026-09-10.md in the workspace).
  */
 
 #include <linux/auxiliary_bus.h>
 #include <linux/completion.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/math.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
@@ -49,9 +57,10 @@
 #include <linux/soc/qcom/pmic_glink.h>
 
 /* battery_charger glink opcodes */
+#define BC_BATTERY_PROPERTY_GET		0x30	/* BC_BATTERY_STATUS_GET (req/resp) */
+#define BC_BATTERY_PROPERTY_SET		0x31	/* BC_BATTERY_STATUS_SET (req/resp) */
 #define BC_USB_PROPERTY_GET		0x32	/* BC_USB_STATUS_GET (req/resp) */
 #define BC_USB_PROPERTY_SET		0x33	/* BC_USB_STATUS_SET (req/resp) */
-#define BC_BATTERY_PROPERTY_SET		0x31	/* BC_BATTERY_STATUS_SET (req/resp) */
 #define BC_NOTIFY_IND			0x07	/* async ADSP -> AP notification */
 #define BC_SET_NOTIFY_REQ		0x04	/* register AP for async notifications */
 
@@ -68,6 +77,23 @@
 #define USB_CHARGE_OUTPUT_SUSPEND	19
 #define USB_OTG_VBUS_REGULATOR_ENABLE	24
 #define USB_OTG_BOOST_CURRENT		64
+
+/*
+ * battery_property_id enum (battmgr family — the same ids upstream
+ * qcom_battmgr sends; subset used by the ADSP battery psy below).
+ */
+#define BC_BATT_STATUS			0
+#define BC_BATT_PRESENT			2
+#define BC_BATT_CAPACITY		4
+#define BC_BATT_VOLT_NOW		7
+#define BC_BATT_CURR_NOW		9
+#define BC_BATT_TEMP			12
+#define BC_USB_ONLINE			0
+
+/* battery notification values (BC_NOTIFY_IND payload). */
+#define BC_NOTIF_BAT_PROPERTY		0x30
+#define BC_NOTIF_BAT_STATUS		0x80
+#define BC_NOTIF_BAT_CHARGING_STATE	0x83
 
 /* Charge-limit (max-SoC) policy. */
 #define ERHAI_CHGLIM_DEFAULT_MAXSOC	80
@@ -189,6 +215,17 @@ struct erhai_otg {
 	struct delayed_work chglim_work;
 	int chglim_state;		/* -1 unknown, 0 charging allowed, 1 inhibited */
 
+	/*
+	 * ADSP battery psy (gauge-absent QBG SKUs): property GET replies are
+	 * decoded by the callback into resp_property/resp_value; the ack and
+	 * otg->lock are shared with the OTG property SETs.
+	 */
+	struct power_supply *bat_psy;
+	struct power_supply *usb_psy;
+	bool psy_registered;
+	u32 resp_property;
+	u32 resp_value;
+
 	struct dentry *debugfs;
 };
 
@@ -264,6 +301,102 @@ static int erhai_otg_gauge_soc(void)
 }
 
 /*
+ * Read a battery_charger property from the ADSP (req/resp; the same 24-byte
+ * request layout as a SET — see erhai_otg_set_msg). The reply echoes the
+ * property and carries its value plus a ret_code, decoded by the callback
+ * into otg->error / otg->resp_property / otg->resp_value. Used by the
+ * ADSP-gauge battery reads on gauge-absent SKUs. Returns the raw value, or
+ * a negative errno. Serialized by otg->lock like every other ADSP
+ * round-trip (the firmware stops responding to concurrency).
+ */
+static int erhai_otg_get_op(struct erhai_otg *otg, u32 opcode, u32 property)
+{
+	struct erhai_otg_set_msg msg = {
+		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
+		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
+		.hdr.opcode = cpu_to_le32(opcode),
+		.battery = cpu_to_le32(0),
+		.property = cpu_to_le32(property),
+		.value = cpu_to_le32(0),
+	};
+	unsigned long left;
+	int ret;
+
+	mutex_lock(&otg->lock);
+
+	if (!otg->service_up) {
+		mutex_unlock(&otg->lock);
+		return -ENODEV;
+	}
+
+	reinit_completion(&otg->ack);
+	otg->error = 0;
+	otg->resp_property = (u32)-1;
+	otg->resp_value = 0;
+
+	ret = pmic_glink_send(otg->client, &msg, sizeof(msg));
+	if (ret < 0) {
+		mutex_unlock(&otg->lock);
+		return ret;
+	}
+
+	left = wait_for_completion_timeout(&otg->ack,
+					   msecs_to_jiffies(BC_WAIT_TIME_MS));
+	if (!left) {
+		mutex_unlock(&otg->lock);
+		dev_warn(otg->dev,
+			 "no reply for GET %#x property %u (timed out)\n",
+			 opcode, property);
+		return -ETIMEDOUT;
+	}
+
+	if (otg->error)
+		ret = otg->error;
+	else if (otg->resp_property == property)
+		ret = (int)otg->resp_value;
+	else
+		ret = -ENODATA;
+
+	mutex_unlock(&otg->lock);
+	return ret;
+}
+
+/* SoC percent (raw) from the ADSP gauge (battmgr BATT_CAPACITY GET). */
+static int erhai_otg_adsp_soc(struct erhai_otg *otg)
+{
+	return erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET, BC_BATT_CAPACITY);
+}
+
+/*
+ * Normalize the ADSP SoC to percent. The sm8350/sm8550 battmgr family
+ * reports BATT_CAPACITY in centi-percent (value / 100 == %), but the
+ * vendor ADSP on erhai has only been observed live on pack-gauge units;
+ * guard both encodings instead of trusting the scaling (2026-09-10).
+ */
+static int erhai_otg_soc_pct(int raw)
+{
+	if (raw < 0)
+		return 0;
+	if (raw > 100)
+		return min(raw / 100, 100);
+	return raw;
+}
+
+/*
+ * Charge-limiter SoC source: the reliable AP-I2C bq27z561 gauge when
+ * fitted (pack-gauge SKUs), else the ADSP gauge (QBG SKUs — units with
+ * no pack chip; see power_gauge-2026-09-10.md).
+ */
+static int erhai_otg_chglimit_soc(struct erhai_otg *otg)
+{
+	int soc = erhai_otg_gauge_soc();
+
+	if (soc == -ENODEV)
+		soc = erhai_otg_soc_pct(erhai_otg_adsp_soc(otg));
+	return soc;
+}
+
+/*
  * Max-SoC charge limit. Holds the pack at the max_soc ceiling by suspending the
  * charge output above it (system keeps running from input) and resuming below
  * the recharge point. Re-asserts the suspend every poll while above the cap: the
@@ -289,9 +422,9 @@ static void erhai_otg_chglim_work(struct work_struct *work)
 	if (!otg->service_up)
 		goto out;		/* ADSP not up yet; retry next poll */
 
-	soc = erhai_otg_gauge_soc();
+	soc = erhai_otg_chglimit_soc(otg);
 	if (soc < 0)
-		goto out;		/* gauge not ready; retry */
+		goto out;		/* gauge/ADSP not ready; retry */
 
 	if (soc >= max) {
 		erhai_otg_set(otg, USB_CHARGE_OUTPUT_SUSPEND, 1);
@@ -576,11 +709,13 @@ static void erhai_otg_callback(const void *data, size_t len, void *priv)
 	 * echoes the request opcode.
 	 */
 	if (opcode == BC_USB_PROPERTY_SET || opcode == BC_BATTERY_PROPERTY_SET ||
-	    opcode == BC_USB_PROPERTY_GET) {
+	    opcode == BC_USB_PROPERTY_GET || opcode == BC_BATTERY_PROPERTY_GET) {
 		if (len >= sizeof(struct erhai_otg_resp_msg)) {
 			const struct erhai_otg_resp_msg *r = data;
 
 			otg->error = le32_to_cpu(r->ret_code) ? -EINVAL : 0;
+			otg->resp_property = le32_to_cpu(r->property);
+			otg->resp_value = le32_to_cpu(r->value);
 		} else {
 			otg->error = 0;
 		}
@@ -609,6 +744,15 @@ static void erhai_otg_callback(const void *data, size_t len, void *priv)
 		} else if (ev == BC_OTG_DISABLE) {
 			mod_delayed_work(system_wq, &otg->vbus_off_work,
 					 msecs_to_jiffies(OTG_DISABLE_DEBOUNCE_MS));
+		} else if (otg->psy_registered &&
+			   (ev == BC_NOTIF_BAT_PROPERTY ||
+			    ev == BC_NOTIF_BAT_STATUS ||
+			    ev == BC_NOTIF_BAT_CHARGING_STATE)) {
+			/*
+			 * ADSP battery push update (QBG SKU): force UPower
+			 * to re-read the battery properties.
+			 */
+			power_supply_changed(otg->bat_psy);
 		}
 	}
 }
@@ -628,9 +772,182 @@ static void erhai_otg_notify_enable(struct erhai_otg *otg)
 	pmic_glink_send(otg->client, &msg, sizeof(msg));
 }
 
+/*
+ * ---- ADSP battery psy (gauge-absent QBG SKUs, 2026-09-10) ----
+ *
+ * This unit carries the pack-side bq27z561 and bq27xxx owns the battery.
+ * The friend's QBG SKU (DMI 24976) has NO pack chip fitted — Android's
+ * oplus-chg-qbg.dtsi reads SoC/voltage/current from the ADSP
+ * (oplus_adsp_gauge on charger_pd). The same battery_charger glink edge
+ * answers property GETs, so expose an ADSP-backed battery + USB psy ONLY
+ * when the pack gauge never appeared. Value scaling follows upstream
+ * qcom_battmgr sm8350 family semantics; unverified assumptions are noted
+ * at each read — verify against Android on the first live boot.
+ */
+
+static int erhai_otg_bat_get_property(struct power_supply *psy,
+				      enum power_supply_property psp,
+				      union power_supply_propval *val)
+{
+	struct erhai_otg *otg = power_supply_get_drvdata(psy);
+	int ret;
+
+	if (!otg->service_up)
+		return -EAGAIN;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_PRESENT:
+		val->intval = 1;
+		return 0;
+	case POWER_SUPPLY_PROP_STATUS:
+		/* POWER_SUPPLY_STATUS_* space, passed raw by upstream too. */
+		ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET,
+				       BC_BATT_STATUS);
+		if (ret < 0)
+			return ret;
+		val->intval = ret;
+		return 0;
+	case POWER_SUPPLY_PROP_CAPACITY:
+		ret = erhai_otg_adsp_soc(otg);
+		if (ret < 0)
+			return ret;
+		val->intval = erhai_otg_soc_pct(ret);
+		return 0;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET,
+				       BC_BATT_VOLT_NOW);
+		if (ret < 0)
+			return ret;
+		val->intval = ret;	/* µV assumed (sm8350 family) */
+		return 0;
+	case POWER_SUPPLY_PROP_CURRENT_NOW:
+		ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET,
+				       BC_BATT_CURR_NOW);
+		if (ret < 0)
+			return ret;
+		val->intval = ret;	/* µA assumed (sm8350 family) */
+		return 0;
+	case POWER_SUPPLY_PROP_TEMP:
+		ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET,
+				       BC_BATT_TEMP);
+		if (ret < 0)
+			return ret;
+		/* sm8350 family: raw is centi-degrees; psy wants tenths. */
+		val->intval = DIV_ROUND_CLOSEST(ret, 10);
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+static const enum power_supply_property erhai_adsp_bat_props[] = {
+	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_PRESENT,
+	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_TEMP,
+};
+
+static const struct power_supply_desc erhai_adsp_bat_psy_desc = {
+	.name		= "erhai-adsp-bat",
+	.type		= POWER_SUPPLY_TYPE_BATTERY,
+	.properties	= erhai_adsp_bat_props,
+	.num_properties	= ARRAY_SIZE(erhai_adsp_bat_props),
+	.get_property	= erhai_otg_bat_get_property,
+};
+
+static int erhai_otg_usb_get_property(struct power_supply *psy,
+				      enum power_supply_property psp,
+				      union power_supply_propval *val)
+{
+	struct erhai_otg *otg = power_supply_get_drvdata(psy);
+	int ret;
+
+	if (!otg->service_up)
+		return -EAGAIN;
+
+	switch (psp) {
+	case POWER_SUPPLY_PROP_ONLINE:
+		ret = erhai_otg_get_op(otg, BC_USB_PROPERTY_GET,
+				       BC_USB_ONLINE);
+		if (ret < 0)
+			return ret;
+		val->intval = ret;
+		return 0;
+	default:
+		return -EINVAL;
+	}
+}
+
+static const enum power_supply_property erhai_adsp_usb_props[] = {
+	POWER_SUPPLY_PROP_ONLINE,
+};
+
+static const struct power_supply_desc erhai_adsp_usb_psy_desc = {
+	.name		= "erhai-adsp-usb",
+	.type		= POWER_SUPPLY_TYPE_USB,
+	.properties	= erhai_adsp_usb_props,
+	.num_properties	= ARRAY_SIZE(erhai_adsp_usb_props),
+	.get_property	= erhai_otg_usb_get_property,
+};
+
+/*
+ * Runtime SKU arbitration: register the ADSP bat+usb psy only when the
+ * pack-side bq27z561 gauge never appeared (QBG SKUs). Called from
+ * arm_work on charger_pd PDR UP — the i2c gauge probes long before that.
+ * If registration is ever lost against a slow gauge (duplicate battery
+ * evidence in dmesg), move this behind a gauge-settle delay.
+ */
+static void erhai_otg_psy_init(struct erhai_otg *otg)
+{
+	struct power_supply_config cfg = { };
+
+	if (otg->psy_registered)
+		return;
+
+	cfg.drv_data = otg;
+
+	otg->bat_psy = devm_power_supply_register(otg->dev,
+						  &erhai_adsp_bat_psy_desc,
+						  &cfg);
+	if (IS_ERR(otg->bat_psy)) {
+		dev_warn(otg->dev, "ADSP battery psy registration failed %ld\n",
+			 PTR_ERR(otg->bat_psy));
+		otg->bat_psy = NULL;
+		return;
+	}
+
+	otg->usb_psy = devm_power_supply_register(otg->dev,
+						  &erhai_adsp_usb_psy_desc,
+						  &cfg);
+	if (IS_ERR(otg->usb_psy)) {
+		dev_warn(otg->dev, "ADSP USB psy registration failed %ld\n",
+			 PTR_ERR(otg->usb_psy));
+		otg->usb_psy = NULL;
+		return;
+	}
+
+	otg->psy_registered = true;
+	dev_info(otg->dev,
+		 "no bq27z561 pack gauge: ADSP battery/USB psy registered (QBG SKU)\n");
+}
+
 static void erhai_otg_arm_work(struct work_struct *work)
 {
 	struct erhai_otg *otg = container_of(work, struct erhai_otg, arm_work);
+	struct power_supply *psy;
+
+	/* SKU arbitration: ADSP bat+usb psy only when no pack gauge fitted. */
+	psy = power_supply_get_by_name("bq27z561-0");
+	if (psy) {
+		power_supply_put(psy);
+	} else {
+		erhai_otg_psy_init(otg);
+		if (!otg->psy_registered)
+			dev_warn(otg->dev,
+				 "no pack gauge and ADSP psy init failed\n");
+	}
 
 	/* Register for the BC_OTG_ENABLE/DISABLE notifications, then arm OTG. */
 	erhai_otg_notify_enable(otg);
