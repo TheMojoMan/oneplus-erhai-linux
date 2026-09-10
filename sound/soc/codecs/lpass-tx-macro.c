@@ -743,16 +743,30 @@ static int tx_macro_mclk_event(struct snd_soc_dapm_widget *w,
 		break;
 	case SND_SOC_DAPM_POST_PMU:
 		/*
-		 * Vendor-parity: downstream programs the SWR mic clocks for
-		 * AMIC paths after the macro clocks come up (the macro block
-		 * is in reset while idle, so earlier writes would be lost).
-		 * SWR_CTRL 0x60 + AMIC0/1 divider 0x0E is what OxygenOS
-		 * programs during internal-mic (wcd939x AMIC over swr2)
-		 * capture; the upstream defaults (0x00) deliver silence.
+		 * Vendor-parity: downstream programs the SWR mic input
+		 * clocks for ALL six SWR inputs to 0x0E (div-1) while the
+		 * macro clocks are up — OxygenOS ground truth shows
+		 * 0xC0/0xC4/0xC8/0xCC/0xD0/0xD4 = 0x0E in BOTH the idle
+		 * and the capturing regmap dumps, plus SWR_CTRL = 0x60.
+		 * The upstream defaults (0x00 = div-2) leave the SWR mic
+		 * input latches running at half rate and deliver all-zero
+		 * capture data.
 		 */
 		if (tx->data->ver > LPASS_VER_9_0_0) {
 			snd_soc_component_write(component,
 						CDC_TX_TOP_CSR_SWR_CTRL, 0x60);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC0_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC1_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC2_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC3_CTL,
+						0x0E);
 			snd_soc_component_write(component,
 						CDC_TX_TOP_CSR_SWR_AMIC0_CTL,
 						0x0E);
@@ -763,16 +777,11 @@ static int tx_macro_mclk_event(struct snd_soc_dapm_widget *w,
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		tx_macro_mclk_enable(tx, false);
-		if (tx->data->ver > LPASS_VER_9_0_0) {
-			snd_soc_component_write(component,
-						CDC_TX_TOP_CSR_SWR_CTRL, 0x0);
-			snd_soc_component_write(component,
-						CDC_TX_TOP_CSR_SWR_AMIC0_CTL,
-						CDC_TX_SWR_MIC_CLK_DEFAULT);
-			snd_soc_component_write(component,
-						CDC_TX_TOP_CSR_SWR_AMIC1_CTL,
-						CDC_TX_SWR_MIC_CLK_DEFAULT);
-		}
+		/*
+		 * Vendor leaves SWR_CTRL and the SWR mic clock dividers
+		 * set even when idle (OxygenOS idle regmap: 0x88 = 0x60,
+		 * 0xC0..0xD4 = 0x0E) — do not clear them here.
+		 */
 		break;
 	default:
 		break;
@@ -824,6 +833,22 @@ static void tx_macro_update_smic_sel_v9_2(struct snd_soc_component *component,
 	} else {
 		snd_soc_component_write_field(component, mic_sel_reg,
 					      CDC_TXn_ADC_DMIC_SEL_MASK, 0);
+	}
+
+	/*
+	 * Vendor-parity (erhai, LPASS v9.2): OxygenOS programs the SWR mic
+	 * clock register of every routed input to 0x0E (div-1) — both when
+	 * idle and while capturing. The upstream default write
+	 * (CDC_TX_SWR_MIC_CLK_DEFAULT = 0, div-2) leaves the tx-macro SWR
+	 * input latch clocked at the wrong rate, so SWR mic slots latch
+	 * all-zero data. Computed from val directly: the register only
+	 * exists for SWR mic inputs >= 5 (TX_ADC_TO_DMIC mapping).
+	 */
+	if (val >= 5) {
+		dmic = TX_ADC_TO_DMIC(val);
+		snd_soc_component_write(component,
+					CDC_TX_TOP_CSR_SWR_DMICn_CTL(dmic),
+					0x0E);
 	}
 }
 
@@ -2166,10 +2191,9 @@ static int tx_macro_component_probe(struct snd_soc_component *comp)
 	snd_soc_component_update_bits(comp, CDC_TX0_TX_PATH_SEC7, 0x3F,
 				      0x0A);
 	/* Enable swr mic0 and mic1 clock */
-	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC0_CTL,
-				CDC_TX_SWR_MIC_CLK_DEFAULT);
-	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC1_CTL,
-				CDC_TX_SWR_MIC_CLK_DEFAULT);
+	/* Enable swr mic0 and mic1 clock (vendor default 0x0E, div-1) */
+	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC0_CTL, 0x0E);
+	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC1_CTL, 0x0E);
 
 	return 0;
 }
