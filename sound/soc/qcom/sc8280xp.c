@@ -186,6 +186,12 @@ static int sc8280xp_snd_set_cpu_tx_channel_map(struct snd_soc_pcm_runtime *rtd,
 	if (!n)
 		return 0;
 
+	/* TEMP DEBUG (mic bringup, +b22) */
+	dev_info(rtd->dev, "MICDBG machine: cpu_dai %s compacted map n=%u: %u %u %u %u\n",
+		 cpu_dai->name, n,
+		 n > 0 ? ch_map[0] : 0, n > 1 ? ch_map[1] : 0,
+		 n > 2 ? ch_map[2] : 0, n > 3 ? ch_map[3] : 0);
+
 	ret = snd_soc_dai_set_channel_map(cpu_dai, n, ch_map, 0, NULL);
 	if (ret)
 		dev_err(rtd->dev, "Failed to set cpu channel map %s: %d\n",

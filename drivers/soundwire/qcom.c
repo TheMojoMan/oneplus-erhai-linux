@@ -1116,6 +1116,11 @@ static int qcom_swrm_port_enable(struct sdw_bus *bus,
 
 	ctrl->reg_read(ctrl, reg, &val);
 
+	/* TEMP DEBUG (mic bringup, +b22): master port enable/disable */
+	dev_info(ctrl->dev, "MICDBG port_enable: port %u bank %u en %u ch_mask=0x%x reg=0x%x old=0x%x\n",
+		 enable_ch->port_num, bank, enable_ch->enable,
+		 enable_ch->ch_mask, reg, val);
+
 	if (enable_ch->enable)
 		val |= (enable_ch->ch_mask << SWRM_DP_PORT_CTRL_EN_CHAN_SHFT);
 	else
@@ -1279,6 +1284,9 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 				pconfig[nports].num = pn;
 				pconfig[nports].ch_mask = p_rt->ch_mask;
 				nports++;
+				/* TEMP DEBUG (mic bringup, +b22): master port alloc */
+				dev_info(ctrl->dev, "MICDBG alloc: slave port %u -> master port %d ch_mask=0x%x (nports=%d)\n",
+					 p_rt->num, pn, pconfig[nports - 1].ch_mask, nports);
 			}
 		}
 	}

@@ -166,6 +166,12 @@ int wcd939x_sdw_hw_params(struct wcd939x_sdw_priv *wcd,
 	else
 		wcd->sconfig.direction = SDW_DATA_DIR_RX;
 
+	/* TEMP DEBUG (mic bringup, +b22) */
+	for (i = 0; i < wcd->active_ports; i++)
+		dev_info(&wcd->sdev->dev, "MICDBG sdw_hw_params: port_config[%d] num=%u ch_mask=0x%x, ch_count=%u\n",
+			 i, port_config[i].num, port_config[i].ch_mask,
+			 wcd->sconfig.ch_count);
+
 	wcd->sconfig.type = SDW_STREAM_PCM;
 
 	return sdw_stream_add_slave(wcd->sdev, &wcd->sconfig, &port_config[0],
