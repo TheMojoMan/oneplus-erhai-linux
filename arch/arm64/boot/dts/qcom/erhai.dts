@@ -2338,9 +2338,13 @@
 	 * the ADCs ride (3,4), else master/slave sample cadences mismatch
 	 * and the intf delivers full-rate garbage (2026-09-10). Ports 1/2
 	 * unused for internal-mic capture. */
-	/* Vendor master SI: bus tier 0.6MHz (agg 2x48k), sinterval =
-	 * (600k*2)/48k - 1 = 24 (0x18). Master ports 3,4 (ADC1, ADC4). */
-	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0x18 0x18>;
+	/* Master SI must EQUAL the slave SampCtrl interval the SDW core
+	 * programs: sample_int = curr_dr_freq/rate = 9.6MHz/48k = 200,
+	 * SampCtrl = interval-1 = 199 (0xC7). Empirical ladder: 0x03 ->
+	 * full-rate garbage, 0x2F -> silence, 0x18 -> 8x oversampled
+	 * full-scale Nyquist noise; only 0xC7 keeps master and slave
+	 * sampling the same 48k cadence (2026-09-10). */
+	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0xC7 0xC7>;
 
 	wcd_tx: codec@0,3 {
 		compatible = "sdw20217010e00";
