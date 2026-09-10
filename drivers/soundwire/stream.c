@@ -217,6 +217,13 @@ static int sdw_program_slave_port_params(struct sdw_bus *bus,
 		return ret;
 	}
 
+	/* TEMP DEBUG (mic bringup, +b24) */
+	{
+		int dbg = sdw_read_no_pm(s_rt->slave, addr4);
+		pr_info("MICDBG slvport prog: p%d addr4=%#x off1=%#x rb=%#x\n",
+			t_params->port_num, addr4, t_params->offset1, dbg);
+	}
+
 	/* Program DPN_BlockCtrl2 register*/
 	if (t_params->blk_grp_ctrl_valid) {
 		ret = sdw_write_no_pm(s_rt->slave, addr5, t_params->blk_grp_ctrl);
@@ -343,6 +350,11 @@ static int sdw_enable_disable_slave_ports(struct sdw_bus *bus,
 		dev_err(&s_rt->slave->dev,
 			"Slave chn_en reg write failed:%d port:%d\n",
 			ret, t_params->port_num);
+
+	/* TEMP DEBUG (mic bringup, +b24) */
+	pr_info("MICDBG slvport en: p%d bank%d en=%d mask=%#x addr=%#x ret=%d\n",
+		t_params->port_num, bus->params.next_bank, en,
+		p_rt->ch_mask, addr, ret);
 
 	return ret;
 }
