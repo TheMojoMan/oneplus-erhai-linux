@@ -41,7 +41,7 @@ static struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
  * runtime ChMap ground truth (ADC1 ChMap = SWRM_TX2_CH1 = master port3
  * ch1, ADC4 ChMap = SWRM_TX3_CH2 = master port4 ch2):
  *   ADC1 -> slave DP1 ch1, ADC4 -> slave DP2 ch2
- * and with qcom,tx-channel-mapping = <3 4 0 0> (slave port -> master
+ * and with qcom,tx-port-mapping = <2 3 0 0> (slave port -> master
  * port) the master port ch_mask is the slave ch_mask passthrough, so
  * ADC1 rides master port3 ch1 and ADC4 master port4 ch2. The ADSP TX3
  * intf map {02,03} reads intf ch N = master port N+1, so PCM ch0 = ADC1
