@@ -1247,6 +1247,7 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 	struct sdw_slave *slave;
 	unsigned long *port_mask;
 	int maxport, pn, nports = 0;
+	int ret;
 	unsigned int m_port;
 	struct sdw_port_config *pconfig __free(kfree) = kzalloc_objs(*pconfig,
 								     ctrl->nports);
@@ -1321,8 +1322,20 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 		}
 	}
 
-	sdw_stream_add_master(&ctrl->bus, &sconfig, pconfig,
-			      nports, stream);
+	/*
+	 * erhai: propagate the error — an unconfigured master runtime
+	 * (ports allocated but never port_config'ed) is invisible until
+	 * prepare/enable degenerates and the PCM start EIOs out
+	 * (2026-09-10, +b30: silent -EINVAL from a bps mismatch between
+	 * codec and master stream configs).
+	 */
+	ret = sdw_stream_add_master(&ctrl->bus, &sconfig, pconfig,
+				    nports, stream);
+	if (ret) {
+		dev_err(ctrl->dev, "Failed to add SDW master stream: %d\n",
+			ret);
+		return ret;
+	}
 
 	return 0;
 }
