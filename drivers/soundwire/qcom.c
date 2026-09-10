@@ -1253,16 +1253,26 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 	if (!pconfig)
 		return -ENOMEM;
 
-	if (direction == SNDRV_PCM_STREAM_CAPTURE)
+	if (direction == SNDRV_PCM_STREAM_CAPTURE) {
 		sconfig.direction = SDW_DATA_DIR_TX;
-	else
+		/*
+		 * erhai: wcd939x AMIC capture carries 16-bit PCM, not PDM.
+		 * The hardcoded PDM bps=1 made the core program 1-bit words
+		 * on BOTH sides (slave BlockCtrl1 derives from
+		 * stream->params.bps), so the intf received mis-packed
+		 * constant garbage (2026-09-10). ch_count must stay 1 so the
+		 * master/slave block-offset accumulation stays aligned
+		 * (port4 = port_bo + bps*1).
+		 */
+		sconfig.bps = params_width(params);
+	} else {
 		sconfig.direction = SDW_DATA_DIR_RX;
-
-	/* hw parameters will be ignored as we only support PDM */
+		/* hw parameters will be ignored as we only support PDM */
+		sconfig.bps = 1;
+	}
 	sconfig.ch_count = 1;
 	sconfig.frame_rate = params_rate(params);
 	sconfig.type = stream->type;
-	sconfig.bps = 1;
 
 	guard(mutex)(&ctrl->port_lock);
 
