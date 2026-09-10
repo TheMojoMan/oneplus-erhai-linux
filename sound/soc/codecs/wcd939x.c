@@ -440,16 +440,20 @@ static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 	if (enable) {
 		port_config->ch_mask |= ch_mask;
 		/*
-		 * The ADSP codec_dma intf channel id is the 0-BASED master
-		 * port index (vendor swr-mstr: mstr_port_id = i - 1; ADSP
-		 * TX3 map {02,03} = mport_cfg[2]/[3] = master ports 3/4).
-		 * Store master_port - 1 so the machine driver's compaction
-		 * yields the vendor map {2,3} for master ports {3,4}.
+		 * The ADSP codec_dma intf channel id is the 1-BASED master
+		 * port number (OxygenOS GT: TX3 intf map {02,03} with the
+		 * ADCs on master ports 2,3 — SWRM_TX2_CH1 = port group 2,
+		 * SWRM_TX3_CH2 = port group 3; the earlier 0-based reading
+		 * was an off-by-one misparse of the vendor channel names,
+		 * refuted live on +b31: ports {3,4} + map {2,3} delivered
+		 * pure zeros). Store master_port directly so the machine
+		 * driver's compaction yields the GT map {2,3} for master
+		 * ports {2,3}.
 		 */
-		wcd->master_channel_map[mstr_port_num - 1] |= mstr_ch_mask;
+		wcd->master_channel_map[mstr_port_num] |= mstr_ch_mask;
 	} else {
 		port_config->ch_mask &= ~ch_mask;
-		wcd->master_channel_map[mstr_port_num - 1] &= ~mstr_ch_mask;
+		wcd->master_channel_map[mstr_port_num] &= ~mstr_ch_mask;
 	}
 
 	return 0;
