@@ -4,6 +4,7 @@
  */
 
 #include <linux/module.h>
+#include <sound/pcm_params.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/device.h>
@@ -162,7 +163,19 @@ int wcd939x_sdw_hw_params(struct wcd939x_sdw_priv *wcd,
 		wcd->active_ports++;
 	}
 
-	wcd->sconfig.bps = 1;
+	/*
+	 * erhai: mainline hardcodes PDM 1-bit here (x1e DMIC world).
+	 * erhai AMIC capture carries 16-bit PCM — the stream bps MUST
+	 * match the qcom master's sconfig.bps (params_width) or
+	 * sdw_stream_add_master() rejects the stream with -EINVAL and
+	 * the master ports are left unconfigured (2026-09-10, +b31).
+	 * RX keeps 1 to stay in lockstep with the qcom master's RX
+	 * bps=1 PDM assumption (HPH playback path unaffected).
+	 */
+	if (wcd->is_tx)
+		wcd->sconfig.bps = params_width(params);
+	else
+		wcd->sconfig.bps = 1;
 	wcd->sconfig.frame_rate = params_rate(params);
 	if (wcd->is_tx)
 		wcd->sconfig.direction = SDW_DATA_DIR_TX;
