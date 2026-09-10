@@ -1295,7 +1295,21 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 				}
 				set_bit(pn, port_mask);
 				pconfig[nports].num = pn;
-				pconfig[nports].ch_mask = p_rt->ch_mask;
+				/*
+				 * The ADSP codec_dma intf channel N carries the
+				 * data of SWR master port N (vendor channel
+				 * map {02, 03}: ADC1 -> port2, ADC4 -> port3).
+				 * Each master port therefore owns frame
+				 * channel (pn - 1) — do NOT reuse the slave
+				 * port ch_mask, that puts ADC1 on frame ch1
+				 * where the intf never looks (mic silence,
+				 * 2026-09-10). RX streams keep the slave
+				 * ch_mask (wsa playback verified working).
+				 */
+				if (direction == SNDRV_PCM_STREAM_CAPTURE)
+					pconfig[nports].ch_mask = BIT(pn - 1);
+				else
+					pconfig[nports].ch_mask = p_rt->ch_mask;
 				nports++;
 				/* TEMP DEBUG (mic bringup, +b22): master port alloc */
 				dev_info(ctrl->dev, "MICDBG alloc: slave port %u -> master port %d ch_mask=0x%x (nports=%d)\n",
