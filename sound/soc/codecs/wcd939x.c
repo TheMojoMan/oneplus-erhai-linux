@@ -430,6 +430,12 @@ static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 	mstr_port_num = sdev->m_port_map[port_num];
 	mstr_ch_mask = ch_info->master_ch_mask;
 
+	/* TEMP DEBUG (mic bringup, +b24) */
+	pr_info("MICDBG connect_port: ch_port=%d ch_mask=%#x en=%d -> cfg[%d] mask=%#x mport=%d mmap=%#x\n",
+		port_num, ch_mask, enable, (int)(port_config - &wcd->port_config[0]),
+		enable ? (port_config->ch_mask | ch_mask) : (port_config->ch_mask & ~ch_mask),
+		mstr_port_num, wcd->master_channel_map[mstr_port_num]);
+
 	if (enable) {
 		port_config->ch_mask |= ch_mask;
 		wcd->master_channel_map[mstr_port_num] |= mstr_ch_mask;
