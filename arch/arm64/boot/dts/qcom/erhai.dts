@@ -77,10 +77,13 @@
 		pinctrl-0 = <&wcd_default>;
 		pinctrl-names = "default";
 
-		qcom,micbias1-microvolt = <1800000>;
-		qcom,micbias2-microvolt = <1800000>;
-		qcom,micbias3-microvolt = <1800000>;
-		qcom,micbias4-microvolt = <1800000>;
+		/* OxygenOS gt (regmap MICB VOUT 0x22 during recording):
+		 * all four micbiases run at 2.7V, not the 1.8V we had.
+		 * VOUT = (mv - 1000) / 50 -> 0x22 = 2700 mV. */
+		qcom,micbias1-microvolt = <2700000>;
+		qcom,micbias2-microvolt = <2700000>;
+		qcom,micbias3-microvolt = <2700000>;
+		qcom,micbias4-microvolt = <2700000>;
 		qcom,mbhc-buttons-vthreshold-microvolt = <75000 150000 237000 500000 500000 500000 500000 500000>;
 		qcom,mbhc-headset-vthreshold-microvolt = <1700000>;
 		qcom,mbhc-headphone-vthreshold-microvolt = <50000>;
@@ -126,6 +129,11 @@
 				"AMIC2", "MIC BIAS2",
 				"AMIC3", "MIC BIAS3",
 				"AMIC4", "MIC BIAS4",
+				/* OxygenOS gt DAPM: AMIC5 is statically fed by
+				 * MIC BIAS3 (MICB3 On during recording);
+				 * without this route MICB3 never powers and
+				 * ADC4 (AMIC5) delivers nothing. */
+				"AMIC5", "MIC BIAS3",
 				/* mainline DMICn is downstream Digital Mic(n-1) */
 				"DMIC1", "MIC BIAS3",
 				"DMIC2", "MIC BIAS3",
