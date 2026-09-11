@@ -2339,16 +2339,16 @@
 	 * Empirical ladder (2026-09-10): 0x03 -> full-rate garbage,
 	 * 0x2F -> silence, 0x18 -> 8x oversampled full-scale Nyquist
 	 * noise; only 0xC7 keeps master and slave sampling the same 48k
-	 * cadence. Active master ports are 2,3 (see tx-port-mapping). */
+	 * cadence. Active master ports are 3,4 (see tx-port-mapping). */
 	/* Payload packing (2026-09-10): the SDW core derives slave
 	 * BlockCtrl1 (word length) from stream->params.bps, and the qcom
 	 * master from qcom,ports-word-length. Both sides must be 16-bit
 	 * PCM (0x0f = 16-1) or the intf assembles garbage. Block offsets:
-	 * core starts port_bo=1; DP1/port2 = 1, DP2/port3 = 1+16 = 17
-	 * (0x11) with bps=16, ch_count=1. Entries are indexed by master
-	 * port 1..4; ports 1 and 4 are unused (0xff/0x00). */
+	 * core starts port_bo=1; DP1 (slave) = 1 -> master port 3,
+	 * DP2 (slave) = 1+16 = 17 (0x11) -> master port 4, bps=16,
+	 * ch_count=1. Entries are indexed by master port 1..4. */
 	qcom,ports-word-length = /bits/ 8 <0xff 0x0f 0x0f 0x0f>;
-	qcom,ports-offset1 = /bits/ 8 <0x00 0x01 0x11 0x11>;
+	qcom,ports-offset1 = /bits/ 8 <0x00 0x00 0x01 0x11>;
 	/* Master SI must EQUAL the slave SampCtrl interval the SDW core
 	 * programs: sample_int = curr_dr_freq/rate = 9.6MHz/48k = 200,
 	 * SampCtrl = interval-1 = 199 (0xC7). */
@@ -2358,16 +2358,19 @@
 		compatible = "sdw20217010e00";
 		reg = <0 3>;
 		/* OxygenOS runtime ChMap ground truth: ADC1 rides master
-		 * port 2 (SWRM_TX2_CH1 — vendor port-group naming is
-		 * 1-based, TX2 = port 2) and ADC4 master port 3
-		 * (SWRM_TX3_CH2); slave side: ADC1 -> DP1 ch1, ADC4 ->
-		 * DP2 ch2 (see wcd939x_sdw_tx_ch_info). The +b31 kernel
-		 * (ports {3,4} + intf map {2,3}) delivered pure zeros —
-		 * the intf map is the 1-based master port number, so the
-		 * mapping MUST be {2,3} to match the GT intf map {02,03}.
+		 * port 3 (SWRM_TX2_CH1 — the vendor master DT port table
+		 * maps port 3 = TX2_CH1-4, port 4 = TX3_CH1-4) and ADC4
+		 * master port 4 (SWRM_TX3_CH2); slave side: ADC1 -> DP1
+		 * ch1, ADC4 -> DP2 ch2 (see wcd939x_sdw_tx_ch_info). The
+		 * ADSP codec_dma intf channel = master port - 1 (vendor
+		 * swrm_get_master_port(): mstr_port_id = i-1), so the
+		 * TX3 BE map {02,03} = ports {3,4}. +b32's {2,3} reading
+		 * was a false correction: with the master DPn PCM_PORT_
+		 * CTRL missing, EVERY mapping delivered zeros (fixed in
+		 * +b35, see qcom_swrm_port_enable).
 		 * Property is indexed by SLAVE port number. DP3/DP4
 		 * (dmics) fall back to auto-allocation. */
-		qcom,tx-port-mapping = <2 3 0 0>;
+		qcom,tx-port-mapping = <3 4 0 0>;
 		/* Master channel per slave TX channel id, in ch_info order
 		 * (adc1, adc2, adc3, adc4, ...): ADC1 -> master ch1
 		 * (SWRM_TX2_CH1), ADC4 -> master ch2 (SWRM_TX3_CH2).
