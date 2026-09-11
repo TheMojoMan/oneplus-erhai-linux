@@ -2339,14 +2339,15 @@
 &swr2 {
 	status = "okay";
 
-	/* 48 kHz PCM capture: SI = 199 (0xC7) on the ACTIVE master
-	 * ports. sm8750.dtsi's default si=0x03 (SI=4) is for PDM-style
-	 * layouts; at 48 kHz the master SI must equal the slave SampCtrl
-	 * interval the SDW core programs (9.6MHz/48k = 200, reg 199).
-	 * Empirical ladder (2026-09-10): 0x03 -> full-rate garbage,
-	 * 0x2F -> silence, 0x18 -> 8x oversampled full-scale Nyquist
-	 * noise; only 0xC7 keeps master and slave sampling the same 48k
-	 * cadence. Active master ports are 3,4 (see tx-port-mapping). */
+	/* 48 kHz PCM capture, master SI = 0x01 on the ACTIVE master ports
+	 * (3,4): 2026-09-11 Android GT (va_swr_ctrl reg dump during a WORKING
+	 * recording) programs DP PORT_CTRL = (ch_mask<<24) | SI=0x01 and
+	 * PORT_CTRL_2 = lane 1/2, both banks. SI here is the col-stride minus
+	 * 1: 16-bit word = 1 col, back-to-back samples -> 4 samples per
+	 * 16-col frame * 12 kHz = 48 kHz. The older SI=0xC7 theory (stride
+	 * 200 -> one sample per 200 frames) delivered the zero trickle;
+	 * live devmem pokes with the GT values produced the first ever
+	 * nonzero samples (+b39). */
 	/* Payload packing (2026-09-10): the SDW core derives slave
 	 * BlockCtrl1 (word length) from stream->params.bps, and the qcom
 	 * master from qcom,ports-word-length. Both sides must be 16-bit
@@ -2355,11 +2356,11 @@
 	 * DP2 (slave) = 1+16 = 17 (0x11) -> master port 4, bps=16,
 	 * ch_count=1. Entries are indexed by master port 1..4. */
 	qcom,ports-word-length = /bits/ 8 <0xff 0x0f 0x0f 0x0f>;
-	qcom,ports-offset1 = /bits/ 8 <0x00 0x00 0x01 0x11>;
-	/* Master SI must EQUAL the slave SampCtrl interval the SDW core
-	 * programs: sample_int = curr_dr_freq/rate = 9.6MHz/48k = 200,
-	 * SampCtrl = interval-1 = 199 (0xC7). */
-	qcom,ports-sinterval-low = /bits/ 8 <0x01 0xC7 0xC7 0xC7>;
+	qcom,ports-offset1 = /bits/ 8 <0x00 0x00 0x00 0x00>;
+	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0x01 0x01>;
+	/* PORT_CTRL_2 (+4) = lane 1/2 per GT: the qcom master writes it
+	 * when valid (255 = skip). GT DP3: 0x01, DP4: 0x02. */
+	qcom,ports-lane-control = /bits/ 8 <0x01 0x02 0x01 0x02>;
 
 	wcd_tx: codec@0,3 {
 		compatible = "sdw20217010e00";
