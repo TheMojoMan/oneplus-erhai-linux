@@ -186,6 +186,14 @@ static int sdw_program_slave_port_params(struct sdw_bus *bus,
 			t_params->port_num);
 		return ret;
 	}
+	/* TEMP DEBUG (mic bringup, +b36): portctrl/blockctrl1/sampctrl1 */
+	pr_info("MICDBG slvport prog2: p%d addr1=%#x portctrl=%#x rb=%#x addr2=%#x bps=%u blk1=%#x rb=%#x addr3=%#x samp=%#x rb=%#x\n",
+		t_params->port_num, addr1, wbuf,
+		sdw_read_no_pm(s_rt->slave, addr1),
+		addr2, p_params->bps, p_params->bps - 1,
+		sdw_read_no_pm(s_rt->slave, addr2),
+		addr3, (t_params->sample_interval - 1) & SDW_DPN_SAMPLECTRL_LOW,
+		sdw_read_no_pm(s_rt->slave, addr3));
 
 	if (!read_only_wordlength) {
 		/* Program DPN_BlockCtrl1 register */
