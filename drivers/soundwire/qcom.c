@@ -1138,6 +1138,7 @@ static int qcom_swrm_port_enable(struct sdw_bus *bus,
 	u32 val;
 	int ret;
 	u32 offset = ctrl->reg_layout[SWRM_OFFSET_DP_PORT_CTRL_BANK];
+	u32 pcm_offset = ctrl->reg_layout[SWRM_OFFSET_DP_PCM_PORT_CTRL];
 
 	reg = SWRM_DPn_PORT_CTRL_BANK(offset, enable_ch->port_num, bank);
 
@@ -1169,12 +1170,14 @@ static int qcom_swrm_port_enable(struct sdw_bus *bus,
 	 * erhai SoundWire users are PCM.)
 	 */
 	if (enable_ch->enable) {
-		reg = SWRM_DPn_PCM_PORT_CTRL(offset, enable_ch->port_num);
+		reg = SWRM_DPn_PCM_PORT_CTRL(pcm_offset, enable_ch->port_num);
+		dev_info(ctrl->dev, "MICDBG pcm_port: port %u reg=0x%x val=0x%x\n",
+			 enable_ch->port_num, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
 		return ctrl->reg_write(ctrl, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
 	}
 
 	if (!(val >> SWRM_DP_PORT_CTRL_EN_CHAN_SHFT)) {
-		reg = SWRM_DPn_PCM_PORT_CTRL(offset, enable_ch->port_num);
+		reg = SWRM_DPn_PCM_PORT_CTRL(pcm_offset, enable_ch->port_num);
 		return ctrl->reg_write(ctrl, reg, 0x0);
 	}
 
