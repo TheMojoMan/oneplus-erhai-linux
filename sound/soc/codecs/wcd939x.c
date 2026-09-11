@@ -421,6 +421,7 @@ static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 	struct sdw_slave *sdev = wcd->sdev;
 	u8 ch_mask, port_num;
 	u8 mstr_port_num, mstr_ch_mask;
+	u8 map_idx;
 
 	port_num = ch_info->port_num;
 	ch_mask = ch_info->ch_mask;
@@ -430,29 +431,36 @@ static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 	mstr_port_num = sdev->m_port_map[port_num];
 	mstr_ch_mask = ch_info->master_ch_mask;
 
+	/*
+	 * The ADSP codec_dma intf channel id is the 0-BASED master port
+	 * number (verified in the OxygenOS vendor master code:
+	 * swrm_get_master_port() returns mstr_port_id = master port i
+	 * minus 1, and the GT TX3 BE map {02,03} matches the GT runtime
+	 * ChMap ADC1 = SWRM_TX2_CH1 = master port 3, ADC4 = SWRM_TX3_CH2
+	 * = master port 4). The machine driver's compaction takes the
+	 * indices of the nonzero master_channel_map entries, so TX
+	 * stores at index mstr_port_num - 1 to yield {2,3}.
+	 * (+b35: +b32's 1-based reading was a false correction — while
+	 * the master DPn PCM_PORT_CTRL was missing, EVERY port mapping
+	 * delivered zeros, so +b31's live "refutation" of the 0-based
+	 * reading proved nothing. See qcom_swrm_port_enable().)
+	 * RX keeps the 1-based index — the headset path is untested on
+	 * erhai; do not churn it without a wired-headset test rig.
+	 */
+	map_idx = wcd->is_tx ? mstr_port_num - 1 : mstr_port_num;
+
 	/* TEMP DEBUG (mic bringup, +b24) */
-	pr_info("MICDBG connect_port: ch_port=%d ch_mask=%#x en=%d -> cfg[%d] mask=%#x mport=%d mmap=%#x\n",
+	pr_info("MICDBG connect_port: ch_port=%d ch_mask=%#x en=%d -> cfg[%d] mask=%#x mport=%d mmap[%d]=%#x\n",
 		port_num, ch_mask, enable, (int)(port_config - &wcd->port_config[0]),
 		enable ? (port_config->ch_mask | ch_mask) : (port_config->ch_mask & ~ch_mask),
-		mstr_port_num, wcd->master_channel_map[mstr_port_num]);
+		mstr_port_num, map_idx, wcd->master_channel_map[map_idx]);
 
 	if (enable) {
 		port_config->ch_mask |= ch_mask;
-		/*
-		 * The ADSP codec_dma intf channel id is the 1-BASED master
-		 * port number (OxygenOS GT: TX3 intf map {02,03} with the
-		 * ADCs on master ports 2,3 — SWRM_TX2_CH1 = port group 2,
-		 * SWRM_TX3_CH2 = port group 3; the earlier 0-based reading
-		 * was an off-by-one misparse of the vendor channel names,
-		 * refuted live on +b31: ports {3,4} + map {2,3} delivered
-		 * pure zeros). Store master_port directly so the machine
-		 * driver's compaction yields the GT map {2,3} for master
-		 * ports {2,3}.
-		 */
-		wcd->master_channel_map[mstr_port_num] |= mstr_ch_mask;
+		wcd->master_channel_map[map_idx] |= mstr_ch_mask;
 	} else {
 		port_config->ch_mask &= ~ch_mask;
-		wcd->master_channel_map[mstr_port_num] &= ~mstr_ch_mask;
+		wcd->master_channel_map[map_idx] &= ~mstr_ch_mask;
 	}
 
 	return 0;

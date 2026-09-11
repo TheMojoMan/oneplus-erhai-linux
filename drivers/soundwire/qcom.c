@@ -111,6 +111,15 @@
 #define SWRM_DPn_PORT_HCTRL_BANK(offset,  n, m)	(offset + 0x100 * (n - 1) + 0x40 * m)
 #define SWRM_DPn_BLOCK_CTRL3_BANK(offset, n, m)	(offset + 0x100 * (n - 1) + 0x40 * m)
 #define SWRM_DPn_SAMPLECTRL2_BANK(offset, n, m)	(offset + 0x100 * (n - 1) + 0x40 * m)
+/* erhai mic bring-up (+b35): DPn PCM port control — bank-independent,
+ * connects the master DPn payload to the LPAIF codec_dma intf. The
+ * vendor master writes 0x3 here for every enabled non-PDM port
+ * (swrm_pcm_port_config()) and 0x0 on full disable; mainline never
+ * touched it, leaving the intf permanently disconnected (all TX
+ * captures delivered exact digital zeros while every transport
+ * register was at vendor parity). */
+#define SWRM_DPn_PCM_PORT_CTRL(offset, n)	(offset + 0x100 * (n - 1))
+#define SWRM_DPn_PCM_PORT_CTRL_EN		0x3
 
 #define SWR_V1_3_MSTR_MAX_REG_ADDR				0x1740
 #define SWR_V2_0_MSTR_MAX_REG_ADDR				0x50ac
@@ -183,6 +192,7 @@ enum {
 	SWRM_OFFSET_DP_PORT_HCTRL_BANK,
 	SWRM_OFFSET_DP_BLOCK_CTRL3_BANK,
 	SWRM_OFFSET_DP_SAMPLECTRL2_BANK,
+	SWRM_OFFSET_DP_PCM_PORT_CTRL,
 };
 
 struct qcom_swrm_ctrl {
@@ -249,6 +259,7 @@ static const unsigned int swrm_v1_3_reg_layout[] = {
 	[SWRM_OFFSET_DP_PORT_HCTRL_BANK]	= 0x1134,
 	[SWRM_OFFSET_DP_BLOCK_CTRL3_BANK]	= 0x1138,
 	[SWRM_OFFSET_DP_SAMPLECTRL2_BANK]	= 0x113c,
+	[SWRM_OFFSET_DP_PCM_PORT_CTRL]		= 0x1154,
 };
 
 static const struct qcom_swrm_data swrm_v1_3_data = {
@@ -290,6 +301,7 @@ static const unsigned int swrm_v2_0_reg_layout[] = {
 	[SWRM_OFFSET_DP_PORT_HCTRL_BANK]	= 0x1134,
 	[SWRM_OFFSET_DP_BLOCK_CTRL3_BANK]	= 0x1138,
 	[SWRM_OFFSET_DP_SAMPLECTRL2_BANK]	= 0x113c,
+	[SWRM_OFFSET_DP_PCM_PORT_CTRL]		= 0x1154,
 };
 
 static const struct qcom_swrm_data swrm_v2_0_data = {
@@ -317,6 +329,7 @@ static const unsigned int swrm_v3_0_reg_layout[] = {
 	[SWRM_OFFSET_DP_PORT_HCTRL_BANK]	= 0x1234,
 	[SWRM_OFFSET_DP_BLOCK_CTRL3_BANK]	= 0x1238,
 	[SWRM_OFFSET_DP_SAMPLECTRL2_BANK]	= 0x123c,
+	[SWRM_OFFSET_DP_PCM_PORT_CTRL]		= 0x1254,
 };
 
 static const struct qcom_swrm_data swrm_v3_0_data = {
@@ -1110,6 +1123,7 @@ static int qcom_swrm_port_enable(struct sdw_bus *bus,
 	u32 reg;
 	struct qcom_swrm_ctrl *ctrl = to_qcom_sdw(bus);
 	u32 val;
+	int ret;
 	u32 offset = ctrl->reg_layout[SWRM_OFFSET_DP_PORT_CTRL_BANK];
 
 	reg = SWRM_DPn_PORT_CTRL_BANK(offset, enable_ch->port_num, bank);
@@ -1126,7 +1140,32 @@ static int qcom_swrm_port_enable(struct sdw_bus *bus,
 	else
 		val &= ~(0xff << SWRM_DP_PORT_CTRL_EN_CHAN_SHFT);
 
-	return ctrl->reg_write(ctrl, reg, val);
+	ret = ctrl->reg_write(ctrl, reg, val);
+	if (ret)
+		return ret;
+
+	/*
+	 * erhai mic bring-up (+b35): connect/disconnect the master DPn
+	 * port to the LPAIF codec_dma intf. Without DPn PCM_PORT_CTRL =
+	 * 0x3 the intf never sees the payload and every TX capture
+	 * delivers exact digital zeros (vendor parity: the vendor
+	 * master's swrm_pcm_port_config() writes 0x3 for every enabled
+	 * non-PDM port and 0x0 when the port has no channels left).
+	 * Bank-independent register. (PDM ports are skipped in the
+	 * vendor code; mainline has no stream type here, and all current
+	 * erhai SoundWire users are PCM.)
+	 */
+	if (enable_ch->enable) {
+		reg = SWRM_DPn_PCM_PORT_CTRL(offset, enable_ch->port_num);
+		return ctrl->reg_write(ctrl, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
+	}
+
+	if (!(val >> SWRM_DP_PORT_CTRL_EN_CHAN_SHFT)) {
+		reg = SWRM_DPn_PCM_PORT_CTRL(offset, enable_ch->port_num);
+		return ctrl->reg_write(ctrl, reg, 0x0);
+	}
+
+	return 0;
 }
 
 static const struct sdw_master_port_ops qcom_swrm_port_ops = {
