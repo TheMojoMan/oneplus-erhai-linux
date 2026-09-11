@@ -1377,6 +1377,14 @@ static int wcd9390_probe(struct sdw_slave *pdev, const struct sdw_device_id *id)
 	if (!wcd)
 		return -ENOMEM;
 
+	/* +b38: wcd939x implements the SDW 1.2 SCP clock base/scale
+	 * registers (vendor master writes SWRS_SCP_BASE_CLK_BASE 0x4d =
+	 * 0x1 and SWRS_SCP_BUSCLOCK_SCALE 0x62/0x72 = 2 to it on every
+	 * datapath enable). Without clock_reg_supported the SDW core
+	 * never programs them (sdw_slave_set_frequency), and the TX
+	 * data ports never clock — capture delivers exact zeros. */
+	pdev->prop.clock_reg_supported = true;
+
 	/*
 	 * Port map index starts with 0, however the data port for this codec
 	 * are from index 1
