@@ -900,7 +900,8 @@ static int qcom_swrm_init(struct qcom_swrm_ctrl *ctrl)
 
 	reset_control_reset(ctrl->audio_cgcr);
 
-	ctrl->reg_write(ctrl, SWRM_MCP_FRAME_CTRL_BANK_ADDR(0), val);
+	ctrl->reg_write(ctrl, SWRM_MCP_FRAME_CTRL_BANK_ADDR(0),
+			val | FIELD_PREP(GENMASK(25, 16), 5));
 
 	/* Enable Auto enumeration */
 	ctrl->reg_write(ctrl, SWRM_ENUMERATOR_CFG_ADDR, 1);
@@ -1024,6 +1025,14 @@ static int qcom_swrm_pre_bank_switch(struct sdw_bus *bus)
 
 	u32p_replace_bits(&val, ctrl->cols_index, SWRM_MCP_FRAME_CTRL_BANK_COL_CTRL_BMSK);
 	u32p_replace_bits(&val, ctrl->rows_index, SWRM_MCP_FRAME_CTRL_BANK_ROW_CTRL_BMSK);
+	/* TEMP DEBUG (mic bringup, +b37): SSP period — bits 25:16 reset to 0
+	 * and mainline never programs them; the vendor master writes
+	 * (bus_clk*2)/(row*col*frame_sync)-1 = 5 for 50x16 @ 9.6MHz with
+	 * frame_sync 4000 (and 6 for the native 3675) — either way 5.
+	 * Data ports sync their phase off this boundary; control commands
+	 * tolerate SSP=0 but slave DATA ports do not (wcd939x TX ports
+	 * transmitted nothing with SSP=0 despite full transport parity). */
+	val |= FIELD_PREP(GENMASK(25, 16), 5);
 
 	return ctrl->reg_write(ctrl, reg, val);
 }
