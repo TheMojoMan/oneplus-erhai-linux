@@ -46,6 +46,10 @@ void sdw_compute_slave_ports(struct sdw_master_runtime *m_rt,
 		rate = m_rt->stream->params.rate;
 		bps = m_rt->stream->params.bps;
 		sample_int = (m_rt->bus->params.curr_dr_freq / rate);
+		/* TEMP DEBUG (mic bringup, +b36): slave port computation */
+		pr_info("MICDBG slvcomp: rate=%u bps=%u curr_dr_freq=%u sample_int=%u block_offset=%u lane=%u\n",
+			rate, bps, m_rt->bus->params.curr_dr_freq,
+			sample_int, port_bo, t_data->lane);
 		slave_total_ch = 0;
 
 		list_for_each_entry(p_rt, &s_rt->port_list, port_node) {
