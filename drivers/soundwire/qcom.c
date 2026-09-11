@@ -1722,6 +1722,16 @@ static int qcom_swrm_probe(struct platform_device *pdev)
 
 	prop = &ctrl->bus.prop;
 	prop->max_clk_freq = DEFAULT_CLK_FREQ;
+	/*
+	 * +b38: SDW SCP BUS_CLOCK_BASE/BUSCLOCK_SCALE programming in
+	 * sdw_slave_set_frequency() (bus.c) bails on !mclk_freq — the
+	 * vendor master writes base 0x1 + scale 2 to every paging slave
+	 * at each datapath enable (swrm_update_clk_base_and_scale);
+	 * without it the wcd939x slave data ports never clock and
+	 * transmit nothing (control commands tolerate it). Set by
+	 * upstream f64c5d5ff8 ("soundwire: qcom: set the bus mclk_freq
+	 * property") since 7.3.
+	 */
 	prop->mclk_freq = DEFAULT_CLK_FREQ;
 	prop->num_clk_gears = 0;
 	prop->num_clk_freq = MAX_FREQ_NUM;
