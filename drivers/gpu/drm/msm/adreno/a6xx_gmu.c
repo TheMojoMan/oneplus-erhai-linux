@@ -381,34 +381,49 @@ static int a6xx_gmu_start(struct a6xx_gmu *gmu)
 	struct a6xx_gpu *a6xx_gpu = container_of(gmu, struct a6xx_gpu, gmu);
 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
 	u32 mask, reset_val, val;
-	int ret;
+	int ret, i;
 
-	val = gmu_read(gmu, REG_A6XX_GMU_CM3_DTCM_START + 0xff8);
-	if (val <= 0x20010004) {
-		mask = 0xffffffff;
-		reset_val = 0xbabeface;
-	} else {
-		mask = 0x1ff;
-		reset_val = 0x100;
+	for (i = 0; i < 4; i++) {
+		val = gmu_read(gmu, REG_A6XX_GMU_CM3_DTCM_START + 0xff8);
+		if (val <= 0x20010004) {
+			mask = 0xffffffff;
+			reset_val = 0xbabeface;
+		} else {
+			mask = 0x1ff;
+			reset_val = 0x100;
+		}
+
+		gmu_write(gmu, REG_A6XX_GMU_CM3_SYSRESET, 1);
+
+		/* Set the log wptr index
+		 * note: downstream saves the value in poweroff and restores it here
+		 */
+		if (adreno_is_a8xx(adreno_gpu))
+			gmu_write(gmu, REG_A8XX_GMU_GENERAL_9, 0);
+		else if (adreno_is_a7xx(adreno_gpu))
+			gmu_write(gmu, REG_A7XX_GMU_GENERAL_9, 0);
+		else
+			gmu_write(gmu, REG_A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_RESP, 0);
+
+		gmu_write(gmu, REG_A6XX_GMU_CM3_SYSRESET, 0);
+
+		/*
+		 * erhai: the a8xx CM3 boot intermittently misses the 10 ms
+		 * FW_INIT_RESULT window (=> "GMU firmware initialization timed
+		 * out" -> OOB GPU_SET storm -> hangcheck -> frozen display; seen
+		 * on #82/#83/#84 even with the cold-boot reload). Lengthen the
+		 * poll to 100 ms and retry the CM3 boot up to 4 times before
+		 * giving up, so a slow/glitchy boot self-heals instead of
+		 * wedging the GPU irrecoverably ("cx gdsc didn't collapse").
+		 */
+		ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_CM3_FW_INIT_RESULT,
+			val, (val & mask) == reset_val, 100, 100000);
+		if (!ret)
+			break;
+
+		DRM_DEV_ERROR(gmu->dev,
+			"erhai: GMU boot attempt %d/4 timed out, retrying\n", i + 1);
 	}
-
-	gmu_write(gmu, REG_A6XX_GMU_CM3_SYSRESET, 1);
-
-	/* Set the log wptr index
-	 * note: downstream saves the value in poweroff and restores it here
-	 */
-	if (adreno_is_a8xx(adreno_gpu))
-		gmu_write(gmu, REG_A8XX_GMU_GENERAL_9, 0);
-	else if (adreno_is_a7xx(adreno_gpu))
-		gmu_write(gmu, REG_A7XX_GMU_GENERAL_9, 0);
-	else
-		gmu_write(gmu, REG_A6XX_GPU_GMU_CX_GMU_PWR_COL_CP_RESP, 0);
-
-
-	gmu_write(gmu, REG_A6XX_GMU_CM3_SYSRESET, 0);
-
-	ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_CM3_FW_INIT_RESULT, val,
-		(val & mask) == reset_val, 100, 100000);
 
 	if (ret)
 		DRM_DEV_ERROR(gmu->dev, "GMU firmware initialization timed out\n");
