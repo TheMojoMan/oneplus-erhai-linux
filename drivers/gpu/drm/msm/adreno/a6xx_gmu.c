@@ -96,7 +96,16 @@ static const struct kernel_param_ops erhai_gmu_enable_ops = {
 module_param_cb(erhai_gmu_enable, &erhai_gmu_enable_ops, &erhai_gmu_enable, 0644);
 MODULE_PARM_DESC(erhai_gmu_enable, "erhai: write 1 to arm+directly boot the Adreno GMU (bring-up; default off)");
 
-MODULE_PARM_DESC(erhai_no_ifpc, "erhai: disable IFPC (idle_level=ACTIVE) so context regs persist for regdump");
+/* erhai: disable IFPC so the GMU FW never autonomously power-collapses GX.
+ * Default ON (owner decision 2026-09-12, fix A) — the autonomous IFPC/GX
+ * collapse is the suspected silent-POR trigger. Set 0 via
+ * /sys/module/msm/parameters/erhai_no_ifpc to re-enable IFPC for A/B.
+ * When set: idle_level is forced to ACTIVE and the GMU_OOB_PERFCOUNTER_SET
+ * vote is held after each resume (same mechanism a6xx_gmu_sysprof_setup uses
+ * to block IFPC for sysprof) so the GMU FW never enters IFPC. */
+bool erhai_no_ifpc = true;
+module_param(erhai_no_ifpc, bool, 0644);
+MODULE_PARM_DESC(erhai_no_ifpc, "erhai: disable IFPC (idle_level=ACTIVE + hold GMU_OOB_PERFCOUNTER vote). Default 1 — suspected silent-POR fix.");
 
 static void a6xx_gmu_fault(struct a6xx_gmu *gmu)
 {
@@ -1497,6 +1506,23 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 	/* Set the GPU to the current freq */
 	a6xx_gmu_set_initial_freq(gpu, gmu);
 
+	/*
+	 * erhai fix-A: with the disable-IFPC param, hold the perfcounter OOB
+	 * vote so the GMU FW never autonomously enters IFPC (GX power
+	 * collapse) while idle — same mechanism a6xx_gmu_sysprof_setup uses
+	 * for sysprof ("Perfcounter select register values are lost during
+	 * IFPC collapse ... use the currently unused perfcounter oob vote to
+	 * block IFPC"). The vote is cleared in a6xx_gmu_shutdown and
+	 * re-asserted here on every resume.
+	 */
+	if (erhai_no_ifpc) {
+		if (!test_and_set_bit(GMU_STATUS_OOB_PERF_SET, &gmu->status)) {
+			ret = a6xx_gmu_set_oob(gmu, GMU_OOB_PERFCOUNTER_SET);
+			if (ret)
+				clear_bit(GMU_STATUS_OOB_PERF_SET, &gmu->status);
+		}
+	}
+
 	return 0;
 
 disable_irq:
@@ -2418,6 +2444,10 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 
 	gmu->idle_level = (adreno_gpu->info->quirks & ADRENO_QUIRK_IFPC) ?
 		GMU_IDLE_STATE_IFPC : GMU_IDLE_STATE_ACTIVE;
+
+	/* erhai: force ACTIVE idle (no IFPC) when the disable-IFPC param is on */
+	if (erhai_no_ifpc)
+		gmu->idle_level = GMU_IDLE_STATE_ACTIVE;
 
 	pm_runtime_enable(gmu->dev);
 
