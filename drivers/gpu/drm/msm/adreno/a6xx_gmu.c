@@ -1051,6 +1051,12 @@ static int a6xx_gmu_fw_start(struct a6xx_gmu *gmu, unsigned int state)
 		ret = a6xx_gmu_fw_load(gmu);
 		if (ret)
 			return ret;
+
+		/* erhai: count cold-boot GMU boots (a8xx always cold-boots on
+		 * resume; the DRM_INFO_ONCE in a6xx_gmu_fw_load only prints the
+		 * first one, so this is the per-resume counter).
+		 */
+		DRM_DEV_INFO(gmu->dev, "erhai: GMU cold-boot (firmware reloaded)\n");
 	}
 
 	/* Clear init result to make sure we are getting a fresh value */
