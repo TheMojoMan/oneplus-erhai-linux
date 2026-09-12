@@ -1525,6 +1525,45 @@ static void nvt_resume_work(struct work_struct *work)
 	nvt_ts_resume(&ts_core->client->dev);
 }
 
+/*
+ * erhai: in-cell panel power integration (NT36536 is powered by the XN242
+ * panel supplies, see gpu-MEMORY-2026-09-12.md "POST-REBOOT EVIDENCE #5").
+ *
+ * When the display powers down, xn242_unprepare() drops those regulator rails
+ * to 0 V. If the driver is still awake at that point, the INT line fires on a
+ * dying IC, the threaded IRQ / FW-recovery workloop keeps poking the dead
+ * slave over SPI ("Recover for fw reset", "Download Firmware failed",
+ * "Unknown pen format id") and the pad silently PORs — seen in ALL five
+ * display-off deaths. So the XN242 panel driver calls back here:
+ *
+ *   - nvt_ts_panel_power_off(): synchronous, from xn242_disable() while the
+ *     rails are STILL UP. Sends the deep-sleep command to the powered IC,
+ *     masks the IRQ and drops bTouchIsAwake BEFORE xn242_unprepare cuts the
+ *     rails, so no recovery storm can ever touch an unpowered controller.
+ *   - nvt_ts_panel_power_on(): asynchronous resume_work (FW re-download +
+ *     IRQ re-arm) queued on the event workqueue once the rails are back.
+ */
+void nvt_ts_panel_power_off(void)
+{
+	if (!ts || !bTouchIsAwake)
+		return;
+
+	NVT_LOG("display off: sleeping NT36536 before panel rail drop\n");
+	nvt_ts_suspend(&ts->client->dev);
+}
+EXPORT_SYMBOL(nvt_ts_panel_power_off);
+
+void nvt_ts_panel_power_on(void)
+{
+	if (!ts || !ts->event_wq)
+		return;
+
+	NVT_LOG("display on: resuming NT36536\n");
+	flush_workqueue(ts->event_wq);
+	queue_work(ts->event_wq, &ts->resume_work);
+}
+EXPORT_SYMBOL(nvt_ts_panel_power_on);
+
 /*******************************************************
 Description:
 	Novatek touchscreen driver probe function.
