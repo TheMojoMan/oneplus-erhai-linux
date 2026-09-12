@@ -224,13 +224,10 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 	if (ret)
 		goto phy_en_fail;
 
-	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id], is_bonded_dsi, msm_dsi->phy);
-	if (ret) {
-		pr_err("%s: power on host %d failed, %d\n", __func__, id, ret);
-		goto host_on_fail;
-	}
-
 	if (is_bonded_dsi && msm_dsi1) {
+		/* erhai: slave-first re-enable — arm the slave DSI host
+		 * before the master (matches dsi_mgr_phy_disable, which
+		 * already tears the slave down first). */
 		ret = msm_dsi_host_power_on(msm_dsi1->host,
 				&phy_shared_timings[DSI_1], is_bonded_dsi, msm_dsi1->phy);
 		if (ret) {
@@ -238,6 +235,12 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 							__func__, ret);
 			goto host1_on_fail;
 		}
+	}
+
+	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id], is_bonded_dsi, msm_dsi->phy);
+	if (ret) {
+		pr_err("%s: power on host %d failed, %d\n", __func__, id, ret);
+		goto host_on_fail;
 	}
 
 	/*
@@ -251,9 +254,13 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 	return 0;
 
 host1_on_fail:
-	msm_dsi_host_power_off(host);
-host_on_fail:
 	dsi_mgr_phy_disable(id);
+	return ret;
+host_on_fail:
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_power_off(msm_dsi1->host);
+	dsi_mgr_phy_disable(id);
+	return ret;
 phy_en_fail:
 	return ret;
 }
@@ -297,13 +304,9 @@ static void dsi_mgr_bridge_pre_enable(struct drm_bridge *bridge,
 		return;
 	}
 
-	ret = msm_dsi_host_enable(host);
-	if (ret) {
-		pr_err("%s: enable host %d failed, %d\n", __func__, id, ret);
-		goto host_en_fail;
-	}
-
 	if (is_bonded_dsi && msm_dsi1) {
+		/* erhai: slave-first re-enable — start the slave video
+		 * engine before the master. */
 		ret = msm_dsi_host_enable(msm_dsi1->host);
 		if (ret) {
 			pr_err("%s: enable host1 failed, %d\n", __func__, ret);
@@ -311,11 +314,22 @@ static void dsi_mgr_bridge_pre_enable(struct drm_bridge *bridge,
 		}
 	}
 
+	ret = msm_dsi_host_enable(host);
+	if (ret) {
+		pr_err("%s: enable host %d failed, %d\n", __func__, id, ret);
+		goto host_en_fail;
+	}
+
 	return;
 
 host1_en_fail:
-	msm_dsi_host_disable(host);
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_disable(msm_dsi1->host);
+	dsi_mgr_bridge_power_off(bridge);
+	return;
 host_en_fail:
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_disable(msm_dsi1->host);
 	dsi_mgr_bridge_power_off(bridge);
 }
 
