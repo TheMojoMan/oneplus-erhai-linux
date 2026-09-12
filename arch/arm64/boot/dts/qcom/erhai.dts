@@ -561,6 +561,30 @@
 			reg = <0x00 0x9ee00000 0x00 0x5080000>;
 		};
 
+		/*
+		 * ramoops persist-across-reset pstore (oops/panic + console + pmsg).
+		 *
+		 * 0xa7800000 sits inside plain System RAM (live /proc/iomem:
+		 * a760d000-a7ffffff) — far from every firmware carveout and BELOW the
+		 * 0xa8000000-b7ffffff XBL/UEFI-reserved block. DO NOT touch that block
+		 * or anything else the bootloader owns: scribbling on XBL memory risks
+		 * corrupting bootloader state on the next boot and dropping the pad
+		 * into EDL (emergency download) mode. This node only takes 2 MiB of
+		 * ordinary kernel RAM (memblock no-map), invisible to the bootloader;
+		 * the DRAM content survives warm/firmware resets so pstore/ramoops can
+		 * recover the last kernel lines right before a GPU-wedge silent reset.
+		 * record/console/pmsg = 256 KiB each (768 KiB used, 1.25 MiB spare).
+		 */
+		ramoops_mem: ramoops@a7800000 {
+			compatible = "ramoops";
+			reg = <0x00 0xa7800000 0x00 0x200000>;
+			record-size = <0x40000>;
+			console-size = <0x40000>;
+			pmsg-size = <0x40000>;
+			max-reason = <0x7fffffff>;
+			no-map;
+		};
+
 		xbl_ramdump_mem: xbl-ramdump@b8000000 {
 			no-map;
 			reg = <0x00 0xb8000000 0x00 0x1c0000>;
