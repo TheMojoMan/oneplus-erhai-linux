@@ -2302,6 +2302,32 @@
 };
 
 &mdss_dsi1 {
+	/*
+	 * Link-clk PLL share (DSI-power fix, 2026-09-12): the 7nm DSI PHY in
+	 * bonded SLAVE mode clocks its LANES from the master's PLL0 (external
+	 * PLL) — but the DSI1 host used to reparent byte1_src/pixel1_src to its
+	 * OWN PLL1 (mdss_dsi1_phy), so the DSI1 link-clock domain was internally
+	 * inconsistent. On display power-OFF the byte1/pclk1/byte1_intf branches
+	 * never halted ("status stuck at 'on'") and the next display-ON wedged
+	 * the DSI/DPU/NoC → firmware POR. Feed DSI1's PLL inputs from the master
+	 * mdss_dsi0_phy (PLL0) to match both the PHY slave mode and the upstream
+	 * bonded "PLL0 drives both links" topology. dsi_pll_byte/dsi_pll_pixel
+	 * entries below are the two CHANGED ones; everything else is restated
+	 * verbatim from sm8750.dtsi's mdss_dsi1.
+	 */
+	clocks = <&dispcc DISP_CC_MDSS_BYTE1_CLK>,
+		 <&dispcc DISP_CC_MDSS_BYTE1_INTF_CLK>,
+		 <&dispcc DISP_CC_MDSS_PCLK1_CLK>,
+		 <&dispcc DISP_CC_MDSS_ESC1_CLK>,
+		 <&dispcc DISP_CC_MDSS_AHB_CLK>,
+		 <&gcc GCC_DISP_HF_AXI_CLK>,
+		 <&mdss_dsi0_phy DSI_PIXEL_PLL_CLK>,
+		 <&mdss_dsi0_phy DSI_BYTE_PLL_CLK>,
+		 <&dispcc DISP_CC_ESYNC1_CLK>,
+		 <&dispcc DISP_CC_OSC_CLK>,
+		 <&dispcc DISP_CC_MDSS_BYTE1_CLK_SRC>,
+		 <&dispcc DISP_CC_MDSS_PCLK1_CLK_SRC>;
+
 	vdda-supply = <&vreg_l3g_1p2>;
 	qcom,dual-dsi-mode;
 	qcom,sync-dual-dsi;
