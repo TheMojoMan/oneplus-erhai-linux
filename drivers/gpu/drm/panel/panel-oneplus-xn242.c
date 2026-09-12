@@ -36,6 +36,16 @@ to_xn242(struct drm_panel *panel)
 	return container_of(panel, struct xn242, panel);
 }
 
+/*
+ * erhai: the NT36536 is an in-cell controller powered by these panel supplies;
+ * it must be put to sleep BEFORE the rails drop on display-off and re-initialized
+ * once they are back (see drivers/input/touchscreen/nt36523/nt36xxx.c).
+ */
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_NT36523_SPI)
+extern void nvt_ts_panel_power_off(void);
+extern void nvt_ts_panel_power_on(void);
+#endif
+
 static void xn242_apply_dsc_mode(struct xn242 *ctx);
 
 struct panel_desc {
@@ -512,6 +522,11 @@ static int xn242_enable(struct drm_panel *panel)
 
 	msleep(28);
 
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_NT36523_SPI)
+	/* erhai: rails are back (prepare() ran) — re-init the in-cell touch. */
+	nvt_ts_panel_power_on();
+#endif
+
 	return 0;
 }
 
@@ -520,6 +535,11 @@ static int xn242_disable(struct drm_panel *panel)
 	struct xn242 *ctx = to_xn242(panel);
 	struct device *dev = &ctx->dsi[0]->dev;
 	int ret;
+
+#if IS_ENABLED(CONFIG_TOUCHSCREEN_NT36523_SPI)
+	/* erhai: in-cell touch shares these supplies — sleep it BEFORE they drop. */
+	nvt_ts_panel_power_off();
+#endif
 
 	ctx->enabled = false;
 	ret = xn242_off(ctx);
