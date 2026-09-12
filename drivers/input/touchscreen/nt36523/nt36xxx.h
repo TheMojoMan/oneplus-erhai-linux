@@ -262,4 +262,8 @@ void Boot_Update_Firmware(struct work_struct *work);
 extern void nvt_esd_check_enable(uint8_t enable);
 #endif /* #if NVT_TOUCH_ESD_PROTECT */
 
+/* erhai: panel-power integration (XN242 panel calls these on display off/on) */
+void nvt_ts_panel_power_off(void);
+void nvt_ts_panel_power_on(void);
+
 #endif /* _LINUX_NVT_TOUCH_H */
