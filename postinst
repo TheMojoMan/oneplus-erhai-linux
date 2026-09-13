@@ -22,10 +22,11 @@ fi
 
 CLEAN_KVER="${KVER//-sm8750-themojoman/}"
 
-# erhai UKI file naming: use the +b<N> Debian revision as the EFI filename
-# (b42.efi, b43.efi, ...) so the rEFInd menu clearly identifies which build is
-# booted (owner request 2026-09-13). Fall back to the release-based name when
-# there is no +b<N> (e.g. a base image build).
+# erhai UKI file naming: use the +b<N> Debian revision as part of the EFI
+# filename (<release>-b<N>.efi, e.g. 7.3.0-rc2-b1.efi, b2, ...) so the rEFInd
+# menu clearly identifies which build+kernel is booted (owner request
+# 2026-09-13). Fall back to the release-based name when there is no +b<N>
+# (e.g. a base image build).
 DEB_REV="${FULLVER##*+b}"
 if [ "$DEB_REV" = "$FULLVER" ]; then
     DEB_REV=""
@@ -50,7 +51,7 @@ fi
 #    regulators, which turns into a racy PLL-lock failure and a boot that wedges
 #    before the rootfs.
 if [ -n "$DEB_REV" ]; then
-    OUTPUT_EFI="b${DEB_REV}.efi"
+    OUTPUT_EFI="${CLEAN_KVER}-b${DEB_REV}.efi"
 else
     OUTPUT_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
 fi
