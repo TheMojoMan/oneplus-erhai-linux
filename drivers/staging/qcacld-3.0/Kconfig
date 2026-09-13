@@ -1039,10 +1039,6 @@ config HIF_DETECTION_LATENCY_ENABLE
 	bool "Enable HIF_DETECTION_LATENCY_ENABLE"
 	default n
 
-config SMP
-	bool "enable CONFIG_SMP"
-	default n
-
 config SOFTAP_CHANNEL_RANGE
 	bool "Enable SOFTAP_CHANNEL_RANGE"
 	default n
