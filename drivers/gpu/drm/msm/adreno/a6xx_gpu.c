@@ -1565,6 +1565,7 @@ static void a6xx_recover(struct msm_gpu *gpu)
 	struct a6xx_gmu *gmu = &a6xx_gpu->gmu;
 	int active_submits;
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 1 (dump)\n");
 	adreno_dump_info(gpu);
 
 	if (adreno_gpu->funcs->gx_is_on(adreno_gpu)) {
@@ -1588,6 +1589,7 @@ static void a6xx_recover(struct msm_gpu *gpu)
 	/* active_submit won't change until we make a submission */
 	mutex_lock(&gpu->active_lock);
 	active_submits = gpu->active_submits;
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 2 (active=%d)\n", active_submits);
 
 	/*
 	 * Temporarily clear active_submits count to silence a WARN() in the
@@ -1604,9 +1606,11 @@ static void a6xx_recover(struct msm_gpu *gpu)
 		a6xx_gpu_sw_reset(gpu, false);
 	}
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 3 (notifier+synced poweroff)\n");
 	reinit_completion(&gmu->pd_gate);
 	dev_pm_genpd_add_notifier(gmu->cxpd, &gmu->pd_nb);
 	dev_pm_genpd_synced_poweroff(gmu->cxpd);
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 4 (pm put)\n");
 
 	/* Drop the rpm refcount from active submits */
 	if (active_submits)
@@ -1614,9 +1618,11 @@ static void a6xx_recover(struct msm_gpu *gpu)
 
 	/* And the final one from recover worker */
 	pm_runtime_put_sync(&gpu->pdev->dev);
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 5 (pd_gate wait)\n");
 
 	if (!wait_for_completion_timeout(&gmu->pd_gate, msecs_to_jiffies(1000)))
-		DRM_DEV_ERROR(&gpu->pdev->dev, "cx gdsc didn't collapse\n");
+		DRM_DEV_ERROR(&gpu->pdev->dev, "erhai: recover step 5T - cx gdsc didn't collapse\n");
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 6 (notifier out)\n");
 
 	dev_pm_genpd_remove_notifier(gmu->cxpd);
 
@@ -1625,13 +1631,16 @@ static void a6xx_recover(struct msm_gpu *gpu)
 	if (active_submits)
 		pm_runtime_get(&gpu->pdev->dev);
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 7 (resume)\n");
 	pm_runtime_get_sync(&gpu->pdev->dev);
 
 	gpu->active_submits = active_submits;
 	mutex_unlock(&gpu->active_lock);
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 8 (hw init)\n");
 	msm_gpu_hw_init(gpu);
 	a6xx_gpu->hung = false;
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover COMPLETED\n");
 }
 
 static const char *a6xx_uche_fault_block(struct msm_gpu *gpu, u32 mid)
