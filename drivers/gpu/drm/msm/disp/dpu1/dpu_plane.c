@@ -1513,6 +1513,9 @@ static void dpu_plane_sspp_update_pipe(struct drm_plane *plane,
 	struct drm_plane_state *state = plane->state;
 	struct dpu_plane_state *pstate = to_dpu_plane_state(state);
 
+	DRM_DEV_INFO(plane->dev->dev,
+		     "erhai-b6: sspp_update_pipe sspp=%d fmt=%p4cc\n",
+		     pipe->sspp ? pipe->sspp->idx : -1, layout ? &fmt->pixel_format : NULL);
 	if (layout && pipe->sspp->ops.setup_sourceaddress) {
 		trace_dpu_plane_set_scanout(pipe, layout);
 		pipe->sspp->ops.setup_sourceaddress(pipe, layout);
@@ -1601,10 +1604,19 @@ static void dpu_plane_sspp_atomic_update(struct drm_plane *plane,
 	for (i = 0; i < PIPES_PER_PLANE; i++) {
 		if (!drm_rect_width(&pstate->pipe_cfg[i].src_rect))
 			continue;
+		DRM_DEV_INFO(plane->dev->dev,
+			     "erhai-b6: plane[%d] sspp_atomic_update pipe%d (w=%d h=%d, sspp=%d)\n",
+			     plane->base.id, i,
+			     drm_rect_width(&pstate->pipe_cfg[i].src_rect),
+			     drm_rect_height(&pstate->pipe_cfg[i].src_rect),
+			     pstate->pipe[i].sspp ? pstate->pipe[i].sspp->idx : -1);
 		dpu_plane_sspp_update_pipe(plane, &pstate->pipe[i],
 					   &pstate->pipe_cfg[i], fmt,
 					   drm_mode_vrefresh(&crtc->mode),
 					   &pstate->layout);
+		DRM_DEV_INFO(plane->dev->dev,
+			     "erhai-b6: plane[%d] pipe%d update done\n",
+			     plane->base.id, i);
 	}
 
 	if (pstate->needs_qos_remap)
@@ -1664,6 +1676,11 @@ static void dpu_plane_atomic_update(struct drm_plane *plane,
 
 	pdpu->is_error = false;
 
+	DRM_DEV_INFO(plane->dev->dev,
+		     "erhai-b6: plane[%d] atomic_update enter fb=%d visible=%d\n",
+		     plane->base.id,
+		     new_state->fb ? new_state->fb->base.id : -1,
+		     new_state->visible);
 	DPU_DEBUG_PLANE(pdpu, "\n");
 
 	if (!new_state->visible) {
@@ -1671,6 +1688,8 @@ static void dpu_plane_atomic_update(struct drm_plane *plane,
 	} else {
 		dpu_plane_sspp_atomic_update(plane, new_state);
 	}
+	DRM_DEV_INFO(plane->dev->dev, "erhai-b6: plane[%d] atomic_update done\n",
+		     plane->base.id);
 }
 
 static void dpu_plane_destroy_state(struct drm_plane *plane,
