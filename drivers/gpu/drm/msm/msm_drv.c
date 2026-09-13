@@ -229,7 +229,11 @@ struct drm_gpuvm *msm_context_vm(struct drm_device *dev, struct msm_context *ctx
 	if (vm)
 		return vm;
 
+	DRM_DEV_INFO(dev->dev, "erhai: step context_vm create ctx=%p\n", ctx);
+
 	guard(rwsem_write)(&ctx->ctxlock);
+
+	DRM_DEV_INFO(dev->dev, "erhai: step context_vm lock ctx=%p\n", ctx);
 
 	if (!ctx->vm) {
 		vm = msm_gpu_create_private_vm(
@@ -237,6 +241,8 @@ struct drm_gpuvm *msm_context_vm(struct drm_device *dev, struct msm_context *ctx
 		if (!IS_ERR_OR_NULL(vm))
 			smp_store_release(&ctx->vm, vm);
 	}
+
+	DRM_DEV_INFO(dev->dev, "erhai: step context_vm done vm=%p\n", ctx->vm);
 
 	return ctx->vm;
 }
@@ -305,6 +311,7 @@ static int msm_ioctl_get_param(struct drm_device *dev, void *data,
 	struct msm_drm_private *priv = dev->dev_private;
 	struct drm_msm_param *args = data;
 	struct msm_gpu *gpu;
+	int ret;
 
 	/* for now, we just have 3d pipe.. eventually this would need to
 	 * be more clever to dispatch to appropriate gpu module:
@@ -317,8 +324,13 @@ static int msm_ioctl_get_param(struct drm_device *dev, void *data,
 	if (!gpu)
 		return -ENXIO;
 
-	return gpu->funcs->get_param(gpu, file->driver_priv,
-				     args->param, &args->value, &args->len);
+	DRM_DEV_INFO(dev->dev, "erhai: step ioctl get_param pipe=%d param=0x%x len=%u\n",
+		     args->pipe, args->param, args->len);
+	ret = gpu->funcs->get_param(gpu, file->driver_priv,
+				    args->param, &args->value, &args->len);
+	DRM_DEV_INFO(dev->dev, "erhai: step ioctl get_param ret=%d\n", ret);
+
+	return ret;
 }
 
 static int msm_ioctl_set_param(struct drm_device *dev, void *data,
@@ -345,6 +357,9 @@ static int msm_ioctl_gem_new(struct drm_device *dev, void *data,
 {
 	struct drm_msm_gem_new *args = data;
 	uint32_t flags = args->flags;
+
+	DRM_DEV_INFO(dev->dev, "erhai: step ioctl gem_new size=%llu flags=0x%x\n",
+		     (unsigned long long)args->size, flags);
 
 	if (args->flags & ~MSM_BO_FLAGS) {
 		DRM_ERROR("invalid flags: %08x\n", args->flags);
@@ -570,6 +585,9 @@ static int msm_ioctl_gem_info(struct drm_device *dev, void *data,
 	struct msm_gem_object *msm_obj;
 	int i, ret = 0;
 
+	DRM_DEV_INFO(dev->dev, "erhai: step ioctl gem_info info=0x%x handle=%u\n",
+		     args->info, args->handle);
+
 	if (args->pad)
 		return -EINVAL;
 
@@ -604,7 +622,9 @@ static int msm_ioctl_gem_info(struct drm_device *dev, void *data,
 		    args->value = drm_vma_node_offset_addr(&obj->vma_node);
 		break;
 	case MSM_INFO_GET_IOVA:
+		DRM_DEV_INFO(dev->dev, "erhai: step gem_info get_iova begin\n");
 		ret = msm_ioctl_gem_info_iova(dev, file, obj, &args->value);
+		DRM_DEV_INFO(dev->dev, "erhai: step gem_info get_iova ret=%d\n", ret);
 		break;
 	case MSM_INFO_SET_IOVA:
 		ret = msm_ioctl_gem_info_set_iova(dev, file, obj, args->value);
@@ -772,6 +792,9 @@ static int msm_ioctl_submitqueue_new(struct drm_device *dev, void *data,
 		struct drm_file *file)
 {
 	struct drm_msm_submitqueue *args = data;
+
+	DRM_DEV_INFO(dev->dev, "erhai: step ioctl submitqueue_new flags=0x%x\n",
+		     args->flags);
 
 	if (args->flags & ~MSM_SUBMITQUEUE_FLAGS)
 		return -EINVAL;

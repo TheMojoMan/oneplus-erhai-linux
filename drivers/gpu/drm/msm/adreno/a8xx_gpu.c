@@ -1401,11 +1401,16 @@ u64 a8xx_gmu_get_timestamp(struct msm_gpu *gpu)
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
 	u64 count_hi, count_lo, temp;
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step a8xx_gmu_ts enter\n");
+
 	do {
 		count_hi = gmu_read(&a6xx_gpu->gmu, REG_A8XX_GMU_ALWAYS_ON_COUNTER_H);
 		count_lo = gmu_read(&a6xx_gpu->gmu, REG_A8XX_GMU_ALWAYS_ON_COUNTER_L);
 		temp = gmu_read(&a6xx_gpu->gmu, REG_A8XX_GMU_ALWAYS_ON_COUNTER_H);
 	} while (unlikely(count_hi != temp));
+
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step a8xx_gmu_ts done %llu\n",
+		     (unsigned long long)((count_hi << 32) | count_lo));
 
 	return (count_hi << 32) | count_lo;
 }
