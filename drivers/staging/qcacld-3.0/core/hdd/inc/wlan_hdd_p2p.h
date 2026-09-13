@@ -47,7 +47,7 @@ struct p2p_app_set_ps {
 int wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy,
 					struct wireless_dev *wdev,
 					struct ieee80211_channel *chan,
-					unsigned int duration, u64 *cookie,
+					unsigned int duration, u64 cookie,
 					const u8 *rx_addr);
 
 int wlan_hdd_cfg80211_cancel_remain_on_channel(struct wiphy *wiphy,
@@ -80,7 +80,7 @@ void hdd_indicate_mgmt_frame_to_user(struct wlan_hdd_link_info *link_info,
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0))
 int wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
-		     struct cfg80211_mgmt_tx_params *params, u64 *cookie);
+		     struct cfg80211_mgmt_tx_params *params, u64 cookie);
 #else
 int wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 		     struct ieee80211_channel *chan, bool offchan,

@@ -33414,7 +33414,7 @@ static int wlan_hdd_cfg80211_tx_control_port(struct wiphy *wiphy,
 					     size_t len,
 					     const u8 *dest, const __be16 proto,
 					     bool unencrypted, int link_id,
-					     u64 *cookie)
+					     u64 cookie)
 {
 	struct hdd_adapter *adapter = WLAN_HDD_GET_PRIV_PTR(dev);
 
