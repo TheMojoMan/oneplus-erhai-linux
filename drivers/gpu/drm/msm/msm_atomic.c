@@ -319,6 +319,8 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
 	bool async = can_do_async(state, &async_crtc);
 
 	trace_msm_atomic_commit_tail_start(async, crtc_mask);
+	DRM_DEV_INFO(dev->dev, "erhai-b6: commit_tail ENTER crtc=%x async=%d\n",
+		     crtc_mask, async);
 
 	kms->funcs->enable_commit(kms);
 
@@ -330,6 +332,7 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
 	trace_msm_atomic_wait_flush_start(crtc_mask);
 	kms->funcs->wait_flush(kms, crtc_mask);
 	trace_msm_atomic_wait_flush_finish(crtc_mask);
+	DRM_DEV_INFO(dev->dev, "erhai-b6: commit_tail prev-flush done\n");
 
 	atomic_set(&kms->fault_snapshot_capture, 0);
 
@@ -343,10 +346,14 @@ void msm_atomic_commit_tail(struct drm_atomic_commit *state)
 	/*
 	 * Push atomic updates down to hardware:
 	 */
+	DRM_DEV_INFO(dev->dev, "erhai-b6: commit_tail MODESET_DISABLES begin\n");
 	drm_atomic_helper_commit_modeset_disables(dev, state);
 	msm_atomic_commit_seamless_dfps(state);
+	DRM_DEV_INFO(dev->dev, "erhai-b6: commit_tail COMMIT_PLANES begin\n");
 	drm_atomic_helper_commit_planes(dev, state, 0);
+	DRM_DEV_INFO(dev->dev, "erhai-b6: commit_tail COMMIT_PLANES done\n");
 	drm_atomic_helper_commit_modeset_enables(dev, state);
+	DRM_DEV_INFO(dev->dev, "erhai-b6: commit_tail MODESET_ENABLES done\n");
 
 	if (async) {
 		struct msm_pending_timer *timer =
@@ -420,5 +427,6 @@ fallback:
 	drm_atomic_helper_commit_hw_done(state);
 	drm_atomic_helper_cleanup_planes(dev, state);
 
+	DRM_DEV_INFO(dev->dev, "erhai-b6: commit_tail DONE\n");
 	trace_msm_atomic_commit_tail_finish(async, crtc_mask);
 }
