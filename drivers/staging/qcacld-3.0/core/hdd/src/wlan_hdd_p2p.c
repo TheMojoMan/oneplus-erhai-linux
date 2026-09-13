@@ -243,11 +243,14 @@ static int __wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy,
 	return qdf_status_to_os_return(status);
 }
 
-/* PORT 7.2: remain_on_channel gained const u8 *rx_addr (unused) */
+/* PORT 7.3: cfg80211 remain_on_channel now passes the cookie BY VALUE (and
+ * rx_addr). The driver still generates its own cookie internally (P2P/ROC),
+ * so the incoming value is used as scratch for the internal pointer API.
+ */
 int wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy,
 					struct wireless_dev *wdev,
 					struct ieee80211_channel *chan,
-					unsigned int duration, u64 *cookie,
+					unsigned int duration, u64 cookie,
 					const u8 *rx_addr)
 {
 	int errno;
@@ -258,7 +261,7 @@ int wlan_hdd_cfg80211_remain_on_channel(struct wiphy *wiphy,
 		return errno;
 
 	errno = __wlan_hdd_cfg80211_remain_on_channel(wiphy, wdev, chan,
-						      duration, cookie);
+						      duration, &cookie);
 
 	osif_vdev_sync_op_stop(vdev_sync);
 
@@ -489,8 +492,11 @@ off_chan_tx:
 }
 
 #if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0))
+/* PORT 7.3: cfg80211 mgmt_tx now passes the cookie BY VALUE; the driver
+ * still generates its own cookie internally (see __wlan_hdd_mgmt_tx).
+ */
 int wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
-		     struct cfg80211_mgmt_tx_params *params, u64 *cookie)
+		     struct cfg80211_mgmt_tx_params *params, u64 cookie)
 #else
 int wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 		     struct ieee80211_channel *chan, bool offchan,
@@ -512,12 +518,12 @@ int wlan_hdd_mgmt_tx(struct wiphy *wiphy, struct wireless_dev *wdev,
 	errno = __wlan_hdd_mgmt_tx(wiphy, wdev, params->chan, params->offchan,
 				   params->wait, params->buf, params->len,
 				   params->no_cck, params->dont_wait_for_ack,
-				   cookie, link_id);
+				   &cookie, link_id);
 #elif (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 14, 0))
 	errno = __wlan_hdd_mgmt_tx(wiphy, wdev, params->chan, params->offchan,
 				   params->wait, params->buf, params->len,
 				   params->no_cck, params->dont_wait_for_ack,
-				   cookie, link_id);
+				   &cookie, link_id);
 #else
 	errno = __wlan_hdd_mgmt_tx(wiphy, wdev, chan, offchan,
 				   wait, buf, len, no_cck,

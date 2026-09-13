@@ -373,7 +373,15 @@ void
 qdf_thread_cpumap_print_to_pagebuf(bool list, char *new_mask_str,
 				   qdf_cpu_mask *new_mask)
 {
-	cpumap_print_to_pagebuf(list, new_mask_str, new_mask);
+	/* PORT 7.3: cpumap_print_to_pagebuf() was removed upstream; use the
+	 * buf-based _to_buf() variants (return written bytes, ignored here).
+	 */
+	if (list)
+		cpumap_print_list_to_buf(new_mask_str, new_mask,
+					 PAGE_SIZE, 0);
+	else
+		cpumap_print_bitmask_to_buf(new_mask_str, new_mask,
+					    PAGE_SIZE, 0);
 }
 
 qdf_export_symbol(qdf_thread_cpumap_print_to_pagebuf);

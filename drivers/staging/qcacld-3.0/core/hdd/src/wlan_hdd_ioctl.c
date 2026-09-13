@@ -884,7 +884,7 @@ hdd_sendactionframe(struct hdd_adapter *adapter, const uint8_t *bssid,
 	params.len = frame_len;
 	params.no_cck = 1;
 	params.dont_wait_for_ack = 1;
-	ret = wlan_hdd_mgmt_tx(NULL, &adapter->wdev, &params, &cookie);
+	ret = wlan_hdd_mgmt_tx(NULL, &adapter->wdev, &params, cookie);
 #else
 	ret = wlan_hdd_mgmt_tx(NULL,
 			       &(adapter->wdev),

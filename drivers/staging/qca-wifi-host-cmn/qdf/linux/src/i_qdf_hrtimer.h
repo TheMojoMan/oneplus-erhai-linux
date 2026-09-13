@@ -27,6 +27,7 @@
 
 #include <linux/version.h>
 #include <linux/delay.h>
+#include <linux/hrtimer_bases.h>
 #include <linux/timer.h>
 #include <linux/jiffies.h>
 #include <qdf_types.h>
