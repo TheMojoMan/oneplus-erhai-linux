@@ -383,6 +383,8 @@ static int a6xx_gmu_start(struct a6xx_gmu *gmu)
 	u32 mask, reset_val, val;
 	int ret, i;
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step gmu_start enter\n");
+
 	for (i = 0; i < 4; i++) {
 		val = gmu_read(gmu, REG_A6XX_GMU_CM3_DTCM_START + 0xff8);
 		if (val <= 0x20010004) {
@@ -418,6 +420,8 @@ static int a6xx_gmu_start(struct a6xx_gmu *gmu)
 		 */
 		ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_CM3_FW_INIT_RESULT,
 			val, (val & mask) == reset_val, 100, 100000);
+		DRM_DEV_INFO(gmu->dev, "erhai: step gmu_start attempt %d ret=%d\n",
+			     i + 1, ret);
 		if (!ret)
 			break;
 
@@ -429,6 +433,8 @@ static int a6xx_gmu_start(struct a6xx_gmu *gmu)
 		DRM_DEV_ERROR(gmu->dev, "GMU firmware initialization timed out\n");
 
 	set_bit(GMU_STATUS_FW_START, &gmu->status);
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step gmu_start done ret=%d\n", ret);
 
 	return ret;
 }
@@ -1111,6 +1117,8 @@ static int a6xx_gmu_fw_start(struct a6xx_gmu *gmu, unsigned int state)
 		gmu_write(gmu, REG_A8XX_GPU_GMU_CX_GMU_CX_FAL_INTF, 1);
 	}
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step fw_start enter state=%u\n", state);
+
 	/* Turn on TCM (Tightly Coupled Memory) retention */
 	if (adreno_is_a7xx(adreno_gpu))
 		a6xx_cx_misc_write(a6xx_gpu, REG_A7XX_CX_MISC_TCM_RET_CNTL, 1);
@@ -1207,7 +1215,10 @@ static int a6xx_gmu_fw_start(struct a6xx_gmu *gmu, unsigned int state)
 	/* Set up the lowest idle level on the GMU */
 	a6xx_gmu_power_config(gmu);
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step fw_start power_config done\n");
+
 	ret = a6xx_gmu_start(gmu);
+	DRM_DEV_INFO(gmu->dev, "erhai: step fw_start boot ret=%d\n", ret);
 	if (ret)
 		return ret;
 
@@ -1222,11 +1233,16 @@ static int a6xx_gmu_fw_start(struct a6xx_gmu *gmu, unsigned int state)
 	}
 
 	ret = a6xx_gmu_hfi_start(gmu);
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step fw_start hfi ret=%d\n", ret);
+
 	if (ret)
 		return ret;
 
 	/* FIXME: Do we need this wmb() here? */
 	wmb();
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step fw_start done\n");
 
 	return 0;
 }
@@ -1500,6 +1516,8 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 
 	if (WARN(!gmu->initialized, "The GMU is not set up yet\n"))
 		return -EINVAL;
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step gmu_resume enter\n");
 
 	/*
 	 * erhai bring-up gate: refuse the GMU hardware boot unless explicitly
