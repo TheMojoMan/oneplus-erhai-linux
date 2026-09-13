@@ -1557,9 +1557,13 @@ static int a6xx_hw_init(struct msm_gpu *gpu)
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
 	int ret;
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step hw_init enter\n");
+
 	mutex_lock(&a6xx_gpu->gmu.lock);
 	ret = hw_init(gpu);
 	mutex_unlock(&a6xx_gpu->gmu.lock);
+
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step hw_init ret=%d\n", ret);
 
 	return ret;
 }
@@ -2159,9 +2163,14 @@ static int a6xx_gmu_pm_resume(struct msm_gpu *gpu)
 
 	trace_msm_gpu_resume(0);
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_resume enter\n");
+
 	mutex_lock(&a6xx_gpu->gmu.lock);
 	ret = a6xx_gmu_resume(a6xx_gpu);
 	mutex_unlock(&a6xx_gpu->gmu.lock);
+
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_resume gmu_resume ret=%d\n", ret);
+
 	if (ret)
 		return ret;
 
