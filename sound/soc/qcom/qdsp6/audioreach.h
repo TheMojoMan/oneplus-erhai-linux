@@ -614,6 +614,7 @@ struct param_id_hw_ep_frame_duration {
 	uint32_t allow_frame_duration_normalization;
 	uint32_t min_normalized_frame_dur_us;
 	uint32_t max_normalized_frame_dur_us;
+} __packed;
 
 /* TDM interface (MODULE_ID_TDM_SINK / MODULE_ID_TDM_SOURCE) */
 #define TDM_INTF_TYPE_PRIMARY		0
