@@ -1248,10 +1248,6 @@ static int audioreach_tdm_set_media_format(struct q6apm_graph *graph,
 	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
 }
 
-
-	return q6apm_send_cmd_sync(graph->apm, pkt, 0);
-}
-
 static int audioreach_logging_set_media_format(struct q6apm_graph *graph,
 					       const struct audioreach_module *module)
 {

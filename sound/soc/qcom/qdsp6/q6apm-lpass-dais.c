@@ -479,17 +479,6 @@ static const struct snd_soc_dai_ops q6hdmi_ops = {
 	.trigger	= q6apm_lpass_dai_trigger,
 };
 
-static const struct snd_soc_dai_ops q6tdm_ops = {
-	.prepare	= q6apm_lpass_dai_prepare,
-	.startup	= q6apm_lpass_dai_startup,
-	.shutdown	= q6i2s_lpass_dai_shutdown,
-	.set_tdm_slot	= q6tdm_set_tdm_slot,
-	.hw_params	= q6dma_hw_params,
-	.set_fmt	= q6i2s_set_fmt,
-	.set_sysclk	= q6i2s_set_sysclk,
-	.trigger	= q6apm_lpass_dai_trigger,
-};
-
 static const struct snd_soc_component_driver q6apm_lpass_dai_component = {
 	.name = "q6apm-be-dai-component",
 	.of_xlate_dai_name = q6dsp_audio_ports_of_xlate_dai_name,
