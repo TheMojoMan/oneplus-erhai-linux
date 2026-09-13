@@ -500,6 +500,7 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
 	int ret;
 	u32 val;
 	int request, ack;
+	int attempt;
 
 	WARN_ON_ONCE(!mutex_is_locked(&gmu->lock));
 
@@ -524,26 +525,47 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
 		}
 	}
 
-	/* Trigger the equested OOB operation */
-	gmu_write(gmu, REG_A6XX_GMU_HOST2GMU_INTR_SET, 1 << request);
+	/*
+	 * erhai: retry the OOB handshake a bounded number of times. The a8xx
+	 * GMU can drop the ack under load / a slow resume; a single 10 ms poll
+	 * then spuriously times out and the caller treats an otherwise fine
+	 * GMU as wedged (feeding the OOB-timeout storm that preceded the
+	 * hangcheck lockups on 2026-09-12). Mirrors the CM3-boot retry in
+	 * a6xx_gmu_start(): a glitchy handshake self-heals instead of wedging.
+	 */
+	for (attempt = 0; attempt < 3; attempt++) {
+		/* Trigger the requested OOB operation */
+		gmu_write(gmu, REG_A6XX_GMU_HOST2GMU_INTR_SET, 1 << request);
 
-	do {
-		/* Wait for the acknowledge interrupt */
-		ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO, val,
-			val & (1 << ack), 100, 10000);
+		do {
+			/* Wait for the acknowledge interrupt */
+			ret = gmu_poll_timeout(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO, val,
+				val & (1 << ack), 100, 10000);
+
+			if (!ret)
+				break;
+
+			if (completion_done(&a6xx_gpu->base.fault_coredump_done))
+				break;
+
+			/* We may timeout because the GMU is temporarily wedged from
+			 * pending faults from the GPU and we are taking a devcoredump.
+			 * Wait until the MMU is resumed and try again.
+			 */
+			wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
+		} while (true);
 
 		if (!ret)
 			break;
 
-		if (completion_done(&a6xx_gpu->base.fault_coredump_done))
-			break;
+		/* Clear the acknowledge interrupt before trying again */
+		gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, 1 << ack);
 
-		/* We may timeout because the GMU is temporarily wedged from
-		 * pending faults from the GPU and we are taking a devcoredump.
-		 * Wait until the MMU is resumed and try again.
-		 */
-		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
-	} while (true);
+		if (attempt < 2)
+			DRM_DEV_INFO(gmu->dev,
+				"erhai: GMU OOB set %s attempt %d/3 timed out, retrying\n",
+				a6xx_gmu_oob_bits[state].name, attempt + 1);
+	}
 
 	if (ret)
 		DRM_DEV_ERROR(gmu->dev,
@@ -553,6 +575,27 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
 
 	/* Clear the acknowledge interrupt */
 	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, 1 << ack);
+
+	/*
+	 * erhai: runtime GMU wedge escalation. The observed killer
+	 * (2026-09-12 #86 boot -2 00:02, boot -1 00:04) is the a8xx GMU
+	 * silently refusing to ack OOB at runtime — no WDOG_BITE / CM3_FAULT
+	 * IRQ, just three 10 ms GPU_SET timeouts -> hangcheck "gpu lockup
+	 * rb 0" with uncompleted fences -> recover_worker -> "gpu fault
+	 * iova=0x0" -> frozen display with an otherwise-alive system, because
+	 * the graceful a6xx_gmu_shutdown()'s own OOB retry also times out and
+	 * the CX gdsc never collapses. Escalate immediately instead: mark the
+	 * GMU hung and queue the recover work so the full force_off (CM3
+	 * sysreset + RPMh stop) + cold re-boot path runs instead of the
+	 * graceful-but-wedged one. gmu->hung gates this to one report per
+	 * wedge (recovery clears it on the next resume).
+	 */
+	if (ret && !gmu->hung) {
+		DRM_DEV_INFO(gmu->dev,
+			"erhai: GMU OOB set %s wedged after 3 attempts - escalating to full GPU recovery\n",
+			a6xx_gmu_oob_bits[state].name);
+		a6xx_gmu_fault(gmu);
+	}
 
 	return ret;
 }
