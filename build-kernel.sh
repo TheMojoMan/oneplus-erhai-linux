@@ -108,7 +108,7 @@ build_kernel() {
 }
 
 # ----------------------------------------------------------------- package ---
-# Debian revision: the kernelrelease stays frozen at 7.2.0-sm8750-themojoman
+# Debian revision: the kernelrelease stays frozen at 7.3.0-rc2-sm8750-themojoman
 # (stable vermagic, module paths and UKI name), so the .deb Version cannot be
 # the kernelrelease alone -- two builds would compare equal and apt would
 # never offer an upgrade. A "+b<N>" Debian revision is therefore appended to
