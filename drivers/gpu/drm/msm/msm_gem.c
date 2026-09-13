@@ -1140,6 +1140,9 @@ int msm_gem_new_handle(struct drm_device *dev, struct drm_file *file,
 	struct drm_gem_object *obj, *r_obj = NULL;
 	int ret;
 
+	DRM_DEV_INFO(dev->dev, "erhai: step gem_new_handle size=%zu flags=0x%x\n",
+		     size, flags);
+
 	if (flags & MSM_BO_NO_SHARE) {
 		struct msm_drm_private *priv = dev->dev_private;
 		struct msm_context *ctx = file->driver_priv;
