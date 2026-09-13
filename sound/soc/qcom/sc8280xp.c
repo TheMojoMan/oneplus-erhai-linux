@@ -173,7 +173,7 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	}
 
 	return 0;
-
+}
 
 /*
  * The AW88261 amplifiers on the secondary TDM bus need a running LPAIF bit
@@ -394,7 +394,7 @@ static int ayaneo_ps2_snd_prepare(struct snd_pcm_substream *substream)
 	return snd_soc_dai_set_channel_map(cpu_dai, 0, NULL,
 					   ARRAY_SIZE(ayaneo_ps2_channels_mapping),
 					   ayaneo_ps2_channels_mapping);
-
+}
 
 /*
  * For SoundWire capture backends the ADSP codec_dma interface must be told
