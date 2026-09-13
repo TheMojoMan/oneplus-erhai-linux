@@ -371,6 +371,9 @@ int adreno_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
 	/* Note ctx can be NULL when called from rd_open(): */
 	struct drm_gpuvm *vm = ctx ? msm_context_vm(drm, ctx) : NULL;
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step adreno_get_param param=0x%x ctx=%p vm=%p\n",
+		     param, ctx, vm);
+
 	/* No pointer params yet */
 	if (*len != 0)
 		return UERR(EINVAL, drm, "invalid len");
@@ -408,8 +411,12 @@ int adreno_get_param(struct msm_gpu *gpu, struct msm_context *ctx,
 		return 0;
 	case MSM_PARAM_TIMESTAMP:
 		if (adreno_gpu->funcs->get_timestamp) {
+			DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step ts pm_get\n");
 			pm_runtime_get_sync(&gpu->pdev->dev);
+			DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step ts read\n");
 			*value = adreno_gpu->funcs->get_timestamp(gpu);
+			DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step ts got %llu\n",
+				     (unsigned long long)*value);
 			pm_runtime_put_autosuspend(&gpu->pdev->dev);
 
 			return 0;

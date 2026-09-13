@@ -178,6 +178,9 @@ int msm_submitqueue_create(struct drm_device *drm, struct msm_context *ctx,
 	unsigned ring_nr;
 	int ret;
 
+	DRM_DEV_INFO(drm->dev, "erhai: step submitqueue_create prio=%u flags=0x%x\n",
+		     prio, flags);
+
 	if (!ctx)
 		return -ENODEV;
 
