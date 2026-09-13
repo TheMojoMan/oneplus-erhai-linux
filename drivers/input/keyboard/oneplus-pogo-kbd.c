@@ -26,6 +26,7 @@
 #include <linux/workqueue.h>
 #include <linux/input/mt.h>
 #include <linux/interrupt.h>
+#include <linux/kobject.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
 #include <linux/of.h>
@@ -770,6 +771,13 @@ static void pogo_kbd_poll_work(struct work_struct *work)
 	if (kb->attached != alive) {
 		kb->attached = alive;
 		dev_info(kb->dev, "keyboard %s\n", alive ? "attached" : "detached");
+		/*
+		 * Emit a CHANGE uevent so udev/systemd can react to the edge
+		 * (71-erhai-folio-udev.rules starts/stops the fold watcher).
+		 * Previously only the sysfs attribute flipped and userspace had
+		 * to poll it (erhai-folio-gate.service).
+		 */
+		kobject_uevent(&kb->dev->kobj, KOBJ_CHANGE);
 	}
 
 	if (!alive) {
