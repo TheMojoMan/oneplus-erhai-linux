@@ -2244,6 +2244,8 @@ static int a6xx_gmu_pm_suspend(struct msm_gpu *gpu)
 
 	trace_msm_gpu_suspend(0);
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_suspend enter\n");
+
 	a6xx_llc_deactivate(a6xx_gpu);
 
 	msm_devfreq_suspend(gpu);
@@ -2251,6 +2253,9 @@ static int a6xx_gmu_pm_suspend(struct msm_gpu *gpu)
 	mutex_lock(&a6xx_gpu->gmu.lock);
 	ret = a6xx_gmu_stop(a6xx_gpu);
 	mutex_unlock(&a6xx_gpu->gmu.lock);
+
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_suspend stop ret=%d\n", ret);
+
 	if (ret)
 		return ret;
 

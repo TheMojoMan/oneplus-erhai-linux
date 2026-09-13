@@ -788,11 +788,26 @@ static void a6xx_rpmh_stop(struct a6xx_gmu *gmu)
 	int ret;
 	u32 val;
 
-	if (!test_and_clear_bit(GMU_STATUS_FW_START, &gmu->status))
-		return;
-
+	/*
+	 * erhai b4: restore the 7.2 skip. d9108bfdb7 inverted this check and
+	 * the RSC power-off poll ("Unable to power off the GPU RSC", 1s
+	 * timeout) fires on every runtime suspend, leaves the RSC in an
+	 * ambiguous half-slept state -> GPU wedges -> firmware-monitor POR
+	 * (b2: ~30s after desktop; b3 with BIT(30)-for-a8xx: same error ~60s).
+	 * BIT(30) did not unblock the poll: the RSCC ack never lands while the
+	 * GPU PM holds its OOB perf vote (erhai_no_ifpc). Skip the RSC stop on
+	 * the FW-started (runtime suspend) path like 7.2; the cold paths
+	 * (FW_START clear) still issue the RSCC request.
+	 */
 	if (adreno_is_a840(adreno_gpu) || adreno_is_a8xx(adreno_gpu))
 		bitmask = BIT(30);
+
+	if (test_and_clear_bit(GMU_STATUS_FW_START, &gmu->status)) {
+		DRM_DEV_INFO(gmu->dev, "erhai: step rpmh_stop skip (fw_start=1)\n");
+		return;
+	}
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step rpmh_stop rsc-off bit=%u\n", bitmask);
 
 	gmu_write(gmu, REG_A6XX_GMU_RSCC_CONTROL_REQ, 1);
 
@@ -801,9 +816,13 @@ static void a6xx_rpmh_stop(struct a6xx_gmu *gmu)
 	if (ret)
 		DRM_DEV_ERROR(gmu->dev, "Unable to power off the GPU RSC\n");
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step rpmh_stop ret=%d\n", ret);
+
 	gmu_write(gmu, REG_A6XX_GMU_RSCC_CONTROL_REQ, 0);
 
 	set_bit(GMU_STATUS_PDC_SLEEP, &gmu->status);
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step rpmh_stop done\n");
 }
 
 static inline void pdc_write(void __iomem *ptr, u32 offset, u32 value)
@@ -1293,6 +1312,8 @@ static void a6xx_gmu_force_off(struct a6xx_gmu *gmu)
 	struct adreno_gpu *adreno_gpu = &a6xx_gpu->base;
 	struct msm_gpu *gpu = &adreno_gpu->base;
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step force_off enter\n");
+
 	/*
 	 * Turn off keep alive that might have been enabled by the hang
 	 * interrupt
@@ -1650,7 +1671,11 @@ static void a6xx_gmu_shutdown(struct a6xx_gmu *gmu)
 	if (test_and_clear_bit(GMU_STATUS_OOB_PERF_SET, &gmu->status))
 		a6xx_gmu_clear_oob(gmu, GMU_OOB_PERFCOUNTER_SET);
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown enter\n");
+
 	ret = a6xx_gmu_wait_for_idle(gmu);
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown idle ret=%d\n", ret);
 
 	/* If the GMU isn't responding assume it is hung */
 	if (ret)
@@ -1658,8 +1683,13 @@ static void a6xx_gmu_shutdown(struct a6xx_gmu *gmu)
 
 	adreno_gpu->funcs->bus_halt(adreno_gpu, a6xx_gpu->hung);
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown bus_halt done\n");
+
 	/* tell the GMU we want to slumber */
 	ret = a6xx_gmu_notify_slumber(gmu);
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown slumber ret=%d\n", ret);
+
 	if (ret)
 		goto force_off;
 
@@ -1681,6 +1711,8 @@ static void a6xx_gmu_shutdown(struct a6xx_gmu *gmu)
 			gmu_read(gmu,
 				REG_A6XX_GPU_GMU_AO_GPU_CX_BUSY_STATUS2));
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown gpubusy ret=%d\n", ret);
+
 	/* Turn off HFI */
 	a6xx_hfi_stop(gmu);
 
@@ -1690,12 +1722,17 @@ static void a6xx_gmu_shutdown(struct a6xx_gmu *gmu)
 	/* Halt the gmu cm3 core */
 	gmu_write(gmu, REG_A6XX_GMU_CM3_SYSRESET, 1);
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown cm3_reset done\n");
+
 	/* Tell RPMh to power off the GPU */
 	a6xx_rpmh_stop(gmu);
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown rpmh done\n");
 
 	return;
 
 force_off:
+	DRM_DEV_INFO(gmu->dev, "erhai: step shutdown FORCE_OFF path\n");
 	a6xx_gmu_force_off(gmu);
 }
 
@@ -1704,6 +1741,8 @@ int a6xx_gmu_stop(struct a6xx_gpu *a6xx_gpu)
 {
 	struct a6xx_gmu *gmu = &a6xx_gpu->gmu;
 	struct msm_gpu *gpu = &a6xx_gpu->base.base;
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step gmu_stop enter hung=%d\n", gmu->hung);
 
 	if (!pm_runtime_active(gmu->dev))
 		return 0;
@@ -1717,6 +1756,8 @@ int a6xx_gmu_stop(struct a6xx_gpu *a6xx_gpu)
 	else
 		a6xx_gmu_shutdown(gmu);
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step gmu_stop shutdown done\n");
+
 	/* Remove the bus vote */
 	dev_pm_opp_set_opp(&gpu->pdev->dev, NULL);
 
@@ -1727,9 +1768,13 @@ int a6xx_gmu_stop(struct a6xx_gpu *a6xx_gpu)
 	 */
 	a6xx_gmu_gxpd_put(gmu);
 
+	DRM_DEV_INFO(gmu->dev, "erhai: step gmu_stop gxpd_put done\n");
+
 	clk_bulk_disable_unprepare(gmu->nr_clocks, gmu->clocks);
 
 	pm_runtime_put_sync(gmu->dev);
+
+	DRM_DEV_INFO(gmu->dev, "erhai: step gmu_stop pwr_put done\n");
 
 	return 0;
 }

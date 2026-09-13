@@ -324,6 +324,8 @@ static int adreno_runtime_suspend(struct device *dev)
 	 */
 	WARN_ON_ONCE(gpu->active_submits);
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step runtime_suspend enter\n");
+
 	msm_perfcntr_suspend(gpu);
 
 	return gpu->funcs->pm_suspend(gpu);
