@@ -2065,11 +2065,23 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		pcie->wcn_l1_2_th_scale = 2;
 		of_property_read_u32(dev->of_node, "qcom,l1-2-th-scale",
 				     &pcie->wcn_l1_2_th_scale);
-		pcie->wcn_l1ss_nb.notifier_call = qcom_pcie_wcn_l1ss_notify;
-		bus_register_notifier(&pci_bus_type, &pcie->wcn_l1ss_nb);
-		dev_info(dev,
-			 "wcn7880: L1SS programmer armed (LTR_L1.2 th=0x%x scale=%u, applied on EP bind)\n",
-			 pcie->wcn_l1_2_th_value, pcie->wcn_l1_2_th_scale);
+		/*
+		 * Register the L1SS notifier exactly ONCE per controller. The
+		 * notifier_block is owned by this qcom_pcie and bus_register_notifier
+		 * chains it; qcom_pcie_init_2_7_0 runs again on every WCN cold-cycle
+		 * (qcom_pcie_reset_root_port / dw_pcie_resume_noirq -> qcom_pcie_host_init
+		 * -> cfg->ops->init) and a second register would emit the kernel
+		 * "notifier callback qcom_pcie_wcn_l1ss_notify already registered" WARN
+		 * on every cal->mission relink (erhai-cc). Guard on notifier_call being
+		 * already set; the notifier itself stays armed for the life of the RC.
+		 */
+		if (!pcie->wcn_l1ss_nb.notifier_call) {
+			pcie->wcn_l1ss_nb.notifier_call = qcom_pcie_wcn_l1ss_notify;
+			bus_register_notifier(&pci_bus_type, &pcie->wcn_l1ss_nb);
+			dev_info(dev,
+				 "wcn7880: L1SS programmer armed (LTR_L1.2 th=0x%x scale=%u, applied on EP bind)\n",
+				 pcie->wcn_l1_2_th_value, pcie->wcn_l1_2_th_scale);
+		}
 		/* Only the WCN pcie0 node carries these props: stash it for the
 		 * exported cal->mission link toggle (qcom_pcie_wcn_set_link). */
 		qcom_pcie_wcn_erhai = pcie;
