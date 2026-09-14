@@ -307,13 +307,9 @@ MODULE_DEVICE_TABLE(of, dt_match);
 static int adreno_runtime_resume(struct device *dev)
 {
 	struct msm_gpu *gpu = dev_to_gpu(dev);
-	int ret;
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step runtime_resume enter\n");
-	ret = gpu->funcs->pm_resume(gpu);
+	int ret = gpu->funcs->pm_resume(gpu);
 	if (!ret)
 		ret = msm_perfcntr_resume(gpu);
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step runtime_resume ret=%d\n", ret);
 	return ret;
 }
 
@@ -327,8 +323,6 @@ static int adreno_runtime_suspend(struct device *dev)
 	 * already waited for active jobs to complete.
 	 */
 	WARN_ON_ONCE(gpu->active_submits);
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step runtime_suspend enter\n");
 
 	msm_perfcntr_suspend(gpu);
 

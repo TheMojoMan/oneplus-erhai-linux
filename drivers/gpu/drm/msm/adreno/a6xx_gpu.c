@@ -22,8 +22,6 @@ static u64 a6xx_gmu_get_timestamp(struct msm_gpu *gpu)
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
 	u64 count_hi, count_lo, temp;
 
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step a6xx_gmu_ts enter\n");
-
 	do {
 		if (adreno_is_a750_family(adreno_gpu)) {
 			count_hi = gmu_read(&a6xx_gpu->gmu, REG_A7XX_GMU_CX_AO_COUNTER_H);
@@ -35,9 +33,6 @@ static u64 a6xx_gmu_get_timestamp(struct msm_gpu *gpu)
 			temp = gmu_read(&a6xx_gpu->gmu, REG_A6XX_GMU_ALWAYS_ON_COUNTER_H);
 		}
 	} while (unlikely(count_hi != temp));
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step a6xx_gmu_ts done %llu\n",
-		     (unsigned long long)((count_hi << 32) | count_lo));
 
 	return (count_hi << 32) | count_lo;
 }
@@ -1557,13 +1552,9 @@ static int a6xx_hw_init(struct msm_gpu *gpu)
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
 	int ret;
 
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step hw_init enter\n");
-
 	mutex_lock(&a6xx_gpu->gmu.lock);
 	ret = hw_init(gpu);
 	mutex_unlock(&a6xx_gpu->gmu.lock);
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step hw_init ret=%d\n", ret);
 
 	return ret;
 }
@@ -2163,14 +2154,9 @@ static int a6xx_gmu_pm_resume(struct msm_gpu *gpu)
 
 	trace_msm_gpu_resume(0);
 
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_resume enter\n");
-
 	mutex_lock(&a6xx_gpu->gmu.lock);
 	ret = a6xx_gmu_resume(a6xx_gpu);
 	mutex_unlock(&a6xx_gpu->gmu.lock);
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_resume gmu_resume ret=%d\n", ret);
-
 	if (ret)
 		return ret;
 
@@ -2253,8 +2239,6 @@ static int a6xx_gmu_pm_suspend(struct msm_gpu *gpu)
 
 	trace_msm_gpu_suspend(0);
 
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_suspend enter\n");
-
 	a6xx_llc_deactivate(a6xx_gpu);
 
 	msm_devfreq_suspend(gpu);
@@ -2262,9 +2246,6 @@ static int a6xx_gmu_pm_suspend(struct msm_gpu *gpu)
 	mutex_lock(&a6xx_gpu->gmu.lock);
 	ret = a6xx_gmu_stop(a6xx_gpu);
 	mutex_unlock(&a6xx_gpu->gmu.lock);
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step pm_suspend stop ret=%d\n", ret);
-
 	if (ret)
 		return ret;
 
@@ -2318,16 +2299,7 @@ static int a6xx_pm_suspend(struct msm_gpu *gpu)
 
 static u64 a6xx_get_timestamp(struct msm_gpu *gpu)
 {
-	u64 val;
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step a6xx_ts enter\n");
-
-	val = gpu_read64(gpu, REG_A6XX_CP_ALWAYS_ON_COUNTER);
-
-	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: step a6xx_ts done %llu\n",
-		     (unsigned long long)val);
-
-	return val;
+	return gpu_read64(gpu, REG_A6XX_CP_ALWAYS_ON_COUNTER);
 }
 
 static struct msm_ringbuffer *a6xx_active_ring(struct msm_gpu *gpu)
