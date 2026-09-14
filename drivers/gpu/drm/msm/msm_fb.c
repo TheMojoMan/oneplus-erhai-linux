@@ -41,9 +41,6 @@ static int msm_framebuffer_dirtyfb(struct drm_framebuffer *fb,
 	if (refcount_read(&msm_fb->dirtyfb) == 1)
 		return 0;
 
-	DRM_DEV_INFO(fb->dev->dev, "erhai: step fb_dirtyfb id=%u flags=0x%x nclips=%u\n",
-		     fb->base.id, flags, num_clips);
-
 	return drm_atomic_helper_dirtyfb(fb, file_priv, flags, color,
 					 clips, num_clips);
 }
@@ -81,9 +78,6 @@ int msm_framebuffer_prepare(struct drm_framebuffer *fb, bool needs_dirtyfb)
 	struct msm_framebuffer *msm_fb = to_msm_framebuffer(fb);
 	int ret, i, n = fb->format->num_planes;
 
-	DRM_DEV_INFO(fb->dev->dev, "erhai: step fb_prepare id=%u n=%d needs_dirtyfb=%d\n",
-		     fb->base.id, n, needs_dirtyfb);
-
 	if (needs_dirtyfb)
 		refcount_inc(&msm_fb->dirtyfb);
 
@@ -91,7 +85,6 @@ int msm_framebuffer_prepare(struct drm_framebuffer *fb, bool needs_dirtyfb)
 		return 0;
 
 	for (i = 0; i < n; i++) {
-		DRM_DEV_INFO(fb->dev->dev, "erhai: step fb_prepare pin plane=%d\n", i);
 		msm_gem_vma_get(fb->obj[i]);
 		ret = msm_gem_get_and_pin_iova(fb->obj[i], vm, &msm_fb->iova[i]);
 		drm_dbg_state(fb->dev, "FB[%u]: iova[%d]: %08llx (%d)\n",

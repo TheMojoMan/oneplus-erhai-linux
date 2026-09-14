@@ -1681,11 +1681,6 @@ static void _dpu_encoder_trigger_flush(struct drm_encoder *drm_enc,
 		return;
 	}
 
-	DRM_DEV_INFO(drm_enc->dev->dev,
-		     "erhai-b6: trigger_flush enc%d flags=%x ctl=%d\n",
-		     DRMID(drm_enc), extra_flush_bits,
-		     ctl ? ctl->idx : -1);
-
 	pending_kickoff_cnt = dpu_encoder_phys_inc_pending(phys);
 
 	/* Return early if encoder is writeback and in clone mode */
@@ -1701,7 +1696,6 @@ static void _dpu_encoder_trigger_flush(struct drm_encoder *drm_enc,
 		ctl->ops.update_pending_flush(ctl, extra_flush_bits);
 
 	ctl->ops.trigger_flush(ctl);
-	DRM_DEV_INFO(drm_enc->dev->dev, "erhai-b6: trigger_flush ctl.ops done\n");
 
 	if (ctl->ops.get_pending_flush)
 		ret = ctl->ops.get_pending_flush(ctl);
@@ -2284,13 +2278,9 @@ void dpu_encoder_kickoff(struct drm_encoder *drm_enc)
 	dpu_enc = to_dpu_encoder_virt(drm_enc);
 
 	trace_dpu_enc_kickoff(DRMID(drm_enc));
-	DRM_DEV_INFO(drm_enc->dev->dev, "erhai-b6: encoder_kickoff enc%d\n",
-		     DRMID(drm_enc));
 
 	/* All phys encs are ready to go, trigger the kickoff */
 	_dpu_encoder_kickoff_phys(dpu_enc);
-	DRM_DEV_INFO(drm_enc->dev->dev,
-		     "erhai-b6: encoder_kickoff post-kickoff done\n");
 
 	/* allow phys encs to handle any post-kickoff business */
 	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
