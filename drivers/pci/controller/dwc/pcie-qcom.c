@@ -2810,21 +2810,6 @@ static int qcom_pcie_reset_root_port(struct pci_host_bridge *bridge,
 	u32 val;
 	int ret;
 
-	/*
-	 * erhai: never core-reset the WCN7880 Root Complex. cnss2 owns the
-	 * WCN link lifecycle (cold-boot-cal, fatal teardown, the erhai-cc
-	 * atomic cold-cycle). A pci_reset_bus()/link-down triggered reset here
-	 * tears down and retrains the RC while cnss is unwinding a FAILED cal,
-	 * then the EP config-space reads on the still-dead link raise an
-	 * unrecoverable external abort -> silent SoC-wide POR (the b-series
-	 * ~60-90 s deaths). The erhai-cc path and cnss's own retries are the
-	 * only legitimate ways to relink this device.
-	 */
-	if (pcie == qcom_pcie_wcn_erhai) {
-		dev_info(dev, "erhai: skip RC reset for WCN (cnss/erhai-cc owns it)\n");
-		return 0;
-	}
-
 	/* Wait for the pending transactions to be completed */
 	ret = readl_relaxed_poll_timeout(pcie->parf + PARF_STATUS, val,
 					 val & FLUSH_COMPLETED, 10,
@@ -2928,19 +2913,6 @@ static irqreturn_t qcom_pcie_global_irq_thread(int irq, void *data)
 
 	if (test_and_clear_bit(INT_ALL_LINK_DOWN, &status)) {
 		dev_dbg(dev, "Received Link down event\n");
-		/*
-		 * erhai: don't feed the WCN link-down into the core's
-		 * pci_host_handle_link_down() cascade. That path ends in
-		 * qcom_pcie_reset_root_port() against a link cnss has already
-		 * declared dead during the failed cold-boot-cal teardown ->
-		 * dead-EP config reads -> external abort -> SoC reset. cnss
-		 * and the erhai-cc cold-cycle handle WCN link-downs
-		 * themselves.
-		 */
-		if (pcie == qcom_pcie_wcn_erhai) {
-			pr_info("erhai: WCN link-down INT masked from core (cnss owns it)\n");
-			return IRQ_HANDLED;
-		}
 		for_each_pci_bridge(port, pp->bridge->bus) {
 			if (pci_pcie_type(port) == PCI_EXP_TYPE_ROOT_PORT)
 				pci_host_handle_link_down(port);
