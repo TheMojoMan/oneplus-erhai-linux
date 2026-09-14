@@ -216,7 +216,7 @@
 #define SC8547_VBAT_CV_CEILING_MV	4500	/* below the 4604 mV curve knee */
 #define SC8547_IBUS_ABORT_MA		8000	/* total-bus (master+slave) hard abort; > code-73 7300 mA */
 #define SC8547_TEMP_ABORT_DDC		450	/* pack temp 45.0 C -> stop (0.1 C) */
-#define SC8547_CP_RESTART_MARGIN_MV	150	/* min vbus-2*vbat to re-enable CP */
+#define SC8547_CP_RESTART_MARGIN_MV	110	/* min vbus-2*vbat to re-enable CP */
 #define SC8547_CP_RESTART_MARGIN_CEIL_MV 700	/* refuse re-enable into an over-volted bus (runaway) */
 
 /*
