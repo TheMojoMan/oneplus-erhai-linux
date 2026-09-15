@@ -286,12 +286,24 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	dev_info(dev, "erhai-dbg: fw_load_bhi entering wait, timeout_ms=%u dma=%llx len=%u\n",
 		 mhi_cntrl->timeout_ms,
 		 mhi_buf->dma_addr, mhi_buf->len);
-	/* Wait for the image download to complete */
-	ret = wait_event_timeout(mhi_cntrl->state_event,
+	{
+		u32 wait_ms = mhi_cntrl->timeout_ms;
+
+		/* erhai 7.3 ddtune: cal download ack measured <1 s on the working
+		 * DT; the runtime mhi timeout is 720 s. Cap the fuse to 45 s
+		 * (45x the ack, >3x the worst measured 10.4 s cal). Below the
+		 * cal duration an expiry -> failure teardown -> SoC POR.
+		 */
+		if (wait_ms < 10000)
+			wait_ms = 10000;
+		if (wait_ms > 45000)
+			wait_ms = 45000;
+		ret = wait_event_timeout(mhi_cntrl->state_event,
 			   MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
 			   mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
 					      BHI_STATUS_MASK, &tx_status) || tx_status,
-			   msecs_to_jiffies(mhi_cntrl->timeout_ms));
+			   msecs_to_jiffies(wait_ms));
+	}
 	dev_info(dev, "erhai-dbg: fw_load_bhi wait done ret=%d tx_status=%u\n",
 		 ret, tx_status);
 	{

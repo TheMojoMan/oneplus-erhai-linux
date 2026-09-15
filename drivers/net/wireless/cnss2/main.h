@@ -53,7 +53,7 @@
 #define CNSS_RDDM_TIMEOUT_MS		20000
 #define RECOVERY_TIMEOUT		60000
 #define WLAN_WD_TIMEOUT_MS		60000
-#define WLAN_COLD_BOOT_CAL_TIMEOUT	120000
+#define WLAN_COLD_BOOT_CAL_TIMEOUT	60000
 
 /* erhai b8: doubled above from 60000 — the 7.3 cal is slower than default;
  * the original 60 s window expires mid-cal and the failure teardown ends in

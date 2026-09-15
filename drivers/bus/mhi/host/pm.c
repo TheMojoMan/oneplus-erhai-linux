@@ -173,7 +173,7 @@ int mhi_ready_state_transition(struct mhi_controller *mhi_cntrl)
 	enum mhi_pm_state cur_state;
 	struct device *dev = &mhi_cntrl->mhi_dev->dev;
 	u32 interval_us = 25000; /* poll register field every 25 milliseconds */
-	u32 timeout_ms;
+	u32 p1, p2;
 	int ret, i;
 
 	/* Check if device entered error state */
@@ -185,25 +185,41 @@ int mhi_ready_state_transition(struct mhi_controller *mhi_cntrl)
 	/* Wait for RESET to be cleared and READY bit to be set by the device */
 	dev_info(dev, "erhai-dbg: ready_transition entry, dev_state=%s\n",
 		 mhi_state_str(mhi_cntrl->dev_state));
-	ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
-				 MHICTRL_RESET_MASK, 0, interval_us,
-				 mhi_cntrl->timeout_ms);
-	if (ret) {
-		dev_err(dev, "Device failed to clear MHI Reset\n");
-		return ret;
-	}
-	dev_info(dev, "erhai-dbg: ready_transition poll RESET done ret=%d\n", ret);
+	{
+		p1 = mhi_cntrl->timeout_ms;
+		p2 = mhi_cntrl->timeout_ms;
 
-	timeout_ms = mhi_cntrl->ready_timeout_ms ?
-		mhi_cntrl->ready_timeout_ms : mhi_cntrl->timeout_ms;
-	ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHISTATUS,
-				 MHISTATUS_READY_MASK, 1, interval_us,
-				 timeout_ms);
-	if (ret) {
-		dev_err(dev, "Device failed to enter MHI Ready\n");
-		return ret;
+		/* erhai 7.3 ddtune: ready transition measured same-second on the
+		 * working DT; runtime timeout is 720 s. Cap both polls to 45 s
+		 * (never below 10 s). */
+		if (p1 < 10000)
+			p1 = 10000;
+		if (p1 > 45000)
+			p1 = 45000;
+		ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
+					 MHICTRL_RESET_MASK, 0, interval_us, p1);
+		if (ret) {
+			dev_err(dev, "Device failed to clear MHI Reset\n");
+			return ret;
+		}
+		dev_info(dev, "erhai-dbg: ready_transition poll RESET done ret=%d\n",
+			 ret);
+
+		if (mhi_cntrl->ready_timeout_ms)
+			p2 = mhi_cntrl->ready_timeout_ms;
+		if (p2 < 10000)
+			p2 = 10000;
+		if (p2 > 45000)
+			p2 = 45000;
+		ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHISTATUS,
+					 MHISTATUS_READY_MASK, 1, interval_us, p2);
+		if (ret) {
+			dev_err(dev, "Device failed to enter MHI Ready\n");
+			return ret;
+		}
+		dev_info(dev, "erhai-dbg: ready_transition poll READY done ret=%d\n",
+			 ret);
 	}
-	dev_info(dev, "erhai-dbg: ready_transition poll READY done ret=%d\n", ret);
 
 	dev_dbg(dev, "Device in READY State\n");
 	write_lock_irq(&mhi_cntrl->pm_lock);
