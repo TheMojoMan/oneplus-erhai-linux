@@ -140,6 +140,22 @@ MODULE_PARM_DESC(erhai_rearm_delay_ms,
 		 "re-arm the ADSP OTG session this long after a detach disarm (0=off)");
 
 /*
+ * Missed-sink retrofit scan (2026-09-15, proven live on the MT7921U dongle):
+ * re-arming the ADSP session only restores detection of the NEXT cable
+ * transition. A sink that was physically attached while the session was
+ * disarmed stays invisible forever (the ADSP never announced it, and
+ * GET_CONNECTOR_STATUS keeps answering "not connected" - the UCSI poll is a
+ * symptom-reader, not a kicker). Blip VBUS once after the re-arm so the
+ * attached sink power-cycles and re-initiates its attach handshake: the
+ * electrical equivalent of the user's replug minus the cable movement.
+ */
+static bool erhai_vbus_blip_enable = true;
+module_param(erhai_vbus_blip_enable, bool, 0644);
+MODULE_PARM_DESC(erhai_vbus_blip_enable,
+		 "after a detach-edge re-arm, cycle VBUS once to surface a missed sink (0=off)");
+#define ERHAI_VBUS_BLIP_OFF_MS		2000
+
+/*
  * Max-SoC charge limit. When 1..99, charging is inhibited at/above this SoC
  * (battery held, system runs from input via USB_CHARGE_OUTPUT_SUSPEND) and
  * resumed once SoC falls ERHAI_CHGLIM_HYST below it. 0 or 100 disables the
@@ -671,6 +687,28 @@ static void erhai_otg_rearm_work(struct work_struct *work)
 		return;	/* host session is back: attach recovered already */
 	if (!otg->armed)
 		erhai_otg_session_sync(true);
+
+	/*
+	 * Missed-sink retrofit: an attach that landed while the session was
+	 * disarmed produced no ADSP announce and was never seen at the CC
+	 * level - re-arming alone cannot surface it. Power-cycle VBUS once so
+	 * the physically-present sink re-initiates its attach handshake
+	 * (2026-09-15: property-24 off/on surfaced a missed MT7921U dongle
+	 * without a replug). vbus_lock keeps this clear of a genuine
+	 * BC_OTG_ENABLE/DISABLE round-trip racing in; the second host-active
+	 * check re-validates that no attach recovered while we waited.
+	 */
+	if (erhai_vbus_blip_enable) {
+		mutex_lock(&otg->vbus_lock);
+		if (!(erhai_detach_gate_enable && erhai_dwc3_host_active())) {
+			dev_info(otg->dev,
+				 "otg: rearm: blipping VBUS to surface a missed sink\n");
+			erhai_otg_set(otg, USB_OTG_VBUS_REGULATOR_ENABLE, 0);
+			msleep(ERHAI_VBUS_BLIP_OFF_MS);
+			erhai_otg_set(otg, USB_OTG_VBUS_REGULATOR_ENABLE, 1);
+		}
+		mutex_unlock(&otg->vbus_lock);
+	}
 }
 
 /* BC_OTG_ENABLE: bring the OTG session up (immediate). */
