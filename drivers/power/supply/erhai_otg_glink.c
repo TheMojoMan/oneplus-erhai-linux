@@ -153,7 +153,18 @@ static bool erhai_vbus_blip_enable = true;
 module_param(erhai_vbus_blip_enable, bool, 0644);
 MODULE_PARM_DESC(erhai_vbus_blip_enable,
 		 "after a detach-edge re-arm, cycle VBUS once to surface a missed sink (0=off)");
-#define ERHAI_VBUS_BLIP_OFF_MS		2000
+
+/*
+ * How long VBUS stays off during the missed-sink blip. 2s is enough for a
+ * small self-powered sink (MT7921U dongle, proven 13:02); a bus-powered
+ * DP hub with its own controller needs its caps drained and a cold boot
+ * (~8s, proven 13:5x on the VL817 hub). Off-time > boot-recovery latency
+ * of the slowest sink you plug.
+ */
+static int erhai_vbus_blip_off_ms = 8000;
+module_param(erhai_vbus_blip_off_ms, int, 0644);
+MODULE_PARM_DESC(erhai_vbus_blip_off_ms,
+		 "VBUS-off duration during the missed-sink blip (ms; 8000 = hub cold boot)");
 
 /*
  * Max-SoC charge limit. When 1..99, charging is inhibited at/above this SoC
@@ -704,7 +715,7 @@ static void erhai_otg_rearm_work(struct work_struct *work)
 			dev_info(otg->dev,
 				 "otg: rearm: blipping VBUS to surface a missed sink\n");
 			erhai_otg_set(otg, USB_OTG_VBUS_REGULATOR_ENABLE, 0);
-			msleep(ERHAI_VBUS_BLIP_OFF_MS);
+			msleep(erhai_vbus_blip_off_ms);
 			erhai_otg_set(otg, USB_OTG_VBUS_REGULATOR_ENABLE, 1);
 		}
 		mutex_unlock(&otg->vbus_lock);
