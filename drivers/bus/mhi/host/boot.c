@@ -286,6 +286,8 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 			   mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
 					      BHI_STATUS_MASK, &tx_status) || tx_status,
 			   msecs_to_jiffies(mhi_cntrl->timeout_ms));
+	dev_info(dev, "erhai-dbg: fw_load_bhi wait done ret=%d tx_status=%u\n",
+		 ret, tx_status);
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 		goto invalid_pm_state;
 
