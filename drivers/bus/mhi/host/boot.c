@@ -603,6 +603,10 @@ fw_load_ready_state:
 	}
 
 	dev_info(dev, "Wait for device to enter SBL or Mission mode\n");
+	dev_info(dev,
+		 "erhai-dbg: fw_load done, exiting handler, dev_state=%s pm_state=%s\n",
+		 mhi_state_str(mhi_cntrl->dev_state),
+		 to_mhi_pm_state_str(mhi_cntrl->pm_state));
 	return;
 
 error_ready_state:

@@ -7826,6 +7826,14 @@ static void cnss_boot_debug_timeout_hdlr(struct timer_list *t)
 	if (cnss_mhi_scan_rddm_cookie(pci_priv, DEVICE_RDDM_COOKIE))
 		return;
 
+	{
+		static unsigned int erhai_bd_loop;
+
+		if ((erhai_bd_loop++ % 10) == 0)
+			cnss_pr_info("erhai-dbg: boot-debug loop %u mhi_state=%lx\n",
+				     erhai_bd_loop, pci_priv->mhi_state);
+	}
+
 	cnss_pr_dbg("Dump MHI/PBL/SBL debug data every %ds during MHI power on\n",
 		    BOOT_DEBUG_TIMEOUT_MS / 1000);
 	cnss_mhi_debug_reg_dump(pci_priv);
@@ -7878,6 +7886,10 @@ static void cnss_mhi_notify_status(struct mhi_controller *mhi_ctrl,
 	if (reason != MHI_CB_IDLE)
 		cnss_pr_dbg("MHI status cb is called with reason %s(%d)\n",
 			    cnss_mhi_notify_status_to_str(reason), reason);
+
+	cnss_pr_info("erhai-dbg: notify_status reason=%s(%d) mhi_state=%lx\n",
+		     cnss_mhi_notify_status_to_str(reason), reason,
+		     pci_priv->mhi_state);
 
 	switch (reason) {
 	case MHI_CB_IDLE:
