@@ -482,6 +482,11 @@ void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl)
 	size_t size, fw_sz;
 	int ret;
 
+	/* erhai-dbg: never observed in the cal-stall - confirms the load offer
+	 * itself never reached the WCN (b11, 2026-09-15). */
+	dev_info(dev, "erhai-dbg: fw_load_handler entered, ee=%s\n",
+		 TO_MHI_EXEC_STR(mhi_cntrl->ee));
+
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state)) {
 		dev_err(dev, "Device MHI is not in valid state\n");
 		return;
