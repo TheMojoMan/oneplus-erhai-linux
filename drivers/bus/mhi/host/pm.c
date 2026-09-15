@@ -810,6 +810,9 @@ void mhi_pm_st_worker(struct work_struct *work)
 			if (MHI_REG_ACCESS_VALID(mhi_cntrl->pm_state))
 				mhi_cntrl->ee = mhi_get_exec_env(mhi_cntrl);
 			write_unlock_irq(&mhi_cntrl->pm_lock);
+			dev_info(&mhi_cntrl->mhi_dev->dev,
+				 "erhai-dbg: transition PBL, ee=%s\n",
+				 TO_MHI_EXEC_STR(mhi_cntrl->ee));
 			mhi_fw_load_handler(mhi_cntrl);
 			break;
 		case DEV_ST_TRANSITION_SBL:
@@ -1211,6 +1214,14 @@ int mhi_async_power_up(struct mhi_controller *mhi_cntrl)
 	/* Transition to next state */
 	next_state = MHI_IN_PBL(current_ee) ?
 		DEV_ST_TRANSITION_PBL : DEV_ST_TRANSITION_READY;
+
+	/* erhai-dbg: the cal never progressed - record which EE the WCN reported
+	 * at power-up and whether that queues the PBL (image load) or READY
+	 * (wait-for-ready) transition. This is the missing datum from the cal
+	 * stall investigation (b11, 2026-09-15). */
+	dev_info(dev, "erhai-dbg: power-up ee=%s state=%s -> next %s\n",
+		 TO_MHI_EXEC_STR(current_ee), mhi_state_str(state),
+		 TO_DEV_STATE_TRANS_STR(next_state));
 
 	mhi_queue_state_transition(mhi_cntrl, next_state);
 
