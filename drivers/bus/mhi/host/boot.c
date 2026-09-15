@@ -280,6 +280,9 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	mhi_write_reg(mhi_cntrl, base, BHI_IMGTXDB, session_id);
 	read_unlock_bh(pm_lock);
 
+	dev_info(&mhi_cntrl->mhi_dev->dev,
+		 "erhai-dbg: fw_load_bhi writes done, entering wait\n");
+
 	/* Wait for the image download to complete */
 	ret = wait_event_timeout(mhi_cntrl->state_event,
 			   MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
@@ -499,6 +502,7 @@ void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl)
 			   &mhi_cntrl->serial_number);
 	if (ret)
 		dev_err(dev, "Could not capture serial number via BHI\n");
+	dev_info(dev, "erhai-dbg: handler serial read ret=%d\n", ret);
 
 	/* wait for ready on pass through or any other execution environment */
 	if (!MHI_FW_LOAD_CAPABLE(mhi_cntrl->ee))
@@ -533,6 +537,7 @@ void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl)
 		dev_err(dev, "Error loading firmware: %d\n", ret);
 		goto error_fw_load;
 	}
+	dev_info(dev, "erhai-dbg: request_firmware ret=%d\n", ret);
 
 	size = (mhi_cntrl->fbc_download) ? mhi_cntrl->sbl_size : firmware->size;
 
