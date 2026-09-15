@@ -174,20 +174,21 @@ MODULE_PARM_DESC(erhai_vbus_blip_off_ms,
  * erhai_vbus_blip_retry_ms until an attach RECOVERED (host session up) or
  * the budget is spent; the retry chain is reset by every new disarm.
  */
-static int erhai_vbus_blip_retries = 4;
+static int erhai_vbus_blip_retries = 2;
 module_param(erhai_vbus_blip_retries, int, 0644);
 MODULE_PARM_DESC(erhai_vbus_blip_retries,
 		 "max VBUS blips per disarm before giving up (0 = one blip, no retry)");
-static int erhai_vbus_blip_retry_ms = 20000;
+static int erhai_vbus_blip_retry_ms = 30000;
 module_param(erhai_vbus_blip_retry_ms, int, 0644);
 MODULE_PARM_DESC(erhai_vbus_blip_retry_ms,
 		 "delay between missed-sink VBUS blip attempts (ms)");
-static int erhai_vbus_blip_start_ms = 25000;
+static int erhai_vbus_blip_start_ms = 60000;
 module_param(erhai_vbus_blip_start_ms, int, 0644);
 MODULE_PARM_DESC(erhai_vbus_blip_start_ms,
-		 "delay from the disarm to the FIRST missed-sink blip (ms); lets the "
-		 "teardown aftermath and any charger/VOOC identification settle (b24-b26: "
-		 "early blips always collided with the churn; late quiet-window blips always worked)");
+		 "delay from the disarm to the FIRST missed-sink blip (ms); lets any "
+		 "teardown/charger identification churn and the owner's own device-swap "
+		 "dance settle first (b24-b26: early blips collided with the churn and "
+		 "could cut an active charge; quiet-window blips always worked)");
 
 /*
  * Max-SoC charge limit. When 1..99, charging is inhibited at/above this SoC
@@ -418,6 +419,21 @@ static int erhai_otg_get_op(struct erhai_otg *otg, u32 opcode, u32 property)
 static int erhai_otg_adsp_soc(struct erhai_otg *otg)
 {
 	return erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET, BC_BATT_CAPACITY);
+}
+
+/*
+ * Does the ADSP currently report a LIVE connector (a charger/source)? A real
+ * attached device is ALWAYS announced by the ADSP (a SuperVOOC charger shows
+ * up as partner role source; only a sink that was missed while the session
+ * was disarmed reads as "not connected"). Used to keep the missed-sink blip
+ * from power-cycling an ACTIVE charge (b26: the attempt-3 blip cut a live
+ * 8V SVOOC session at 14:06:06 - vbus 30mV link drop). Any read error keeps
+ * the blip enabled (the miss case) - only a positive "online" blocks it.
+ */
+static bool erhai_otg_connector_online(struct erhai_otg *otg)
+{
+	int v = erhai_otg_get_op(otg, BC_USB_PROPERTY_GET, BC_USB_ONLINE);
+	return v > 0;
 }
 
 /*
@@ -757,6 +773,22 @@ static void erhai_otg_rearm_work(struct work_struct *work)
 		}
 
 		mutex_lock(&otg->vbus_lock);
+		if (erhai_otg_connector_online(otg)) {
+			/*
+			 * The ADSP reports a LIVE connector - most likely the
+			 * user's SuperVOOC/PD charger. Power-cycling VBUS here
+			 * would cut a real charge (b26: attempt-3 blip killed an
+			 * active 8V SVOOC session), and a missed sink cannot
+			 * coexist with an announced connector. Abort the chain;
+			 * the user's own next swap re-arms it.
+			 */
+			dev_info(otg->dev,
+				 "otg: rearm: skipping VBUS blip - ADSP reports a live connector\n");
+			otg->blip_retries = 0;
+			otg->blip_chain_started = false;
+			mutex_unlock(&otg->vbus_lock);
+			return;
+		}
 		if (!(erhai_detach_gate_enable && erhai_dwc3_host_active())) {
 			dev_info(otg->dev,
 				 "otg: rearm: blipping VBUS to surface a missed sink (attempt %d/%d)\n",
