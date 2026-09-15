@@ -283,6 +283,8 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	dev_info(&mhi_cntrl->mhi_dev->dev,
 		 "erhai-dbg: fw_load_bhi writes done, entering wait\n");
 
+	dev_info(dev, "erhai-dbg: fw_load_bhi entering wait, timeout_ms=%u\n",
+		 mhi_cntrl->timeout_ms);
 	/* Wait for the image download to complete */
 	ret = wait_event_timeout(mhi_cntrl->state_event,
 			   MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
@@ -291,6 +293,15 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 			   msecs_to_jiffies(mhi_cntrl->timeout_ms));
 	dev_info(dev, "erhai-dbg: fw_load_bhi wait done ret=%d tx_status=%u\n",
 		 ret, tx_status);
+	{
+		u32 t2 = 0;
+		int r2;
+
+		r2 = mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
+					BHI_STATUS_MASK, &t2);
+		dev_info(dev, "erhai-dbg: post-wait BHI_STATUS re-read r2=%d t2=%u\n",
+			 r2, t2);
+	}
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 		goto invalid_pm_state;
 
