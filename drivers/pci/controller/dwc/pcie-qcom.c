@@ -56,10 +56,7 @@
 #define PARF_AXI_MSTR_WR_ADDR_HALT_V2		0x1a8
 #define PARF_Q2A_FLUSH				0x1ac
 #define PARF_LTSSM				0x1b0
-#define PARF_INT_ALL_STATUS			0x224
-#define PARF_INT_ALL_CLEAR			0x228
 #define PARF_INT_ALL_MASK			0x22c
-#define PARF_STATUS				0x230
 #define PARF_CFG_BITS_3				0x2c4
 #define PARF_SID_OFFSET				0x234
 #define PARF_BDF_TRANSLATE_CFG			0x24c
@@ -219,13 +216,6 @@
 /* PARF_LTSSM register fields */
 #define LTSSM_EN				BIT(8)
 #define PARF_LTSSM_STATE_MASK			GENMASK(5, 0)
-#define SW_CLEAR_FLUSH_MODE			BIT(10)
-#define FLUSH_MODE				BIT(11)
-
-/* PARF_INT_ALL_{STATUS/CLEAR/MASK} register fields */
-#define INT_ALL_LINK_DOWN			1
-#define PARF_INT_ALL_LINK_DOWN			BIT(INT_ALL_LINK_DOWN)
-#define PARF_INT_MSI_DEV_0_7			GENMASK(30, 23)
 
 /* PARF_NO_SNOOP_OVERRIDE register fields */
 #define WR_NO_SNOOP_OVERRIDE_EN			BIT(1)
@@ -236,9 +226,6 @@
 
 /* PARF_BDF_TO_SID_CFG fields */
 #define BDF_TO_SID_BYPASS			BIT(0)
-
-/* PARF_STATUS fields */
-#define FLUSH_COMPLETED				BIT(8)
 
 /* ELBI_SYS_CTRL register fields */
 #define ELBI_SYS_CTRL_LT_ENABLE			BIT(0)
@@ -268,7 +255,6 @@
 						PCIE_CAP_SLOT_POWER_LIMIT_SCALE)
 
 #define PERST_DELAY_US				1000
-#define FLUSH_TIMEOUT_US			100
 
 #define QCOM_PCIE_CRC8_POLYNOMIAL		(BIT(2) | BIT(1) | BIT(0))
 
@@ -388,7 +374,6 @@ struct qcom_pcie {
 	struct dentry *debugfs;
 	struct list_head ports;
 	struct gpio_desc *reset;
-	int global_irq;
 	bool use_pm_opp;
 	bool wcn_clk_hwgated;	/* D3: SW vote dropped on HWCG AXI clocks */
 	/* v472: WCN L1SS programming (msm_pcie_config_l1ss faithful). Values from the
@@ -401,8 +386,6 @@ struct qcom_pcie {
 };
 
 #define to_qcom_pcie(x)		dev_get_drvdata((x)->dev)
-static int qcom_pcie_reset_root_port(struct pci_host_bridge *bridge,
-				  struct pci_dev *pdev);
 
 /*
  * erhai WCN7880 cal->mission faithful re-link. cnss's cnss_set_pci_link() is
@@ -749,7 +732,7 @@ static void qcom_pcie_clear_aspm_l0s(struct dw_pcie *pci)
 	dw_pcie_dbi_ro_wr_dis(pci);
 }
 
-static void qcom_pcie_set_slot_cap(struct dw_pcie *pci)
+static void qcom_pcie_set_slot_nccs(struct dw_pcie *pci)
 {
 	u16 offset = dw_pcie_find_capability(pci, PCI_CAP_ID_EXP);
 	u32 val;
@@ -763,12 +746,6 @@ static void qcom_pcie_set_slot_cap(struct dw_pcie *pci)
 	 */
 	val = readl(pci->dbi_base + offset + PCI_EXP_SLTCAP);
 	val |= PCI_EXP_SLTCAP_NCCS;
-
-	/*
-	 * Qcom PCIe Root Ports do not support Attention Button, so clear
-	 * Attention Button Present in Slot Capabilities.
-	 */
-	val &= ~PCI_EXP_SLTCAP_ABP;
 	writel(val, pci->dbi_base + offset + PCI_EXP_SLTCAP);
 
 	dw_pcie_dbi_ro_wr_dis(pci);
@@ -977,7 +954,7 @@ static int qcom_pcie_post_init_2_1_0(struct qcom_pcie *pcie)
 	writel(CFG_BRIDGE_SB_INIT,
 	       pci->dbi_base + AXI_MSTR_RESP_COMP_CTRL1);
 
-	qcom_pcie_set_slot_cap(pcie->pci);
+	qcom_pcie_set_slot_nccs(pcie->pci);
 
 	return 0;
 }
@@ -1057,7 +1034,7 @@ static int qcom_pcie_post_init_1_0_0(struct qcom_pcie *pcie)
 		writel(val, pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT);
 	}
 
-	qcom_pcie_set_slot_cap(pcie->pci);
+	qcom_pcie_set_slot_nccs(pcie->pci);
 
 	return 0;
 }
@@ -1156,7 +1133,7 @@ static int qcom_pcie_post_init_2_3_2(struct qcom_pcie *pcie)
 	val |= EN;
 	writel(val, pcie->parf + PARF_AXI_MSTR_WR_ADDR_HALT_V2);
 
-	qcom_pcie_set_slot_cap(pcie->pci);
+	qcom_pcie_set_slot_nccs(pcie->pci);
 
 	return 0;
 }
@@ -2065,23 +2042,11 @@ static int qcom_pcie_init_2_7_0(struct qcom_pcie *pcie)
 		pcie->wcn_l1_2_th_scale = 2;
 		of_property_read_u32(dev->of_node, "qcom,l1-2-th-scale",
 				     &pcie->wcn_l1_2_th_scale);
-		/*
-		 * Register the L1SS notifier exactly ONCE per controller. The
-		 * notifier_block is owned by this qcom_pcie and bus_register_notifier
-		 * chains it; qcom_pcie_init_2_7_0 runs again on every WCN cold-cycle
-		 * (qcom_pcie_reset_root_port / dw_pcie_resume_noirq -> qcom_pcie_host_init
-		 * -> cfg->ops->init) and a second register would emit the kernel
-		 * "notifier callback qcom_pcie_wcn_l1ss_notify already registered" WARN
-		 * on every cal->mission relink (erhai-cc). Guard on notifier_call being
-		 * already set; the notifier itself stays armed for the life of the RC.
-		 */
-		if (!pcie->wcn_l1ss_nb.notifier_call) {
-			pcie->wcn_l1ss_nb.notifier_call = qcom_pcie_wcn_l1ss_notify;
-			bus_register_notifier(&pci_bus_type, &pcie->wcn_l1ss_nb);
-			dev_info(dev,
-				 "wcn7880: L1SS programmer armed (LTR_L1.2 th=0x%x scale=%u, applied on EP bind)\n",
-				 pcie->wcn_l1_2_th_value, pcie->wcn_l1_2_th_scale);
-		}
+		pcie->wcn_l1ss_nb.notifier_call = qcom_pcie_wcn_l1ss_notify;
+		bus_register_notifier(&pci_bus_type, &pcie->wcn_l1ss_nb);
+		dev_info(dev,
+			 "wcn7880: L1SS programmer armed (LTR_L1.2 th=0x%x scale=%u, applied on EP bind)\n",
+			 pcie->wcn_l1_2_th_value, pcie->wcn_l1_2_th_scale);
 		/* Only the WCN pcie0 node carries these props: stash it for the
 		 * exported cal->mission link toggle (qcom_pcie_wcn_set_link). */
 		qcom_pcie_wcn_erhai = pcie;
@@ -2108,7 +2073,7 @@ static int qcom_pcie_post_init_2_7_0(struct qcom_pcie *pcie)
 		writel(WR_NO_SNOOP_OVERRIDE_EN | RD_NO_SNOOP_OVERRIDE_EN,
 				pcie->parf + PARF_NO_SNOOP_OVERRIDE);
 
-	qcom_pcie_set_slot_cap(pcie->pci);
+	qcom_pcie_set_slot_nccs(pcie->pci);
 
 	return 0;
 }
@@ -2477,8 +2442,6 @@ static int qcom_pcie_host_init(struct dw_pcie_rp *pp)
 			goto err_assert_reset;
 	}
 
-	pp->bridge->reset_root_port = qcom_pcie_reset_root_port;
-
 	return 0;
 
 err_assert_reset:
@@ -2807,75 +2770,6 @@ static int qcom_pcie_set_max_opp(struct device *dev)
 	return ret;
 }
 
-/*
- * Qcom PCIe controllers only support one Root Port per controller instance. So
- * this function ignores the 'pci_dev' associated with the Root Port and just
- * resets the host bridge, which in turn resets the Root Port also.
- */
-static int qcom_pcie_reset_root_port(struct pci_host_bridge *bridge,
-				  struct pci_dev *pdev)
-{
-	struct device *dev = bridge->dev.parent;
-	struct qcom_pcie *pcie = dev_get_drvdata(dev);
-	struct dw_pcie *pci = pcie->pci;
-	struct dw_pcie_rp *pp = &pci->pp;
-	u32 val;
-	int ret;
-
-	/* Wait for the pending transactions to be completed */
-	ret = readl_relaxed_poll_timeout(pcie->parf + PARF_STATUS, val,
-					 val & FLUSH_COMPLETED, 10,
-					 FLUSH_TIMEOUT_US);
-	if (ret) {
-		dev_err(dev, "Flush completion failed: %d\n", ret);
-		return ret;
-	}
-
-	/* Clear the FLUSH_MODE to allow the core to be reset */
-	val = readl(pcie->parf + PARF_LTSSM);
-	val |= SW_CLEAR_FLUSH_MODE;
-	writel(val, pcie->parf + PARF_LTSSM);
-
-	/* Wait for the FLUSH_MODE to clear */
-	ret = readl_relaxed_poll_timeout(pcie->parf + PARF_LTSSM, val,
-					 !(val & FLUSH_MODE), 10,
-					 FLUSH_TIMEOUT_US);
-	if (ret) {
-		dev_err(dev, "Flush mode clear failed: %d\n", ret);
-		return ret;
-	}
-
-	qcom_pcie_host_deinit(pp);
-
-	ret = qcom_pcie_host_init(pp);
-	if (ret) {
-		dev_err(dev, "Host init failed\n");
-		return ret;
-	}
-
-	ret = dw_pcie_setup_rc(pp);
-	if (ret)
-		return ret;
-
-	/*
-	 * Re-enable global IRQ events as the PARF_INT_ALL_MASK register is
-	 * non-sticky.
-	 */
-	if (pcie->global_irq)
-		writel_relaxed(PARF_INT_ALL_LINK_DOWN | PARF_INT_MSI_DEV_0_7,
-				pcie->parf + PARF_INT_ALL_MASK);
-
-	qcom_pcie_start_link(pci);
-
-	ret = dw_pcie_wait_for_link(pci);
-	if (ret)
-		return ret;
-
-	dev_dbg(dev, "Root Port reset completed\n");
-
-	return 0;
-}
-
 static int qcom_pcie_link_transition_count(struct seq_file *s, void *data)
 {
 	struct qcom_pcie *pcie = (struct qcom_pcie *)dev_get_drvdata(s->private);
@@ -2911,27 +2805,6 @@ static void qcom_pcie_init_debugfs(struct qcom_pcie *pcie)
 	pcie->debugfs = debugfs_create_dir(name, NULL);
 	debugfs_create_devm_seqfile(dev, "link_transition_count", pcie->debugfs,
 				    qcom_pcie_link_transition_count);
-}
-
-static irqreturn_t qcom_pcie_global_irq_thread(int irq, void *data)
-{
-	struct qcom_pcie *pcie = data;
-	struct dw_pcie_rp *pp = &pcie->pci->pp;
-	struct device *dev = pcie->pci->dev;
-	struct pci_dev *port;
-	unsigned long status = readl_relaxed(pcie->parf + PARF_INT_ALL_STATUS);
-
-	writel_relaxed(status, pcie->parf + PARF_INT_ALL_CLEAR);
-
-	if (test_and_clear_bit(INT_ALL_LINK_DOWN, &status)) {
-		dev_dbg(dev, "Received Link down event\n");
-		for_each_pci_bridge(port, pp->bridge->bus) {
-			if (pci_pcie_type(port) == PCI_EXP_TYPE_ROOT_PORT)
-				pci_host_handle_link_down(port);
-		}
-	}
-
-	return IRQ_HANDLED;
 }
 
 static void qcom_pci_free_msi(void *ptr)
@@ -2983,23 +2856,6 @@ static const struct pci_ecam_ops pci_qcom_ecam_ops = {
 	}
 };
 
-/* Check if @node is a child of @dev in DT */
-static bool qcom_pcie_is_child_node(struct device *dev,
-				    struct device_node *node)
-{
-	struct device_node *parent;
-
-	for (parent = of_get_parent(node); parent;
-	     parent = of_get_next_parent(parent)) {
-		if (parent == dev->of_node) {
-			of_node_put(parent);
-			return true;
-		}
-	}
-
-	return false;
-}
-
 /* Parse PERST# from all nodes in depth first manner starting from @np */
 static int qcom_pcie_parse_perst(struct qcom_pcie *pcie,
 				 struct qcom_pcie_port *port,
@@ -3007,7 +2863,6 @@ static int qcom_pcie_parse_perst(struct qcom_pcie *pcie,
 {
 	struct device *dev = pcie->pci->dev;
 	struct qcom_pcie_perst *perst;
-	struct device_node *gpio_np;
 	struct gpio_desc *reset;
 	int ret;
 
@@ -3020,25 +2875,6 @@ static int qcom_pcie_parse_perst(struct qcom_pcie *pcie,
 
 	if (!of_find_property(np, "reset-gpios", NULL))
 		goto parse_child_node;
-
-	/*
-	 * Skip GPIOs provided by a PCIe device which is a child of the Root
-	 * Complex (e.g., a PCIe switch with GPIO controller capability). Such
-	 * controllers won't be available at RC probe time and their PERST#
-	 * should be controlled by the respective PCI client driver
-	 * implementation.
-	 */
-	gpio_np = of_parse_phandle(np, "reset-gpios", 0);
-	if (!gpio_np) {
-		dev_err(dev, "Failed to parse GPIO provider\n");
-		return -EINVAL;
-	}
-
-	if (qcom_pcie_is_child_node(dev, gpio_np)) {
-		of_node_put(gpio_np);
-		goto parse_child_node;
-	}
-	of_node_put(gpio_np);
 
 	reset = devm_fwnode_gpiod_get(dev, of_fwnode_handle(np), "reset",
 				      GPIOD_OUT_HIGH, "PERST#");
@@ -3190,7 +3026,7 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 	struct dw_pcie_rp *pp;
 	struct resource *res;
 	struct dw_pcie *pci;
-	int ret, irq;
+	int ret;
 
 	pcie_cfg = of_device_get_match_data(dev);
 	if (!pcie_cfg) {
@@ -3335,32 +3171,6 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 		goto err_phy_exit;
 	}
 
-	irq = platform_get_irq_byname_optional(pdev, "global");
-	if (irq > 0) {
-		const char *name;
-
-		name = devm_kasprintf(dev, GFP_KERNEL, "qcom_pcie_global_irq%d",
-				      pci_domain_nr(pp->bridge->bus));
-		if (!name) {
-			ret = -ENOMEM;
-			goto err_host_deinit;
-		}
-
-		ret = devm_request_threaded_irq(&pdev->dev, irq, NULL,
-						qcom_pcie_global_irq_thread,
-						IRQF_ONESHOT, name, pcie);
-		if (ret) {
-			dev_err_probe(&pdev->dev, ret,
-				      "Failed to request Global IRQ\n");
-			goto err_host_deinit;
-		}
-
-		writel_relaxed(PARF_INT_ALL_LINK_DOWN | PARF_INT_MSI_DEV_0_7,
-				pcie->parf + PARF_INT_ALL_MASK);
-
-		pcie->global_irq = irq;
-	}
-
 	qcom_pcie_icc_opp_update(pcie);
 
 	if (pcie->mhi)
@@ -3368,8 +3178,6 @@ static int qcom_pcie_probe(struct platform_device *pdev)
 
 	return 0;
 
-err_host_deinit:
-	dw_pcie_host_deinit(pp);
 err_phy_exit:
 	list_for_each_entry_safe(port, tmp_port, &pcie->ports, list) {
 		list_for_each_entry_safe(perst, tmp_perst, &port->perst, list)
@@ -3510,7 +3318,6 @@ disable_icc_cpu:
 }
 
 static const struct of_device_id qcom_pcie_match[] = {
-	{ .compatible = "qcom,hawi-pcie", .data = &cfg_1_9_0 },
 	{ .compatible = "qcom,pcie-apq8064", .data = &cfg_2_1_0 },
 	{ .compatible = "qcom,pcie-apq8084", .data = &cfg_1_0_0 },
 	{ .compatible = "qcom,pcie-ipq4019", .data = &cfg_2_4_0 },
