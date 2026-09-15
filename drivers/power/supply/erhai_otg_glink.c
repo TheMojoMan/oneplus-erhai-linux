@@ -167,6 +167,23 @@ MODULE_PARM_DESC(erhai_vbus_blip_off_ms,
 		 "VBUS-off duration during the missed-sink blip (ms; 8000 = hub cold boot)");
 
 /*
+ * The blip retries: a single VBUS cycle can lose the race against a
+ * long-running charger/VOOC handshake on the same CC (2026-09-15 b25:
+ * SVOOC identify -> curve -> link drop, ~40s, ate the hub's cold-boot
+ * window; a second quiet-window blip revived it). Retry every
+ * erhai_vbus_blip_retry_ms until an attach RECOVERED (host session up) or
+ * the budget is spent; the retry chain is reset by every new disarm.
+ */
+static int erhai_vbus_blip_retries = 3;
+module_param(erhai_vbus_blip_retries, int, 0644);
+MODULE_PARM_DESC(erhai_vbus_blip_retries,
+		 "max VBUS blips per disarm before giving up (0 = one blip, no retry)");
+static int erhai_vbus_blip_retry_ms = 15000;
+module_param(erhai_vbus_blip_retry_ms, int, 0644);
+MODULE_PARM_DESC(erhai_vbus_blip_retry_ms,
+		 "delay between missed-sink VBUS blip attempts (ms)");
+
+/*
  * Max-SoC charge limit. When 1..99, charging is inhibited at/above this SoC
  * (battery held, system runs from input via USB_CHARGE_OUTPUT_SUSPEND) and
  * resumed once SoC falls ERHAI_CHGLIM_HYST below it. 0 or 100 disables the
@@ -233,6 +250,7 @@ struct erhai_otg {
 	 * leave CC attach detection dead. See erhai_otg_rearm_work().
 	 */
 	struct delayed_work rearm_work;
+	int blip_retries;	/* VBUS-blip attempts in the current self-heal chain */
 	bool vbus_on;
 	bool armed;
 
@@ -612,6 +630,7 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 			dev_info(otg->dev, "otg: session disarmed (detach)\n");
 		}
 		/* Self-heal: revive CC attach detection (see erhai_rearm_delay_ms). */
+		otg->blip_retries = 0;	/* fresh detach -> full blip retry budget */
 		if (erhai_rearm_delay_ms > 0)
 			mod_delayed_work(system_wq, &otg->rearm_work,
 					 msecs_to_jiffies(erhai_rearm_delay_ms));
@@ -675,6 +694,7 @@ static int erhai_otg_session_sync(bool arm)
 			if (erhai_rearm_delay_ms > 0)
 				mod_delayed_work(system_wq, &otg->rearm_work,
 						 msecs_to_jiffies(erhai_rearm_delay_ms));
+			otg->blip_retries = 0;	/* fresh detach -> full retry budget */
 		}
 	}
 	mutex_unlock(&otg->vbus_lock);
@@ -713,12 +733,27 @@ static void erhai_otg_rearm_work(struct work_struct *work)
 		mutex_lock(&otg->vbus_lock);
 		if (!(erhai_detach_gate_enable && erhai_dwc3_host_active())) {
 			dev_info(otg->dev,
-				 "otg: rearm: blipping VBUS to surface a missed sink\n");
+				 "otg: rearm: blipping VBUS to surface a missed sink (attempt %d/%d)\n",
+				 otg->blip_retries + 1, erhai_vbus_blip_retries);
 			erhai_otg_set(otg, USB_OTG_VBUS_REGULATOR_ENABLE, 0);
 			msleep(erhai_vbus_blip_off_ms);
 			erhai_otg_set(otg, USB_OTG_VBUS_REGULATOR_ENABLE, 1);
 		}
 		mutex_unlock(&otg->vbus_lock);
+
+		/*
+		 * Retry: one blip can lose the race against a long charger/VOOC
+		 * handshake on the same CC (b25: ~40s of SVOOC churn ate the
+		 * hub's cold-boot window). Re-arm in erhai_vbus_blip_retry_ms
+		 * until an attach shows (the host-active early-return aborts the
+		 * chain) or the budget is spent. Self-rescheduling from within the
+		 * work is the same pattern as the ucsi_glink poll timer.
+		 */
+		if (++otg->blip_retries < erhai_vbus_blip_retries)
+			schedule_delayed_work(&otg->rearm_work,
+					      msecs_to_jiffies(erhai_vbus_blip_retry_ms));
+		else
+			otg->blip_retries = 0;
 	}
 }
 
