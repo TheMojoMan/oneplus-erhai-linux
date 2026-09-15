@@ -191,6 +191,23 @@ MODULE_PARM_DESC(erhai_vbus_blip_start_ms,
 		 "could cut an active charge; quiet-window blips always worked)");
 
 /*
+ * KEEP THE ADSP OTG SESSION ARMED THROUGH DETACH (default). The detach-edge
+ * disarm is what blinds the ADSP's CC detection: a sink plugged in the
+ * disarmed window is never announced, and re-arming only restores FUTURE
+ * detections (the whole missed-sink saga, 2026-09-15 b24-b28). Leaving the
+ * session armed - its BOOT BASELINE - means every plug is seen immediately:
+ * no dead window, no blip lag, seconds to enumeration. Setting
+ * erhai_detach_disarm_enable=1 restores the legacy disarm + rearm + blip
+ * recovery for A/B against the old behavior.
+ */
+static bool erhai_detach_disarm_enable = false;
+module_param(erhai_detach_disarm_enable, bool, 0644);
+MODULE_PARM_DESC(erhai_detach_disarm_enable,
+		 "disarm the ADSP OTG session on detach (legacy; creates the missed-sink "
+		 "window the blip chain then recovers. 0 = keep armed = boot baseline, "
+		 "plugs are seen immediately)");
+
+/*
  * Max-SoC charge limit. When 1..99, charging is inhibited at/above this SoC
  * (battery held, system runs from input via USB_CHARGE_OUTPUT_SUSPEND) and
  * resumed once SoC falls ERHAI_CHGLIM_HYST below it. 0 or 100 disables the
@@ -642,7 +659,7 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 		msleep(200);
 
 		/* Fully disarm the ADSP OTG session until the next attach. */
-		if (otg->armed) {
+		if (otg->armed && erhai_detach_disarm_enable) {
 			ret = erhai_otg_set(otg, USB_OTG_SWITCH, 0);
 			if (ret)
 				dev_err(otg->dev, "otg: SWITCH off failed %d\n", ret);
@@ -655,7 +672,7 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 		/* Self-heal: revive CC attach detection (see erhai_rearm_delay_ms). */
 		otg->blip_retries = 0;	/* fresh detach -> full blip retry budget */
 		otg->blip_chain_started = false;
-		if (erhai_rearm_delay_ms > 0)
+		if (!otg->armed && erhai_rearm_delay_ms > 0)
 			mod_delayed_work(system_wq, &otg->rearm_work,
 					 msecs_to_jiffies(erhai_rearm_delay_ms));
 	}
@@ -702,6 +719,14 @@ static int erhai_otg_session_sync(bool arm)
 		dev_info(otg->dev, "otg: session %s (drd sync, ret=%d)\n",
 			 ret ? "arm FAILED" : "armed", ret);
 	} else {
+		if (otg->armed && !erhai_detach_disarm_enable) {
+			/* Keep-armed mode (boot baseline): the ADSP session stays
+			 * armed through detach so CC attach detection never dies
+			 * (no missed-sink window). See erhai_detach_disarm_enable.
+			 */
+			mutex_unlock(&otg->vbus_lock);
+			return 0;
+		}
 		if (otg->armed) {
 			ret = erhai_otg_set(otg, USB_OTG_SWITCH, 0);
 			erhai_otg_set(otg, USB_OTG_AP_ENABLE, 0);
@@ -754,8 +779,10 @@ static void erhai_otg_rearm_work(struct work_struct *work)
 	 * BC_OTG_ENABLE/DISABLE round-trip racing in; the second host-active
 	 * check re-validates that no attach recovered while we waited.
 	 */
-	if (erhai_vbus_blip_enable) {
+	if (erhai_vbus_blip_enable && erhai_detach_disarm_enable) {
 		/*
+		 * (Blip recovery legacy-mode only; with keep-armed the session
+		 * never disarms so there is nothing to recover.)
 		 * First entry of the chain: WAIT before the first blip. The
 		 * re-arm above already restored future CC detection; the blip
 		 * exists only to power-cycle an already-present-but-missed sink.
