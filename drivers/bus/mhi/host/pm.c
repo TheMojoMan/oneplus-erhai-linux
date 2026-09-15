@@ -182,6 +182,9 @@ int mhi_ready_state_transition(struct mhi_controller *mhi_cntrl)
 		return -EIO;
 	}
 
+	dev_info(dev, "erhai-dbg: ready_transition entry, dev_state=%s\n",
+		 mhi_state_str(mhi_cntrl->dev_state));
+
 	/* Wait for RESET to be cleared and READY bit to be set by the device */
 	ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
 				 MHICTRL_RESET_MASK, 0, interval_us,
@@ -190,6 +193,7 @@ int mhi_ready_state_transition(struct mhi_controller *mhi_cntrl)
 		dev_err(dev, "Device failed to clear MHI Reset\n");
 		return ret;
 	}
+	dev_info(dev, "erhai-dbg: ready_transition poll RESET done ret=%d\n", ret);
 
 	timeout_ms = mhi_cntrl->ready_timeout_ms ?
 		mhi_cntrl->ready_timeout_ms : mhi_cntrl->timeout_ms;
@@ -200,6 +204,7 @@ int mhi_ready_state_transition(struct mhi_controller *mhi_cntrl)
 		dev_err(dev, "Device failed to enter MHI Ready\n");
 		return ret;
 	}
+	dev_info(dev, "erhai-dbg: ready_transition poll READY done ret=%d\n", ret);
 
 	dev_dbg(dev, "Device in READY State\n");
 	write_lock_irq(&mhi_cntrl->pm_lock);
