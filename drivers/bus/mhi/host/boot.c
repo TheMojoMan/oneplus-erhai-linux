@@ -283,8 +283,9 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	dev_info(&mhi_cntrl->mhi_dev->dev,
 		 "erhai-dbg: fw_load_bhi writes done, entering wait\n");
 
-	dev_info(dev, "erhai-dbg: fw_load_bhi entering wait, timeout_ms=%u\n",
-		 mhi_cntrl->timeout_ms);
+	dev_info(dev, "erhai-dbg: fw_load_bhi entering wait, timeout_ms=%u dma=%llx len=%u\n",
+		 mhi_cntrl->timeout_ms,
+		 mhi_buf->dma_addr, mhi_buf->len);
 	/* Wait for the image download to complete */
 	ret = wait_event_timeout(mhi_cntrl->state_event,
 			   MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
@@ -463,6 +464,13 @@ static int mhi_load_image_bhi(struct mhi_controller *mhi_cntrl, const u8 *fw_dat
 
 	/* Load the firmware into BHI vec table */
 	memcpy(image->mhi_buf->buf, fw_data, size);
+
+	dev_info(&mhi_cntrl->mhi_dev->dev,
+		 "erhai-dbg: BHI img size=%zu magic=%02x%02x%02x%02x\n",
+		 size, ((const u8 *)image->mhi_buf->buf)[0],
+		 ((const u8 *)image->mhi_buf->buf)[1],
+		 ((const u8 *)image->mhi_buf->buf)[2],
+		 ((const u8 *)image->mhi_buf->buf)[3]);
 
 	ret = mhi_fw_load_bhi(mhi_cntrl, &image->mhi_buf[image->entries - 1]);
 	mhi_free_bhi_buffer(mhi_cntrl, image);
