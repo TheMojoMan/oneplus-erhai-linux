@@ -819,6 +819,9 @@ void mhi_pm_st_worker(struct work_struct *work)
 			write_lock_irq(&mhi_cntrl->pm_lock);
 			mhi_cntrl->ee = MHI_EE_SBL;
 			write_unlock_irq(&mhi_cntrl->pm_lock);
+dev_info(&mhi_cntrl->mhi_dev->dev,
+				 "erhai-dbg: st_worker TRANSITION_SBL reached, ee=%s\n",
+				 TO_MHI_EXEC_STR(mhi_cntrl->ee));
 			/*
 			 * The MHI devices are only created when the client
 			 * device switches its Execution Environment (EE) to
@@ -830,7 +833,9 @@ void mhi_pm_st_worker(struct work_struct *work)
 
 			mhi_uevent_notify(mhi_cntrl, mhi_cntrl->ee);
 			break;
-		case DEV_ST_TRANSITION_MISSION_MODE:
+case DEV_ST_TRANSITION_MISSION_MODE:
+			dev_info(&mhi_cntrl->mhi_dev->dev,
+				 "erhai-dbg: st_worker TRANSITION_MISSION_MODE entered\n");
 			mhi_pm_mission_mode_transition(mhi_cntrl);
 			break;
 		case DEV_ST_TRANSITION_FP:
