@@ -4519,6 +4519,29 @@ static void qmp_combo_disable_autonomous_mode(struct qmp_combo *qmp)
 	qphy_clrbits(pcs_usb, cfg->regs[QPHY_PCS_LFPS_RXTERM_IRQ_CLEAR], IRQ_CLEAR);
 }
 
+static int __maybe_unused qmp_combo_system_suspend(struct device *dev)
+{
+	struct qmp_combo *qmp = dev_get_drvdata(dev);
+
+	/*
+	 * erhai: the COM keep-alive refcount is only valid across a RUNTIME
+	 * detach/attach (clocks gated, hardware still powered). A real SYSTEM
+	 * suspend also collapses the PHY power domains (gcc_usb3_phy_gdsc /
+	 * gcc_usb30_prim_gdsc are powered off by s2idle), so the "kept alive"
+	 * flag is stale after resume. Drop it here so the next phy_init runs
+	 * a FULL com_init (regulators + reset pulse + pipe_clk + COM regs)
+	 * instead of the refcount early-return — otherwise
+	 * qmp_combo_usb_power_on's PHYSTATUS poll times out on resume and
+	 * dwc3_qcom_pm_resume fails with -110 (observed on the first real
+	 * s2idle run, 2026-09-16).
+	 */
+	mutex_lock(&qmp->phy_mutex);
+	qmp->init_count = 0;
+	mutex_unlock(&qmp->phy_mutex);
+
+	return 0;
+}
+
 static int __maybe_unused qmp_combo_runtime_suspend(struct device *dev)
 {
 	struct qmp_combo *qmp = dev_get_drvdata(dev);
@@ -4574,6 +4597,7 @@ static int __maybe_unused qmp_combo_runtime_resume(struct device *dev)
 }
 
 static const struct dev_pm_ops qmp_combo_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(qmp_combo_system_suspend, NULL)
 	SET_RUNTIME_PM_OPS(qmp_combo_runtime_suspend,
 			   qmp_combo_runtime_resume, NULL)
 };
