@@ -17,8 +17,8 @@
  * If a test build still shows zeros, the lane indices may need {3,4} (the
  * port numbers are 1-based master-TX ports) -- flip and rebuild.
  */
-#define ERHAI_MIC_TX_CH0	2
-#define ERHAI_MIC_TX_CH1	3
+#define ERHAI_MIC_TX_CH0	3
+#define ERHAI_MIC_TX_CH1	4
 
 static bool qcom_snd_is_sdw_dai(int id)
 {
