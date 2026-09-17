@@ -957,14 +957,35 @@ static int va_macro_get_channel_map(const struct snd_soc_dai *dai,
 	struct device *va_dev = component->dev;
 	struct va_macro *va = snd_soc_component_get_drvdata(component);
 
+	int n, dec;
+
 	switch (dai->id) {
 	case VA_MACRO_AIF1_CAP:
 	case VA_MACRO_AIF2_CAP:
 	case VA_MACRO_AIF3_CAP:
-		*tx_slot = va->active_ch_mask[dai->id];
-		*tx_num = va->active_ch_cnt[dai->id];
-		dev_info(va_dev, "MICDBG va_get_channel_map: dai=%d tx_num=%u tx_slot=0x%x\n",
-			 dai->id, *tx_num, *tx_slot);
+		/*
+		 * erhai mic (b58): export the active DEC set as a wcd-style array of
+		 * per-port masks (tx_slot[dec] = 1 for each active decimator).  This is
+		 * what the machine compaction (sc8280xp_snd_set_cpu_tx_channel_map)
+		 * consumes to build the ADSP codec_dma intf channel map -- it treats
+		 * tx_slot[j] as a boolean for port j and emits ch_map += j.  Counting
+		 * via active_ch_cnt proved unreliable (read 0 while mask non-zero), so
+		 * tx_num is derived from the mask here.
+		 */
+		memset(tx_slot, 0, sizeof(*tx_slot) * VA_MACRO_DEC_MAX);
+		for_each_set_bit(dec, &va->active_ch_mask[dai->id], VA_MACRO_DEC_MAX)
+			tx_slot[dec] = 1;
+		*tx_num = VA_MACRO_DEC_MAX;
+		n = 0;
+		for_each_set_bit(dec, &va->active_ch_mask[dai->id], VA_MACRO_DEC_MAX)
+			if (n++ >= 4)
+				break;
+		dev_info(va_dev, "MICDBG va_get_channel_map: dai=%d tx_num=%u mask=0x%lx slots=[%u,%u,%u,%u]\n",
+			 dai->id, *tx_num, va->active_ch_mask[dai->id],
+			 (va->active_ch_mask[dai->id] & BIT(0)) ? 1 : 0,
+			 (va->active_ch_mask[dai->id] & BIT(1)) ? 1 : 0,
+			 (va->active_ch_mask[dai->id] & BIT(2)) ? 1 : 0,
+			 (va->active_ch_mask[dai->id] & BIT(3)) ? 1 : 0);
 		break;
 	default:
 		dev_err(va_dev, "%s: Invalid AIF\n", __func__);
