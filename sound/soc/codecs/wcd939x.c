@@ -666,20 +666,39 @@ static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 	 * RX keeps the 1-based index — the headset path is untested on
 	 * erhai; do not churn it without a wired-headset test rig.
 	 */
-	map_idx = wcd->is_tx ? mstr_port_num - 1 : mstr_port_num;
+	if (mstr_port_num) {
+		map_idx = wcd->is_tx ? mstr_port_num - 1 : mstr_port_num;
 
-	/* TEMP DEBUG (mic bringup, +b24) */
-	pr_info("MICDBG connect_port: ch_port=%d ch_mask=%#x en=%d -> cfg[%d] mask=%#x mport=%d mmap[%d]=%#x\n",
-		port_num, ch_mask, enable, (int)(port_config - &wcd->port_config[0]),
-		enable ? (port_config->ch_mask | ch_mask) : (port_config->ch_mask & ~ch_mask),
-		mstr_port_num, map_idx, wcd->master_channel_map[map_idx]);
+		/* TEMP DEBUG (mic bringup, +b24) */
+		pr_info("MICDBG connect_port: ch_port=%d ch_mask=%#x en=%d -> cfg[%d] mask=%#x mport=%d mmap[%d]=%#x\n",
+			port_num, ch_mask, enable, (int)(port_config - &wcd->port_config[0]),
+			enable ? (port_config->ch_mask | ch_mask) : (port_config->ch_mask & ~ch_mask),
+			mstr_port_num, map_idx, wcd->master_channel_map[map_idx]);
 
-	if (enable) {
-		port_config->ch_mask |= ch_mask;
-		wcd->master_channel_map[map_idx] |= mstr_ch_mask;
+		if (enable) {
+			port_config->ch_mask |= ch_mask;
+			wcd->master_channel_map[map_idx] |= mstr_ch_mask;
+		} else {
+			port_config->ch_mask &= ~ch_mask;
+			wcd->master_channel_map[map_idx] &= ~mstr_ch_mask;
+		}
 	} else {
-		port_config->ch_mask &= ~ch_mask;
-		wcd->master_channel_map[map_idx] &= ~mstr_ch_mask;
+		/*
+		 * No static master-port mapping (DMIC/MBHC ports rely on the
+		 * SWR master auto-allocation at stream setup, so the CPU-side
+		 * intf-map slot does not exist yet): only the slave-side port
+		 * ch_mask is valid.  Indexing master_channel_map[] with
+		 * map_idx = 0 - 1 = 255 here was a stack/heap-OOB that oopsed
+		 * on every boot restore of the DMICn Mixer switches (+b50).
+		 */
+		pr_info("MICDBG connect_port: ch_port=%d ch_mask=%#x en=%d -> cfg[%d] mask=%#x mport=0 (auto port, no master map)\n",
+			port_num, ch_mask, enable, (int)(port_config - &wcd->port_config[0]),
+			enable ? (port_config->ch_mask | ch_mask) : (port_config->ch_mask & ~ch_mask));
+
+		if (enable)
+			port_config->ch_mask |= ch_mask;
+		else
+			port_config->ch_mask &= ~ch_mask;
 	}
 
 	return 0;
