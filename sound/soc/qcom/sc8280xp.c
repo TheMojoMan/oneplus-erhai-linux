@@ -464,6 +464,9 @@ static int sc8280xp_snd_prepare(struct snd_pcm_substream *substream)
 	int ret = 0;
 
 	switch (cpu_dai->id) {
+	case VA_CODEC_DMA_TX_0:
+	case VA_CODEC_DMA_TX_1:
+	case VA_CODEC_DMA_TX_2:
 	case TX_CODEC_DMA_TX_0:
 	case TX_CODEC_DMA_TX_1:
 	case TX_CODEC_DMA_TX_2:
