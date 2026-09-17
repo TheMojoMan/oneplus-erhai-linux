@@ -1677,6 +1677,10 @@ static int wcd939x_codec_enable_micbias(struct snd_soc_dapm_widget *w,
 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
 	int micb_num = w->shift;
 
+	/* TEMP DEBUG (mic bringup, +b54): prove the bias supply ever powers */
+	dev_info(component->dev, "MICDBG micbias: widget=%s event=%d\n",
+		 w->name, event);
+
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		wcd939x_micbias_control(component, micb_num, MICB_ENABLE, true);
@@ -3110,6 +3114,22 @@ static const struct snd_soc_dapm_route wcd939x_audio_map[] = {
 	{"ADC1 MUX", "CH1_AMIC3", "AMIC3"},
 	{"ADC1 MUX", "CH1_AMIC4", "AMIC4"},
 	{"ADC1 MUX", "CH1_AMIC5", "AMIC5"},
+
+	/* erhai mic bringup (+b54): the MIC BIAS1-4 supply widgets were
+	 * orphaned (no DAPM route ever reached them), so the AMIC rails
+	 * stayed off and capture was deterministic silence (only the ADC
+	 * power-on transient). Power all four rails from the two AMICs used
+	 * on this board (AMIC2 = ADC1, AMIC5 = ADC4); refine to the physical
+	 * rail once the schematic assignment is known.
+	 */
+	{"AMIC2", NULL, "MIC BIAS1"},
+	{"AMIC2", NULL, "MIC BIAS2"},
+	{"AMIC2", NULL, "MIC BIAS3"},
+	{"AMIC2", NULL, "MIC BIAS4"},
+	{"AMIC5", NULL, "MIC BIAS1"},
+	{"AMIC5", NULL, "MIC BIAS2"},
+	{"AMIC5", NULL, "MIC BIAS3"},
+	{"AMIC5", NULL, "MIC BIAS4"},
 
 	{"ADC2_OUTPUT", NULL, "ADC2_MIXER"},
 	{"ADC2_MIXER", "Switch", "ADC2 REQ"},
