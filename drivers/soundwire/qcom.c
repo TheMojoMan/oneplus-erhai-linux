@@ -1349,9 +1349,28 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 				if (m_port)
 					pn = m_port;
 				else
-					pn = find_first_zero_bit(port_mask, maxport);
+					/*
+					 * erhai: the port_mask bit index IS the
+					 * 1-based port number, so a controller
+					 * with maxport ports has valid port
+					 * numbers 1..maxport.  Upstream
+					 * 6ccec91c35 ("soundwire: qcom: Fix port
+					 * exhaustion check") tightened the guard
+					 * to >= to catch exhaustion (a full mask
+					 * makes find_first_zero_bit() return
+					 * maxport), which now rejects the
+					 * legitimate LAST port.  erhai's TX
+					 * capture uses master ports 3 and 4 of
+					 * swr2's 4 din ports, so hw_params died
+					 * with -EBUSY ("All ports busy") on SDW
+					 * Pin0 and ALSA could not even open
+					 * hw:0,2 (2026-09-15..17, every boot).
+					 * Search one bit further instead: a full
+					 * mask then returns maxport + 1.
+					 */
+					pn = find_first_zero_bit(port_mask, maxport + 1);
 
-				if (pn >= maxport) {
+				if (pn > maxport) {
 					dev_err(ctrl->dev, "All ports busy\n");
 					return -EBUSY;
 				}
