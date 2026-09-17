@@ -8,6 +8,18 @@
 #include <sound/soc.h>
 #include "sdw.h"
 
+/*
+ * erhai mic tuning (2026-09-17): the ADSP's TX_CODEC_DMA_TX_3 intf must read
+ * the master-TX channel indices that carry the codec ADC1/ADC4 uplink.
+ * Android's recording-time CODEC_DMA-LPAIF_RXTX-TX-3 Channel Map = {0x02,
+ * 0x03}; the DAPM default {FL,FR} = {0,1} reads master-TX lanes that carry
+ * nothing on this topology, which is why MM3 capture is exact digital zeros.
+ * If a test build still shows zeros, the lane indices may need {3,4} (the
+ * port numbers are 1-based master-TX ports) -- flip and rebuild.
+ */
+#define ERHAI_MIC_TX_CH0	2
+#define ERHAI_MIC_TX_CH1	3
+
 static bool qcom_snd_is_sdw_dai(int id)
 {
 	switch (id) {
@@ -112,6 +124,24 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 					goto err_set_stream;
 			}
 		}
+	}
+
+	/*
+	 * erhai mic: force the ADSP to read the mic-carrying intf channels for
+	 * the MM3 capture (TX_CODEC_DMA_TX_3).  The DAPM default FL/FR (0,1)
+	 * map points at master-TX lanes that carry nothing on our topology, so
+	 * capture would stay exact zeros (Android sets these to 0x02/0x03).
+	 */
+	if (cpu_dai->id == TX_CODEC_DMA_TX_3) {
+		u32 mic_ch[2] = { ERHAI_MIC_TX_CH0, ERHAI_MIC_TX_CH1 };
+
+		ret = snd_soc_dai_set_channel_map(cpu_dai, ARRAY_SIZE(mic_ch), mic_ch, 0, NULL);
+		if (ret && ret != -ENOTSUPP) {
+			dev_err(rtd->dev, "erhai: set TX-3 channel map failed: %d\n", ret);
+			goto err_set_stream;
+		}
+		dev_dbg(rtd->dev, "erhai: %s channel_map -> {%u,%u}\n",
+			cpu_dai->name, mic_ch[0], mic_ch[1]);
 	}
 
 	return 0;
