@@ -172,6 +172,25 @@ int qcom_snd_sdw_prepare(struct snd_pcm_substream *substream,
 	if (*stream_prepared)
 		return 0;
 
+	/*
+	 * erhai mic (b49): re-assert the TX3 intf channel map HERE, after the
+	 * q6dma_hw_params() default-reset ({FL,FR}) that currently runs after
+	 * startup.  Without this the SDW prepare sends the ADSP the default map
+	 * and MM3 capture stays exact digital zeros (b48's no-op).
+	 */
+	if (cpu_dai->id == TX_CODEC_DMA_TX_3) {
+		u32 mic_ch[2] = { ERHAI_MIC_TX_CH0, ERHAI_MIC_TX_CH1 };
+
+		ret = snd_soc_dai_set_channel_map(cpu_dai, ARRAY_SIZE(mic_ch), mic_ch, 0, NULL);
+		if (ret && ret != -ENOTSUPP) {
+			dev_err(rtd->dev, "erhai: set TX-3 channel map failed: %d\n", ret);
+			return ret;
+		}
+		/* visible on purpose (dev build, one line per capture) */
+		dev_err(rtd->dev, "erhai: %s channel_map -> {%u,%u}\n",
+			cpu_dai->name, mic_ch[0], mic_ch[1]);
+	}
+
 	ret = sdw_prepare_stream(sruntime);
 	if (ret)
 		return ret;
