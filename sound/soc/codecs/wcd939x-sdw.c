@@ -1209,6 +1209,20 @@ static bool wcd939x_rdwr_register(struct device *dev, unsigned int reg)
 	case WCD939X_DSD_HPHR_CFG3:
 	case WCD939X_DSD_HPHR_CFG4:
 	case WCD939X_DSD_HPHR_CFG5:
+	/*
+	 * erhai mic EXPERIMENTAL: SDW DPn block (0x0100/0x0200 family).
+	 * Expose through the regmap so erhai_tx_chmap_silicon_regs can
+	 * program/verify the ADC->SWR uplink descriptor (Android records
+	 * these at record time; this driver never touched them).
+	 */
+	case WCD939X_DP1_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
 		return true;
 	}
 
@@ -1336,6 +1350,19 @@ static bool wcd939x_volatile_register(struct device *dev, unsigned int reg)
 	case WCD939X_RX_TOP_DSD1_DEBUG_CFG6:
 	case WCD939X_COMPANDER_HPHL_CTL6:
 	case WCD939X_R_CTL6:
+	/*
+	 * erhai mic EXPERIMENTAL: SDW DPn block regs bypass the regmap
+	 * cache (banked, live silicon) so the ChMap probe's writes hit the
+	 * bus and `regmap sdw:3 registers` shows the real state.
+	 */
+	case WCD939X_DP1_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
 		return true;
 	}
 	return false;
