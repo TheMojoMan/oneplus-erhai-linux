@@ -1371,6 +1371,21 @@ static int wcd939x_codec_enable_adc(struct snd_soc_dapm_widget *w,
 					      WCD939X_CDC_ANA_CLK_CTL_ANA_TX_DIV2_CLK_EN,
 					      true);
 		set_bit(w->shift, &wcd939x->status_mask);
+
+		/* TEMP DEBUG (mic bringup, +b52): analog TX front-end state
+		 * the moment the ADC DAPM path powers (ANA TX clock + the
+		 * analog TX channel regs). A live mic path shows
+		 * ANA_TX_CLK (0x3408 bit3) + DIV2 (bit4) set and, upstream,
+		 * the right MICB rail enabled. */
+		dev_info(component->dev,
+			 "MICDBG adc_on: widget=%s shift=%d ana_clk=0x%02x txch1=0x%02x txch2=0x%02x txch3=0x%02x txch4=0x%02x\n",
+			 w->name, w->shift,
+			 snd_soc_component_read(component,
+						WCD939X_DIGITAL_CDC_ANA_CLK_CTL),
+			 snd_soc_component_read(component, WCD939X_ANA_TX_CH1),
+			 snd_soc_component_read(component, WCD939X_ANA_TX_CH2),
+			 snd_soc_component_read(component, WCD939X_ANA_TX_CH3),
+			 snd_soc_component_read(component, WCD939X_ANA_TX_CH4));
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		snd_soc_component_write_field(component, WCD939X_DIGITAL_CDC_ANA_CLK_CTL,

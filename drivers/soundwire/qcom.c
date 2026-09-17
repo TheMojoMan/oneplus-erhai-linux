@@ -1182,7 +1182,51 @@ static int qcom_swrm_port_enable(struct sdw_bus *bus,
 		reg = SWRM_DPn_PCM_PORT_CTRL(pcm_offset, enable_ch->port_num);
 		dev_info(ctrl->dev, "MICDBG pcm_port: port %u reg=0x%x val=0x%x\n",
 			 enable_ch->port_num, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
-		return ctrl->reg_write(ctrl, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
+		ret = ctrl->reg_write(ctrl, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
+		if (ret)
+			return ret;
+
+		/* TEMP DEBUG (mic bringup, +b52): the master's live silicon
+		 * verdict while the TX data path is supposed to be running —
+		 * frame generation, latched interrupt status, and the per-port
+		 * transport registers the master believes it programmed (both
+		 * banks of PORT_CTRL_2 / the block word-length). A data-bearing
+		 * port shows PORT_CTRL EN_CHAN set, PORT_CTRL_2 lane, BLOCK_CTRL_1
+		 * = bps-1 (0x0f for 16-bit), PCM_PORT_CTRL = 0x3; frame_gen > 0
+		 * and int_stat with the outstanding-port bits. */
+		{
+			u32 fgen = 0, istat = 0, p2b0 = 0, p2b1 = 0, bc1 = 0, pcv = 0;
+			u32 p2_off = ctrl->reg_layout[SWRM_OFFSET_DP_PORT_CTRL_2_BANK];
+			u32 b1_off = ctrl->reg_layout[SWRM_OFFSET_DP_BLOCK_CTRL_1];
+
+			ctrl->reg_read(ctrl,
+				       ctrl->reg_layout[SWRM_REG_FRAME_GEN_ENABLED],
+				       &fgen);
+			ctrl->reg_read(ctrl,
+				       ctrl->reg_layout[SWRM_REG_INTERRUPT_STATUS],
+				       &istat);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_PORT_CTRL_2_BANK(p2_off,
+								enable_ch->port_num, 0),
+				       &p2b0);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_PORT_CTRL_2_BANK(p2_off,
+								enable_ch->port_num, 1),
+				       &p2b1);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_BLOCK_CTRL_1(b1_off,
+							       enable_ch->port_num),
+				       &bc1);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_PCM_PORT_CTRL(pcm_offset,
+							       enable_ch->port_num),
+				       &pcv);
+			dev_info(ctrl->dev,
+				 "MICDBG mstr_live: port %u bank %u frame_gen=0x%x int_stat=0x%x p2[b0]=0x%x p2[b1]=0x%x blk1=0x%x pcm=0x%x\n",
+				 enable_ch->port_num, bank, fgen, istat, p2b0,
+				 p2b1, bc1, pcv);
+		}
+		return 0;
 	}
 
 	if (!(val >> SWRM_DP_PORT_CTRL_EN_CHAN_SHFT)) {
