@@ -561,6 +561,32 @@ static int wcd939x_tx_master_ch_put(struct snd_kcontrol *kcontrol,
 	return 1;
 }
 
+/*
+ * erhai mic EXPERIMENTAL (probe): programme the codec's SDW DPn block
+ * (0x0100/0x0200 family — the ADC->SWR uplink descriptor Android writes
+ * at record time) at stream-UP with the trace byte pattern, bank-offset
+ * and CHANNEL_ENABLE = the port's effective ch_mask so the lane follows
+ * the ChMap.  Encoding UNVERIFIED; default OFF.  See the wcd939x.h DPN
+ * defines for the register layout argument.
+ */
+static int erhai_tx_chmap_silicon_regs;
+module_param(erhai_tx_chmap_silicon_regs, int, 0644);
+MODULE_PARM_DESC(erhai_tx_chmap_silicon_regs,
+		 "erhai mic: write SDW DPn channel-enable regs (0x0130-family) at stream-UP (EXPERIMENTAL, default 0)");
+
+static void wcd939x_tx_chmap_write_dpn(struct wcd939x_sdw_priv *wcd,
+				       u16 dp_base, u8 ch_mask)
+{
+	regmap_write(wcd->regmap, dp_base + WCD939X_DPN_INT_MASK_OFF, 0x00);
+	regmap_write(wcd->regmap, dp_base + WCD939X_DPN_CHANNEL_ENABLE_OFF, ch_mask);
+	regmap_write(wcd->regmap, dp_base + WCD939X_DPN_SAMPLE_CTRL1_OFF, 0x01);
+	regmap_write(wcd->regmap, dp_base + WCD939X_DPN_OFFSET_CTRL1_OFF, ch_mask);
+
+	dev_info(&wcd->sdev->dev,
+		 "MICDBG experimental: DPN base %#04x ch_en=%#x sample_ctrl1=0x01 offset_ctrl1=%#x\n",
+		 dp_base, ch_mask, ch_mask);
+}
+
 static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 				    const struct wcd_sdw_ch_info *ch_info,
 				    struct sdw_port_config *port_config,
@@ -609,6 +635,19 @@ static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 		}
 	} else {
 		mstr_ch_mask = ch_info->master_ch_mask;
+	}
+
+	/*
+	 * EXPERIMENTAL (probe, default OFF): replicate Android's record-time
+	 * DPN channel-enable writes on the mic uplink.  The CHANNEL_ENABLE
+	 * byte follows the effective port ch_mask (ChMap lane) so the probe
+	 * also answers whether the ChMap lane and the DPN block must agree.
+	 */
+	if (enable && erhai_tx_chmap_silicon_regs && wcd->is_tx) {
+		if (ch_id == WCD939X_ADC1)
+			wcd939x_tx_chmap_write_dpn(wcd, WCD939X_DP1_BASE, ch_mask);
+		else if (ch_id == WCD939X_ADC4)
+			wcd939x_tx_chmap_write_dpn(wcd, WCD939X_DP2_BASE, ch_mask);
 	}
 
 	/*
