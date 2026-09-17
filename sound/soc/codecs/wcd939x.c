@@ -1385,6 +1385,16 @@ static int wcd939x_codec_enable_adc(struct snd_soc_dapm_widget *w,
 			 snd_soc_component_read(component, WCD939X_ANA_TX_CH2),
 			 snd_soc_component_read(component, WCD939X_ANA_TX_CH3),
 			 snd_soc_component_read(component, WCD939X_ANA_TX_CH4));
+		dev_info(component->dev,
+			 "MICDBG adc_ana: ana_bias=0x%02x micb1=0x%02x micb2=0x%02x micb3=0x%02x micb4=0x%02x ch12mux=0x%02x txclk=0x%02x\n",
+			 snd_soc_component_read(component, WCD939X_ANA_BIAS),
+			 snd_soc_component_read(component, WCD939X_ANA_MICB1),
+			 snd_soc_component_read(component, WCD939X_ANA_MICB2),
+			 snd_soc_component_read(component, WCD939X_ANA_MICB3),
+			 snd_soc_component_read(component, WCD939X_ANA_MICB4),
+			 snd_soc_component_read(component, WCD939X_TX_NEW_CH12_MUX),
+			 snd_soc_component_read(component,
+					WCD939X_DIGITAL_CDC_ANA_TX_CLK_CTL));
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		snd_soc_component_write_field(component, WCD939X_DIGITAL_CDC_ANA_CLK_CTL,
