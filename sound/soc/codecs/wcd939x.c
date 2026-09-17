@@ -12,6 +12,7 @@
 #include <linux/delay.h>
 #include <linux/gpio/consumer.h>
 #include <linux/kernel.h>
+#include <linux/string.h>
 #include <linux/pm_runtime.h>
 #include <linux/component.h>
 #include <sound/tlv.h>
@@ -209,6 +210,12 @@ struct wcd939x_priv {
 	bool comp1_enable;
 	bool comp2_enable;
 	bool ldoh;
+	/* erhai mic: per-slave-channel TX master-ChMap (vendor
+	 * tx_master_ch_map model, see wcd939x_tx_master_ch_num[]).  Indexed
+	 * by the wcd939x_tx_sdw_channels id; ZERO (default) = no lane ->
+	 * the DTS-derived master_ch_mask is used by the connect.
+	 */
+	u8 tx_master_ch_map[WCD939X_MAX_SWR_CH_IDS];
 };
 
 static const char * const wcd939x_supplies[] = {
@@ -413,10 +420,151 @@ static int wcd939x_io_init(struct snd_soc_component *component)
 	return 0;
 }
 
+/*
+ * erhai mic: TX master-channel ChMap (vendor wcd939x tx_master_ch_map
+ * model).  Each slave TX channel (ADC1..DMIC7/MBHC) carries an optional
+ * master-lane LABEL that the CODEC_TX connect programmes into the SWR
+ * uplink instead of the DTS-derived master_ch_mask.  The label VALUES are
+ * the vendor audio-codec-port-types.h "master-channel NUMBER"s Android
+ * feeds to its swr_connect_port() port_type argument (SWRM_TX_PCM_OUT =
+ * 45, SWRM_TX1_CH1 = 46 .. SWRM_TX3_CH4 = 57).  TX4 (SWRM_TX4_CH1..CH4 =
+ * 58..61) is an erhai extension: the vendor enum stops at TX3, but OUR
+ * master ports are 3 (ADC1) and 4 (ADC4), so ADC4's lane needs TX4.
+ *
+ * Android ground truth on this pad (tinymix capturing):
+ *   "ADC1 ChMap = SWRM_TX2_CH1", "ADC4 ChMap = SWRM_TX3_CH2"
+ * which sun-audio-overlay.dtsi qcom,swr-port-mapping resolves to:
+ *   <3 SWRM_TX2_CH1 0x1> -> master port 3 ch1 = OUR "SWRM_TX3_CH1"
+ *   <4 SWRM_TX3_CH2 0x2> -> master port 4 ch2 = OUR "SWRM_TX4_CH2"
+ * (Android's 5-port TX master numbers port3 as "TX2", port4 as "TX3";
+ * our dts qcom,tx-port-mapping = <3 4 0 0> attaches ADC1/ADC4 to the
+ * same master ports, so the pads agree.)
+ */
+static const char * const wcd939x_tx_master_ch_text[] = {
+	"ZERO", "SWRM_PCM_OUT",
+	"SWRM_TX1_CH1", "SWRM_TX1_CH2", "SWRM_TX1_CH3", "SWRM_TX1_CH4",
+	"SWRM_TX2_CH1", "SWRM_TX2_CH2", "SWRM_TX2_CH3", "SWRM_TX2_CH4",
+	"SWRM_TX3_CH1", "SWRM_TX3_CH2", "SWRM_TX3_CH3", "SWRM_TX3_CH4",
+	"SWRM_TX4_CH1", "SWRM_TX4_CH2", "SWRM_TX4_CH3", "SWRM_TX4_CH4",
+	"SWRM_PCM_IN",
+};
+
+static const u8 wcd939x_tx_master_ch_num[] = {
+	0, 45,
+	46, 47, 48, 49,
+	50, 51, 52, 53,
+	54, 55, 56, 57,
+	58, 59, 60, 61,
+	62, /* SWRM_PCM_IN (58 = TX4_CH1 in the erhai extension) */
+};
+
+static_assert(ARRAY_SIZE(wcd939x_tx_master_ch_num) ==
+	      ARRAY_SIZE(wcd939x_tx_master_ch_text));
+
+static const struct soc_enum wcd939x_tx_master_ch_enum =
+	SOC_ENUM_SINGLE_EXT(ARRAY_SIZE(wcd939x_tx_master_ch_text),
+			    wcd939x_tx_master_ch_text);
+
+/* enum index of the stored lane NUMBER (0 = ZERO when unknown) */
+static unsigned int wcd939x_tx_master_ch_idx(u8 ch_num)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(wcd939x_tx_master_ch_num); i++)
+		if (wcd939x_tx_master_ch_num[i] == ch_num)
+			return i;
+
+	return 0;
+}
+
+/* lane (1..4) selected by a SWRM_TXn_CHm label, 0 when not a lane label */
+static unsigned int wcd939x_tx_master_ch_lane(u8 ch_num)
+{
+	if (ch_num < 46 || ch_num > 61)
+		return 0;
+
+	return ((ch_num - 46) % 4) + 1;
+}
+
+/* wcd939x_tx_sdw_channels id selected by an "ADCn/DMICn/MBHC ChMap" name */
+static int wcd939x_tx_master_ch_slave(const char *name)
+{
+	if (strnstr(name, "ADC1", sizeof("ADC1")))
+		return WCD939X_ADC1;
+	if (strnstr(name, "ADC2", sizeof("ADC2")))
+		return WCD939X_ADC2;
+	if (strnstr(name, "ADC3", sizeof("ADC3")))
+		return WCD939X_ADC3;
+	if (strnstr(name, "ADC4", sizeof("ADC4")))
+		return WCD939X_ADC4;
+	if (strnstr(name, "MBHC", sizeof("MBHC")))
+		return WCD939X_MBHC;
+	if (strnstr(name, "DMIC0", sizeof("DMIC0")))
+		return WCD939X_DMIC0;
+	if (strnstr(name, "DMIC1", sizeof("DMIC1")))
+		return WCD939X_DMIC1;
+	if (strnstr(name, "DMIC2", sizeof("DMIC2")))
+		return WCD939X_DMIC2;
+	if (strnstr(name, "DMIC3", sizeof("DMIC3")))
+		return WCD939X_DMIC3;
+	if (strnstr(name, "DMIC4", sizeof("DMIC4")))
+		return WCD939X_DMIC4;
+	if (strnstr(name, "DMIC5", sizeof("DMIC5")))
+		return WCD939X_DMIC5;
+	if (strnstr(name, "DMIC6", sizeof("DMIC6")))
+		return WCD939X_DMIC6;
+	if (strnstr(name, "DMIC7", sizeof("DMIC7")))
+		return WCD939X_DMIC7;
+
+	return -EINVAL;
+}
+
+static int wcd939x_tx_master_ch_get(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct wcd939x_priv *wcd939x = snd_soc_component_get_drvdata(component);
+	int slave;
+
+	slave = wcd939x_tx_master_ch_slave(kcontrol->id.name);
+	if (slave < 0 || slave >= ARRAY_SIZE(wcd939x->tx_master_ch_map))
+		return -EINVAL;
+
+	ucontrol->value.enumerated.item[0] =
+		wcd939x_tx_master_ch_idx(wcd939x->tx_master_ch_map[slave]);
+
+	return 0;
+}
+
+static int wcd939x_tx_master_ch_put(struct snd_kcontrol *kcontrol,
+				    struct snd_ctl_elem_value *ucontrol)
+{
+	struct snd_soc_component *component = snd_kcontrol_chip(kcontrol);
+	struct wcd939x_priv *wcd939x = snd_soc_component_get_drvdata(component);
+	unsigned int idx = ucontrol->value.enumerated.item[0];
+	int slave;
+
+	if (idx >= ARRAY_SIZE(wcd939x_tx_master_ch_text))
+		return -EINVAL;
+
+	slave = wcd939x_tx_master_ch_slave(kcontrol->id.name);
+	if (slave < 0 || slave >= ARRAY_SIZE(wcd939x->tx_master_ch_map))
+		return -EINVAL;
+
+	/* applied by the next connect_port; an open stream keeps the lane
+	 * it was connected with until it closes */
+	if (wcd939x->tx_master_ch_map[slave] == wcd939x_tx_master_ch_num[idx])
+		return 0;
+
+	wcd939x->tx_master_ch_map[slave] = wcd939x_tx_master_ch_num[idx];
+
+	return 1;
+}
+
 static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 				    const struct wcd_sdw_ch_info *ch_info,
 				    struct sdw_port_config *port_config,
-				    u8 enable)
+				    u8 enable, u8 ch_id)
 {
 	struct sdw_slave *sdev = wcd->sdev;
 	u8 ch_mask, port_num;
@@ -429,7 +577,39 @@ static int wcd939x_sdw_connect_port(struct wcd939x_sdw_priv *wcd,
 	port_config->num = port_num;
 
 	mstr_port_num = sdev->m_port_map[port_num];
-	mstr_ch_mask = ch_info->master_ch_mask;
+
+	/*
+	 * erhai mic ChMap (vendor model): when the slot for THIS slave
+	 * channel carries a non-ZERO lane label the connect programmes
+	 * that lane instead of the DTS-derived master_ch_mask.
+	 *   - the label rides the channel map AS-IS (the NUMBER, never
+	 *     CH_MASK()-wrapped) so get_channel_map/MICDBG shows Android's
+	 *     trace values (e.g. 54 = SWRM_TX3_CH1);
+	 *   - the CH1..CH4 it decodes to becomes the slave PORT channel
+	 *     mask, which is what the SWR master programmes into the DPn
+	 *     PCTL EN_CHAN bits (qcom_swrm_stream_alloc_ports passes the
+	 *     slave port ch_mask through to the master port config).
+	 * The TX-port number in the label (TXn) is diagnostic only: the
+	 * master port is fixed by DTS qcom,tx-port-mapping.
+	 */
+	if (wcd->is_tx && wcd->wcd939x && ch_id < WCD939X_MAX_SWR_CH_IDS) {
+		u8 ch_num = wcd->wcd939x->tx_master_ch_map[ch_id];
+		unsigned int lane = wcd939x_tx_master_ch_lane(ch_num);
+
+		if (ch_num && lane) {
+			mstr_ch_mask = ch_num;
+			ch_mask = BIT(lane - 1);
+
+			dev_info(&wcd->sdev->dev,
+				 "MICDBG chmap: slave ch %u on slv port %u -> mstr port %u lane num %u (TX%u_CH%u) port_ch_mask %#x\n",
+				 ch_id, port_num, mstr_port_num, ch_num,
+				 (ch_num - 46) / 4 + 1, lane, ch_mask);
+		} else {
+			mstr_ch_mask = ch_info->master_ch_mask;
+		}
+	} else {
+		mstr_ch_mask = ch_info->master_ch_mask;
+	}
 
 	/*
 	 * The ADSP codec_dma intf channel id is the 0-BASED master port
@@ -470,7 +650,7 @@ static int wcd939x_connect_port(struct wcd939x_sdw_priv *wcd, u8 port_num, u8 ch
 {
 	return wcd939x_sdw_connect_port(wcd, &wcd->ch_info[ch_id],
 					&wcd->port_config[port_num - 1],
-					enable);
+					enable, ch_id);
 }
 
 static int wcd939x_codec_enable_rxclk(struct snd_soc_dapm_widget *w,
@@ -2601,6 +2781,38 @@ static const struct snd_kcontrol_new wcd939x_snd_controls[] = {
 		       analog_gain),
 	SOC_SINGLE_TLV("ADC4 Volume", WCD939X_ANA_TX_CH4, 0, 20, 0,
 		       analog_gain),
+
+	/* erhai mic: TX master-channel ChMap (vendor model) — the lane
+	 * each slave TX channel connects to on the SWR uplink.  Defaults
+	 * are programmed at probe for our topology (ADC1 = master port 3
+	 * lane 1 = SWRM_TX3_CH1, ADC4 = master port 4 lane 2 =
+	 * SWRM_TX4_CH2). */
+	SOC_ENUM_EXT("ADC1 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("ADC2 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("ADC3 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("ADC4 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC0 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC1 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("MBHC ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC2 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC3 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC4 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC5 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC6 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
+	SOC_ENUM_EXT("DMIC7 ChMap", wcd939x_tx_master_ch_enum,
+		     wcd939x_tx_master_ch_get, wcd939x_tx_master_ch_put),
 };
 
 static const struct snd_soc_dapm_widget wcd939x_dapm_widgets[] = {
@@ -3026,6 +3238,17 @@ static int wcd939x_soc_codec_probe(struct snd_soc_component *component)
 	}
 
 	wcd939x_io_init(component);
+
+	/*
+	 * erhai mic ChMap defaults (the real topology, == the DTS
+	 * qcom,tx-channel-mapping and the Android lane ground truth):
+	 *   ADC1 -> master port 3 lane 1 = SWRM_TX3_CH1 (num 54)
+	 *   ADC4 -> master port 4 lane 2 = SWRM_TX4_CH2 (num 59)
+	 * Override at runtime via tinymix "ADCx ChMap" if a boot probe
+	 * needs another lane (e.g. SWRM_TX4_CH1 for ADC4).
+	 */
+	wcd939x->tx_master_ch_map[WCD939X_ADC1] = 54;
+	wcd939x->tx_master_ch_map[WCD939X_ADC4] = 59;
 
 	/* Set all interrupts as edge triggered */
 	for (i = 0; i < wcd939x_regmap_irq_chip.num_regs; i++)
