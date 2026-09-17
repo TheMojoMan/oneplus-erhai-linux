@@ -167,6 +167,14 @@
 
 #define VA_MACRO_MCLK_FREQ 9600000
 #define VA_MACRO_TX_PATH_OFFSET 0x80
+
+/* erhai mic bring-up (b56): optional dmic clk divider override for
+ * next-boot A/B testing.  -1 = use the DT qcom,dmic-sample-rate derived
+ * div (stock).  echo 2|3|4|6|8|16 > /sys/module/snd_soc_lpass_va_macro/parameters/erhai_va_dmic_div
+ * takes effect on the NEXT stream start (div read at va_dmic_clk_enable). */
+static int erhai_va_dmic_div = -1;
+module_param(erhai_va_dmic_div, int, 0644);
+MODULE_PARM_DESC(erhai_va_dmic_div, "erhai dev: override VA DMIC clk div (2/3/4/6/8/16); -1 = DT");
 #define VA_MACRO_SWR_MIC_MUX_SEL_MASK 0xF
 #define VA_MACRO_ADC_MUX_CFG_OFFSET 0x8
 
@@ -518,9 +526,15 @@ static int va_macro_mclk_event(struct snd_soc_dapm_widget *w,
 
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
-		return clk_prepare_enable(va->fsgen);
+	{
+		int rc = clk_prepare_enable(va->fsgen);
+		dev_info(comp->dev, "MICDBG va_mclk PRE_PMU fsgen rc=%d (swr=%d)\n",
+			 rc, va->has_swr_master);
+		return rc;
+	}
 	case SND_SOC_DAPM_POST_PMD:
 		clk_disable_unprepare(va->fsgen);
+		dev_info(comp->dev, "MICDBG va_mclk POST_PMD\n");
 	}
 
 	return 0;
@@ -659,6 +673,20 @@ static int va_dmic_clk_enable(struct snd_soc_component *component,
 
 	if (enable) {
 		clk_div = va->dmic_clk_div;
+		/* erhai dev: runtime div override (see erhai_va_dmic_div) */
+		if (erhai_va_dmic_div == 2)
+			clk_div = VA_MACRO_CLK_DIV_2;
+		else if (erhai_va_dmic_div == 3)
+			clk_div = VA_MACRO_CLK_DIV_3;
+		else if (erhai_va_dmic_div == 4)
+			clk_div = VA_MACRO_CLK_DIV_4;
+		else if (erhai_va_dmic_div == 6)
+			clk_div = VA_MACRO_CLK_DIV_6;
+		else if (erhai_va_dmic_div == 8)
+			clk_div = VA_MACRO_CLK_DIV_8;
+		else if (erhai_va_dmic_div == 16)
+			clk_div = VA_MACRO_CLK_DIV_16;
+
 		(*dmic_clk_cnt)++;
 		if (*dmic_clk_cnt == 1) {
 			snd_soc_component_update_bits(component,
@@ -671,6 +699,11 @@ static int va_dmic_clk_enable(struct snd_soc_component *component,
 			snd_soc_component_update_bits(component, dmic_clk_reg,
 						      CDC_VA_DMIC_EN_MASK,
 						      CDC_VA_DMIC_ENABLE);
+			dev_info(component->dev,
+				 "MICDBG va_dmic ENABLE dmic=%u div=%u reg=0x%x readback=0x%x\n",
+				 dmic, clk_div, dmic_clk_reg,
+				 snd_soc_component_read(component, dmic_clk_reg));
+
 		} else {
 			if (*dmic_clk_div > clk_div) {
 				snd_soc_component_update_bits(component,
@@ -775,6 +808,12 @@ static int va_macro_enable_dec(struct snd_soc_dapm_widget *w,
 		snd_soc_component_update_bits(comp, tx_vol_ctl_reg,
 					      CDC_VA_TX_PATH_CLK_EN_MASK,
 					      CDC_VA_TX_PATH_CLK_EN);
+		dev_info(comp->dev,
+			 "MICDBG va_dec POST_PMU dec=%u vol=0x%x cfg0=0x%x sec2=0x%x\n",
+			 decimator, snd_soc_component_read(comp, tx_vol_ctl_reg),
+			 snd_soc_component_read(comp, dec_cfg_reg),
+			 snd_soc_component_read(comp, hpf_gate_reg));
+
 		snd_soc_component_update_bits(comp, hpf_gate_reg,
 					      CDC_VA_TX_HPF_ZERO_GATE_MASK,
 					      CDC_VA_TX_HPF_ZERO_GATE);
@@ -893,6 +932,9 @@ static int va_macro_hw_params(struct snd_pcm_substream *substream,
 		return -EINVAL;
 	}
 
+	dev_info(va_dev, "MICDBG va_hw_params: dai_id=%d rate=%u ch_mask=0x%lx ch_cnt=%lu\n",
+		 dai->id, sample_rate, va->active_ch_mask[dai->id],
+		 va->active_ch_cnt[dai->id]);
 	for_each_set_bit(decimator, &va->active_ch_mask[dai->id],
 			 VA_MACRO_DEC_MAX) {
 		tx_fs_reg = CDC_VA_TX0_TX_PATH_CTL +
@@ -917,6 +959,8 @@ static int va_macro_get_channel_map(const struct snd_soc_dai *dai,
 	case VA_MACRO_AIF3_CAP:
 		*tx_slot = va->active_ch_mask[dai->id];
 		*tx_num = va->active_ch_cnt[dai->id];
+		dev_info(va_dev, "MICDBG va_get_channel_map: dai=%d tx_num=%u tx_slot=0x%x\n",
+			 dai->id, *tx_num, *tx_slot);
 		break;
 	default:
 		dev_err(va_dev, "%s: Invalid AIF\n", __func__);
