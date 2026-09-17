@@ -621,6 +621,10 @@ static int va_macro_tx_mixer_put(struct snd_kcontrol *kcontrol,
 		clear_bit(dec_id, &va->active_ch_mask[dai_id]);
 		va->active_ch_cnt[dai_id]--;
 	}
+	dev_info(component->dev,
+		 "MICDBG va_tx_mixer_put: widget=%s dai_id=%u dec=%u enable=%u -> mask=0x%lx cnt=%ld\n",
+		 widget->name, dai_id, dec_id, enable,
+		 va->active_ch_mask[dai_id], va->active_ch_cnt[dai_id]);
 
 	snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, enable, update);
 
