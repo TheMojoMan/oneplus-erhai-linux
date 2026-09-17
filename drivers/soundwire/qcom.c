@@ -1044,6 +1044,15 @@ static int qcom_swrm_port_params(struct sdw_bus *bus,
 	struct qcom_swrm_ctrl *ctrl = to_qcom_sdw(bus);
 	u32 offset = ctrl->reg_layout[SWRM_OFFSET_DP_BLOCK_CTRL_1];
 
+	/* TEMP DEBUG (mic bringup, +b53): did the master's block word-length
+	 * write actually happen and with which bps? (b52 mstr_live showed
+	 * blk1=0x0 on ports 3/4 while the slave's DPN block is 16-bit.) */
+	dev_info(ctrl->dev,
+		 "MICDBG mstr_blk1: port %u bank %u bps %u -> reg 0x%x val 0x%x\n",
+		 p_params->num, bank, p_params->bps,
+		 SWRM_DPn_BLOCK_CTRL_1(offset, p_params->num),
+		 p_params->bps - 1);
+
 	return ctrl->reg_write(ctrl, SWRM_DPn_BLOCK_CTRL_1(offset, p_params->num),
 				p_params->bps - 1);
 }
@@ -1256,6 +1265,11 @@ static int qcom_swrm_compute_params(struct sdw_bus *bus, struct sdw_stream_runti
 					     p_rt->num,  pcfg->word_length + 1,
 					     SDW_PORT_FLOW_MODE_ISOCH,
 					     SDW_PORT_DATA_MODE_NORMAL);
+			/* TEMP DEBUG (mic bringup, +b53) */
+			dev_info(ctrl->dev,
+				 "MICDBG cfg: mstr port %u word_len=%u bps=%u\n",
+				 p_rt->num, pcfg->word_length,
+				 pcfg->word_length + 1);
 			}
 
 		}
