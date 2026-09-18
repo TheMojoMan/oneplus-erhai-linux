@@ -9,16 +9,21 @@
 #include "sdw.h"
 
 /*
- * erhai mic tuning (2026-09-17): the ADSP's TX_CODEC_DMA_TX_3 intf must read
- * the master-TX channel indices that carry the codec ADC1/ADC4 uplink.
- * Android's recording-time CODEC_DMA-LPAIF_RXTX-TX-3 Channel Map = {0x02,
- * 0x03}; the DAPM default {FL,FR} = {0,1} reads master-TX lanes that carry
- * nothing on this topology, which is why MM3 capture is exact digital zeros.
- * If a test build still shows zeros, the lane indices may need {3,4} (the
- * port numbers are 1-based master-TX ports) -- flip and rebuild.
+ * erhai mic (2026-09-18, +b61): the TX_CODEC_DMA_TX_3 intf channel map is
+ * owned by the machine driver -- sc8280xp_snd_set_cpu_tx_channel_map()
+ * compacts the codec's get_channel_map() master_channel_map[] into the
+ * ascending list of master ports that carry active channels.  For our
+ * topology the codec reports map[1..4] = 0 54 59 0 (ADC1 -> master port 2,
+ * ADC4 -> master port 3), so the machine driver programs {2,3} -- exactly
+ * Android's recording-time ground truth
+ * "CODEC_DMA-LPAIF_RXTX-TX-3 Channel Map = {0x02,0x03}".
+ *
+ * The b48/b49/b59 blind override that used to live here ({2,3} then a
+ * speculative flip to {3,4}) is GONE on purpose: it ran 3 us AFTER the
+ * machine driver and silently clobbered the correct derived value with a
+ * guessed one.  Do NOT reintroduce a hardcoded lane list here -- if the map
+ * is wrong, fix the codec's master_channel_map[] / get_channel_map().
  */
-#define ERHAI_MIC_TX_CH0	3
-#define ERHAI_MIC_TX_CH1	4
 
 static bool qcom_snd_is_sdw_dai(int id)
 {
@@ -127,22 +132,13 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 	}
 
 	/*
-	 * erhai mic: force the ADSP to read the mic-carrying intf channels for
-	 * the MM3 capture (TX_CODEC_DMA_TX_3).  The DAPM default FL/FR (0,1)
-	 * map points at master-TX lanes that carry nothing on our topology, so
-	 * capture would stay exact zeros (Android sets these to 0x02/0x03).
+	 * NOTE: the TX_CODEC_DMA_TX_3 intf channel map is deliberately NOT
+	 * touched here any more.  sc8280xp_snd_set_cpu_tx_channel_map() (the
+	 * machine driver's .prepare) programs it from the codec's reported
+	 * port map and produces Android's {2,3}; the old b48/b49/b59 override
+	 * that lived at this spot ran AFTER it and clobbered the correct
+	 * value with a hardcoded guess.
 	 */
-	if (cpu_dai->id == TX_CODEC_DMA_TX_3) {
-		u32 mic_ch[2] = { ERHAI_MIC_TX_CH0, ERHAI_MIC_TX_CH1 };
-
-		ret = snd_soc_dai_set_channel_map(cpu_dai, ARRAY_SIZE(mic_ch), mic_ch, 0, NULL);
-		if (ret && ret != -ENOTSUPP) {
-			dev_err(rtd->dev, "erhai: set TX-3 channel map failed: %d\n", ret);
-			goto err_set_stream;
-		}
-		dev_dbg(rtd->dev, "erhai: %s channel_map -> {%u,%u}\n",
-			cpu_dai->name, mic_ch[0], mic_ch[1]);
-	}
 
 	return 0;
 
@@ -173,23 +169,14 @@ int qcom_snd_sdw_prepare(struct snd_pcm_substream *substream,
 		return 0;
 
 	/*
-	 * erhai mic (b49): re-assert the TX3 intf channel map HERE, after the
-	 * q6dma_hw_params() default-reset ({FL,FR}) that currently runs after
-	 * startup.  Without this the SDW prepare sends the ADSP the default map
-	 * and MM3 capture stays exact digital zeros (b48's no-op).
+	 * erhai mic (b61): the TX_CODEC_DMA_TX_3 channel-map override that
+	 * lived here (b49's re-assert, later flipped to {3,4} by b59) has been
+	 * REMOVED.  It was made obsolete by sc8280xp_snd_set_cpu_tx_channel_map()
+	 * -- the machine driver's .prepare runs before this function and derives
+	 * the map from the codec's real port map, yielding Android's {2,3}.
+	 * The hardcoded override contradicted it and won (it ran later), which
+	 * is why the ADSP was fed the wrong intf channels.  Leave this out.
 	 */
-	if (cpu_dai->id == TX_CODEC_DMA_TX_3) {
-		u32 mic_ch[2] = { ERHAI_MIC_TX_CH0, ERHAI_MIC_TX_CH1 };
-
-		ret = snd_soc_dai_set_channel_map(cpu_dai, ARRAY_SIZE(mic_ch), mic_ch, 0, NULL);
-		if (ret && ret != -ENOTSUPP) {
-			dev_err(rtd->dev, "erhai: set TX-3 channel map failed: %d\n", ret);
-			return ret;
-		}
-		/* visible on purpose (dev build, one line per capture) */
-		dev_err(rtd->dev, "erhai: %s channel_map -> {%u,%u}\n",
-			cpu_dai->name, mic_ch[0], mic_ch[1]);
-	}
 
 	ret = sdw_prepare_stream(sruntime);
 	if (ret)
