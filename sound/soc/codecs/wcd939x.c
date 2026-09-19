@@ -1461,31 +1461,6 @@ static int wcd939x_adc_enable_req(struct snd_soc_dapm_widget *w,
 			return -EINVAL;
 		}
 
-		/*
-		 * erhai mic (b60): Android's AMICn_MIXER power switches enable
-		 * the ANALOG TX channel amplifiers inside the wcd (the
-		 * ANA_TX_CHx ENABLE bits).  Our ADC DAPM only ever wrote the
-		 * digital TXA clock/mode and the HPF init bits, so the analog
-		 * input stage stayed dead -> the ADC digitized only its
-		 * power-on transient then exact zeros.  Mirror the vendor:
-		 *   ADC1 (shift 0/1) -> ANA_TX_CH2 ENABLE (bit7)
-		 *   ADC4 (shift 2/3) -> ANA_TX_CH4 ENABLE (bit7)
-		 * (ground truth: Android record = ADC1 MUX CH1_AMIC1 + ADC4
-		 * MUX CH4_AMIC5, and those AMICs' analog channels are CH2/CH4.)
-		 */
-		switch (w->shift) {
-		case 0:
-		case 1:
-			snd_soc_component_write_field(component, WCD939X_ANA_TX_CH2,
-						      WCD939X_TX_CH2_ENABLE, true);
-			break;
-		case 2:
-		case 3:
-			snd_soc_component_write_field(component, WCD939X_ANA_TX_CH4,
-						      WCD939X_TX_CH4_ENABLE, true);
-			break;
-		}
-
 		switch (w->shift) {
 		case 0:
 			snd_soc_component_write_field(component,
@@ -1534,23 +1509,6 @@ static int wcd939x_adc_enable_req(struct snd_soc_dapm_widget *w,
 		wcd939x_tx_channel_config(component, w->shift, false);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-		/*
-		 * Mirror of the PRE_PMU analog-channel enables above: clear
-		 * the same ANA_TX_CHx ENABLE bits so the analog input stage
-		 * powers down with the DAPM path.
-		 */
-		switch (w->shift) {
-		case 0:
-		case 1:
-			snd_soc_component_write_field(component, WCD939X_ANA_TX_CH2,
-						      WCD939X_TX_CH2_ENABLE, false);
-			break;
-		case 2:
-		case 3:
-			snd_soc_component_write_field(component, WCD939X_ANA_TX_CH4,
-						      WCD939X_TX_CH4_ENABLE, false);
-			break;
-		}
 		switch (w->shift) {
 		case 0:
 			snd_soc_component_write_field(component,
