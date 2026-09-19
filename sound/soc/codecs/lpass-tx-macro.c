@@ -40,6 +40,13 @@
 #define CDC_TX_TOP_CSR_SWR_DMIC0_CTL	(0x00C0)
 /* Default divider for AMIC and DMIC clock: DIV2 */
 #define CDC_TX_SWR_MIC_CLK_DEFAULT	0
+/*
+ * Vendor (OxygenOS) value for the SWR mic clock divider: DIV1.
+ * OxygenOS holds every SWR mic clock select (0xC0..0xD4) at 0x0E both idle and
+ * while capturing (live regmap ground truth); CDC_TX_SWR_MIC_CLK_DEFAULT (DIV2)
+ * is the upstream default and never appears in the vendor tree.
+ */
+#define CDC_TX_SWR_MIC_CLK_DIV1		0x0E
 #define CDC_TX_SWR_DMIC_CLK_SEL_MASK	GENMASK(3, 1)
 #define CDC_TX_TOP_CSR_SWR_DMIC1_CTL	(0x00C4)
 #define CDC_TX_TOP_CSR_SWR_DMIC2_CTL	(0x00C8)
@@ -991,9 +998,18 @@ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
 				dmic = TX_ADC_TO_DMIC(adc_n);
 				dmic_clk_reg = CDC_TX_TOP_CSR_SWR_DMICn_CTL(dmic);
 
-				snd_soc_component_write_field(component, dmic_clk_reg,
-							CDC_TX_SWR_DMIC_CLK_SEL_MASK,
-							CDC_TX_SWR_MIC_CLK_DEFAULT);
+				/*
+				 * erhai (b62) vendor parity: never reset the routed
+				 * SWR mic clock select to DIV2 here.  This runs at
+				 * stream start, i.e. AFTER the probe/mux-put writes
+				 * that set the vendor value, and it silently undid
+				 * them: live readback during capture showed the two
+				 * ROUTED registers (0xC0, 0xC8) at 0x00 while the
+				 * four unrouted ones stayed 0x0E.  OxygenOS keeps
+				 * all six at 0x0E (DIV1) idle and while capturing.
+				 */
+				snd_soc_component_write(component, dmic_clk_reg,
+							CDC_TX_SWR_MIC_CLK_DIV1);
 			}
 		}
 		snd_soc_component_write_field(component, dec_cfg_reg,
