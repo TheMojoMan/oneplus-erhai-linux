@@ -1895,8 +1895,39 @@
 	alloc-ranges = <0x00 0xa5000000 0x00 0x02000000>;
 };
 
+/*
+ * v-b63 (2026-09-20, NPU branch): enable the Hexagon COMPUTE DSP (CDSP).
+ * The Hexagon NPU (HTP, Hexagon Tensor Processor) is not a standalone
+ * peripheral: it is an accelerator hanging off the CDSP, driven by DSP-side
+ * firmware/libs (libhcp*, libQnnHtpV79Skel) that the AP loads over FastRPC.
+ * Enabling the CDSP is therefore the first (and mandatory) step of any NPU
+ * bring-up; without it there is no /dev/fastrpc-cdsp and nothing on which to
+ * run a tensor graph.
+ *
+ * Firmware: the device's own OxygenOS split image (cdsp.mdt + cdsp.bNN,
+ * cdsp_dtb.mdt + cdsp_dtb.bNN) taken from modem.img /image/, installed at
+ * /lib/firmware/qcom/sm8750/OnePlus/ by oneplus-erhai-firmware >= 1.2.
+ * PAS's default names for qcom,sm8650-cdsp-pas are exactly cdsp.mdt /
+ * cdsp_dtb.mdt, but the paths are spelled out here like the ADSP's, so the
+ * OnePlus blob directory stays the single source of truth.
+ *
+ * Carveout safety: cdsp_mem (0x9d200000 + 0x1900000) and q6_cdsp_dtb_mem
+ * (0x9eb00000 + 0x80000) are byte-for-byte the live OxygenOS layout
+ * (reserved-memory/cdsp_region@9d200000, q6_cdsp_dtb_region@9eb00000 in the
+ * device's own DTB) -- unlike the ADSP's adspslpi carveout (v209 hard hang),
+ * nothing has to be resized and PAS relocates the image inside the exact OEM
+ * window. nsp_noc (the NSP/CDSP NoC the node's interconnect path uses) has no
+ * status property, so it is already enabled.
+ *
+ * Expected after boot: /sys/class/remoteproc/remoteproc1 (cdsp) running,
+ * /dev/fastrpc-cdsp + /dev/fastrpc-cdsp-secure, and hexagonrpcd-cdsp.service
+ * serving /var/lib/hexagonfs-cdsp (fastrpc_shell_3 / _unsigned_3 + the
+ * Hexagon skel libs from the device's dsp partition).
+ */
 &remoteproc_cdsp {
-	status = "disabled";
+	firmware-name = "qcom/sm8750/OnePlus/cdsp.mdt",
+			"qcom/sm8750/OnePlus/cdsp_dtb.mdt";
+	status = "okay";
 };
 
 &remoteproc_mpss {
