@@ -82,6 +82,29 @@
 #define FASTRPC_MAX_DSP_ATTRIBUTES (256)
 #define FASTRPC_MAX_DSP_ATTRIBUTES_LEN (sizeof(u32) * FASTRPC_MAX_DSP_ATTRIBUTES)
 
+/*
+ * erhai: a DSP-side unmap failure (FASTRPC_RMID_INIT_UNMAP for a coherent
+ * buffer, FASTRPC_RMID_INIT_MEM_UNMAP for a mapped dma-buf) means the DSP no
+ * longer has that mapping -- typically because the PD was torn down while it
+ * still had entries.  Upstream keeps the buffer/mapping on the host list in
+ * that case, so it is only released when the client closes /dev/fastrpc-*.
+ * A long-lived client (Qualcomm's cdsprpcd never closes the node) therefore
+ * leaks its SMMU/IOVA space request after request and the device ends up in
+ * the permanent "failed to map buffer, fd = N" state documented in
+ * npu-MEMORY-2026-09-20.md (continuation 10: 10 x fastrpc_test -d 3 churn ->
+ * every later NPU model load fails with -100201 until the CDSP is restarted).
+ *
+ * With this enabled (default) the host-side resources are released right away,
+ * which makes the mapping space self-healing.  The reason upstream does not do
+ * it is the (unproven) possibility that the DSP still refers to the memory the
+ * unmap failed on; set fastrpc.release_failed_unmap=0 to get the upstream
+ * behaviour back for an A/B without rebuilding the kernel.
+ */
+static bool release_failed_unmap = true;
+module_param(release_failed_unmap, bool, 0644);
+MODULE_PARM_DESC(release_failed_unmap,
+	"erhai: release the host buffer/mapping when the DSP refuses to unmap it (default 1)");
+
 /* Retrives number of input buffers from the scalars parameter */
 #define REMOTE_SCALARS_INBUFS(sc)	(((sc) >> 16) & 0x0ff)
 
@@ -2029,7 +2052,7 @@ static int fastrpc_req_munmap_impl(struct fastrpc_user *fl, struct fastrpc_buf *
 		dev_dbg(dev, "unmmap\tpt 0x%09lx OK\n", buf->raddr);
 		fastrpc_buf_free(buf);
 	} else {
-		dev_err(dev, "unmmap\tpt 0x%09lx ERROR\n", buf->raddr);
+		dev_err(dev, "unmmap\tpt 0x%09lx ERROR (%d)\n", buf->raddr, err);
 	}
 
 	return err;
@@ -2063,9 +2086,25 @@ static int fastrpc_req_munmap(struct fastrpc_user *fl, char __user *argp)
 
 	err = fastrpc_req_munmap_impl(fl, buf);
 	if (err) {
-		spin_lock(&fl->lock);
-		list_add_tail(&buf->node, &fl->mmaps);
-		spin_unlock(&fl->lock);
+		if (release_failed_unmap) {
+			/*
+			 * erhai: the DSP dropped this mapping (that is why the
+			 * request failed), so parking the buffer back on
+			 * fl->mmaps would leak its coherent memory AND the IOVA
+			 * range the fastrpc device holds for it until this
+			 * client closes /dev/fastrpc-*.  cdsprpcd never does,
+			 * which is exactly how the mapping space used to
+			 * exhaust itself -- see the parameter above.
+			 */
+			dev_warn(dev,
+				 "unmmap\tpt 0x%09lx failed (%d); releasing host buffer\n",
+				 buf->raddr, err);
+			fastrpc_buf_free(buf);
+		} else {
+			spin_lock(&fl->lock);
+			list_add_tail(&buf->node, &fl->mmaps);
+			spin_unlock(&fl->lock);
+		}
 	}
 
 	return err;
@@ -2168,7 +2207,18 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 	return 0;
 
 err_assign:
-	fastrpc_req_munmap_impl(fl, buf);
+	if (fastrpc_req_munmap_impl(fl, buf) && release_failed_unmap) {
+		/*
+		 * erhai: the buffer is already on fl->mmaps here (it was added
+		 * before copy_to_user()), and fastrpc_req_munmap_impl() only
+		 * frees it when the DSP accepted the unmap -- drop it instead
+		 * of leaking it, same reasoning as in fastrpc_req_munmap().
+		 */
+		spin_lock(&fl->lock);
+		list_del(&buf->node);
+		spin_unlock(&fl->lock);
+		fastrpc_buf_free(buf);
+	}
 
 	return err;
 }
@@ -2209,7 +2259,17 @@ static int fastrpc_req_mem_unmap_impl(struct fastrpc_user *fl, struct fastrpc_me
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc,
 				      &args[0]);
 	if (err) {
-		dev_err(dev, "unmmap\tpt fd = %d, 0x%09llx error\n",  map->fd, map->raddr);
+		dev_err(dev, "unmmap\tpt fd = %d, 0x%09llx error %d\n",
+			map->fd, map->raddr, err);
+		if (release_failed_unmap)
+			/*
+			 * erhai: release the host mapping (dma_buf attachment +
+			 * its SMMU/IOVA range) instead of leaving it in
+			 * fl->maps for the whole lifetime of this client -- the
+			 * DSP has just told us it does not have it any more.
+			 * See the parameter above.
+			 */
+			fastrpc_map_put(map);
 		return err;
 	}
 	fastrpc_map_put(map);
