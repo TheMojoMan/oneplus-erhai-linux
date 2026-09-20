@@ -565,6 +565,24 @@
 			size = <0x0 0xc00000>;
 			reusable;
 		};
+
+		/*
+		 * Reserved DMA pool for the CDSP FastRPC node (the Hexagon
+		 * compute DSP that hosts the NPU/HTP).  Without a memory-region
+		 * the driver logs "no reserved DMA memory for FASTRPC" and all
+		 * FastRPC coherent allocations fall back to the general DMA API
+		 * under a 32-bit DMA mask, which on a 16 GB tablet cannot serve
+		 * large DSP buffers (fastrpc_req_mem_map -> ENOMEM).
+		 * Size and 4 MB alignment match the vendor (OxygenOS) device
+		 * tree's "secure_cdsp_region" pool.
+		 */
+		cdsp_rpc_remote_heap_mem: cdsp-rpc-remote-heap {
+			compatible = "shared-dma-pool";
+			alloc-ranges = <0x0 0x00000000 0x0 0xffffffff>;
+			alignment = <0x0 0x400000>;
+			size = <0x0 0x4800000>;
+			reusable;
+		};
 	};
 
 	smp2p-adsp {
@@ -6146,6 +6164,7 @@
 					compatible = "qcom,fastrpc";
 					qcom,glink-channels = "fastrpcglink-apps-dsp";
 					label = "cdsp";
+					memory-region = <&cdsp_rpc_remote_heap_mem>;
 					qcom,non-secure-domain;
 					#address-cells = <1>;
 					#size-cells = <0>;
