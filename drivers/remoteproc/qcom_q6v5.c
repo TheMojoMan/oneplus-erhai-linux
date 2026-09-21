@@ -21,6 +21,19 @@
 #define Q6V5_LOAD_STATE_MSG_LEN	64
 #define Q6V5_PANIC_DELAY_MS	200
 
+/*
+ * erhai: some remote processors keep asserting their handover SMP2P bit after
+ * the first handover has been consumed -- the SM8750 ADSP does it ~5 times per
+ * second for the whole uptime, which turned the "already happened" dev_err in
+ * q6v5_handover_interrupt() into a log flood (131k lines in one boot: console
+ * plus journal). Report the first repeat of each start cycle and keep the rest
+ * quiet; qcom_q6v5.erhai_handover_quiet=0 restores the unconditional dev_err.
+ */
+static bool erhai_handover_quiet = true;
+module_param(erhai_handover_quiet, bool, 0644);
+MODULE_PARM_DESC(erhai_handover_quiet,
+	"Report only the first repeated handover signal (default: Y)");
+
 static int q6v5_load_state_toggle(struct qcom_q6v5 *q6v5, bool enable)
 {
 	int ret;
@@ -97,6 +110,7 @@ int qcom_q6v5_prepare(struct qcom_q6v5 *q6v5)
 
 	q6v5->running = true;
 	q6v5->handover_issued = false;
+	q6v5->handover_repeat_reported = false;
 
 	q6v5_handover_irq_enable(q6v5);
 
@@ -198,6 +212,24 @@ EXPORT_SYMBOL_GPL(qcom_q6v5_wait_for_start);
 static irqreturn_t q6v5_handover_interrupt(int irq, void *data)
 {
 	struct qcom_q6v5 *q6v5 = data;
+
+	if (q6v5->handover_issued) {
+		/*
+		 * The first handover already released the proxy resources; the
+		 * remote is only re-asserting its bit (see erhai_handover_quiet
+		 * above). Report the first repeat, then stay silent.
+		 */
+		if (!erhai_handover_quiet || !q6v5->handover_repeat_reported)
+			dev_err(q6v5->dev,
+				"Handover signaled, but it already happened\n");
+		else
+			dev_dbg(q6v5->dev,
+				"Handover signaled again, ignored\n");
+
+		q6v5->handover_repeat_reported = true;
+
+		return IRQ_HANDLED;
+	}
 
 	q6v5->handover_issued = true;
 
