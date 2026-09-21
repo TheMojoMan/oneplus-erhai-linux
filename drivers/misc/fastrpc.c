@@ -483,6 +483,19 @@ static void fastrpc_map_footprint_all(struct fastrpc_channel_ctx *cctx,
 	spin_unlock(&cctx->lock);
 }
 
+/*
+ * erhai: one-line IOVA usage of this client's channel domain.  Called from the
+ * free paths so the space that never comes back can be attributed to the exact
+ * call that failed to return its range -- the per-load CDSP leak measured on
+ * 2026-09-21 (see npu-MEMORY-2026-09-21.md continuation 24).  Safe in atomic
+ * context: the walk takes the allocator's rbtree lock only.
+ */
+static void fastrpc_iova_summary(struct fastrpc_user *fl, const char *tag)
+{
+	if (fl && fl->sctx)
+		iommu_dma_iova_summary(fl->sctx->dev, tag);
+}
+
 static void fastrpc_free_map(struct kref *ref)
 {
 	struct fastrpc_map *map;
@@ -511,6 +524,16 @@ static void fastrpc_free_map(struct kref *ref)
 						  DMA_BIDIRECTIONAL);
 		dma_buf_detach(map->buf, map->attach);
 		dma_buf_put(map->buf);
+	}
+
+	{
+		char tag[64];
+
+		/* erhai: did THIS free give the IOVA range back? */
+		snprintf(tag, sizeof(tag),
+			 "free-map fd %d size 0x%llx len 0x%llx attr 0x%x tbl %d",
+			 map->fd, map->size, map->len, map->attr, !!map->table);
+		fastrpc_iova_summary(map->fl, tag);
 	}
 
 	if (map->fl) {
@@ -573,8 +596,14 @@ static int fastrpc_map_lookup(struct fastrpc_user *fl, int fd,
 
 static void fastrpc_buf_free(struct fastrpc_buf *buf)
 {
+	char tag[64];
+
 	dma_free_coherent(buf->dev, buf->size, buf->virt,
 			  fastrpc_ipa_to_dma_addr(buf->fl->cctx, buf->dma_addr));
+	/* erhai: did this coherent-buffer free return its IOVA range? */
+	snprintf(tag, sizeof(tag), "free-buf size 0x%llx dev %s",
+		 buf->size, dev_name(buf->dev));
+	fastrpc_iova_summary(buf->fl, tag);
 	kfree(buf);
 }
 
@@ -666,8 +695,13 @@ static void fastrpc_user_free(struct kref *ref)
 	struct fastrpc_map *map, *m;
 	struct fastrpc_buf *buf, *b;
 
-	if (fl->init_mem)
+	/* erhai: the arena state as this client goes away */
+	fastrpc_iova_summary(fl, "exit-in");
+
+	if (fl->init_mem) {
 		fastrpc_buf_free(fl->init_mem);
+		fastrpc_iova_summary(fl, "exit-after-init_mem");
+	}
 
 	/*
 	 * erhai: report what this client still holds at the moment it goes away
@@ -689,14 +723,17 @@ static void fastrpc_user_free(struct kref *ref)
 		list_del(&ctx->node);
 		fastrpc_context_put(ctx);
 	}
+	fastrpc_iova_summary(fl, "exit-after-pending");
 
 	list_for_each_entry_safe(map, m, &fl->maps, node)
 		fastrpc_map_put(map);
+	fastrpc_iova_summary(fl, "exit-after-maps");
 
 	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
 		list_del(&buf->node);
 		fastrpc_buf_free(buf);
 	}
+	fastrpc_iova_summary(fl, "exit-after-mmaps");
 
 	fastrpc_channel_ctx_put(fl->cctx);
 	mutex_destroy(&fl->mutex);
@@ -1701,6 +1738,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	struct fastrpc_phy_page pages[1];
 	struct fastrpc_map *map = NULL;
 	struct fastrpc_buf *imem = NULL;
+
 	int memlen;
 	int err;
 	struct {
@@ -1713,6 +1751,13 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	} inbuf;
 	u32 sc;
 	bool unsigned_module = false;
+
+	/*
+	 * erhai: the arena state every time a new DSP process is created -- one
+	 * of these lines per HTP load makes the per-load leak rate visible
+	 * directly (a flat series means the loads recycle their space).
+	 */
+	fastrpc_iova_summary(fl, "init-create-in");
 
 	args = kzalloc_objs(*args, FASTRPC_CREATE_PROCESS_NARGS);
 	if (!args)

@@ -918,6 +918,50 @@ void iommu_dma_dump_iova(struct device *dev)
 }
 EXPORT_SYMBOL_GPL(iommu_dma_dump_iova);
 
+/**
+ * iommu_dma_iova_summary - one-line IOVA usage of a device's DMA domain
+ * @dev: device whose iommu domain is inspected
+ * @tag: caller-supplied tag, printed verbatim
+ *
+ * erhai: cheap companion to iommu_dma_dump_iova() -- one dev_warn line with the
+ * domain's range count and allocated bytes, safe to call from the fastrpc
+ * mapping / coherent-buffer free paths.  It answers the 2026-09-21 CDSP
+ * question directly: does a free RETURN the IOVA range, or does the arena only
+ * ever grow?  (Measured: ~50 MB of IOVA per completed HTP load has no live
+ * owner -- see npu-MEMORY-2026-09-21.md.)
+ */
+void iommu_dma_iova_summary(struct device *dev, const char *tag)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct iommu_dma_cookie *cookie;
+	struct iova_domain *iovad;
+	struct rb_node *n;
+	unsigned long flags, shift;
+	unsigned long long total = 0;
+	unsigned int count = 0;
+
+	if (!domain || domain->cookie_type != IOMMU_COOKIE_DMA_IOVA)
+		return;
+	cookie = domain->iova_cookie;
+	if (!cookie)
+		return;
+	iovad = &cookie->iovad;
+	shift = iova_shift(iovad);
+
+	spin_lock_irqsave(&iovad->iova_rbtree_lock, flags);
+	for (n = rb_first(&iovad->rbroot); n; n = rb_next(n)) {
+		struct iova *iv = container_of(n, struct iova, node);
+
+		total += ((u64)iv->pfn_hi + 1 - iv->pfn_lo) << shift;
+		count++;
+	}
+	spin_unlock_irqrestore(&iovad->iova_rbtree_lock, flags);
+
+	dev_warn(dev, "erhai: iova[%s] %u ranges 0x%llx bytes\n", tag, count,
+		 total);
+}
+EXPORT_SYMBOL_GPL(iommu_dma_iova_summary);
+
 static void iommu_dma_free_iova(struct iommu_domain *domain, dma_addr_t iova,
 				size_t size, struct iommu_iotlb_gather *gather)
 {
