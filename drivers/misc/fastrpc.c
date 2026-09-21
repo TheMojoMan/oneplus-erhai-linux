@@ -15,6 +15,7 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/sort.h>
+#include <linux/iommu-dma.h>
 #include <linux/of_platform.h>
 #include <linux/rpmsg.h>
 #include <linux/scatterlist.h>
@@ -1047,6 +1048,12 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 			"erhai: map_attach: dma_buf_map_attachment failed (fd = %d len 0x%llx err %d; client holds %u maps / 0x%llx bytes; ALL %u clients hold %u maps / 0x%llx bytes)\n",
 			fd, len, err, nmaps, held, nclients_all, nmaps_all,
 			held_all);
+		/*
+		 * erhai: -ENOMEM here means "no free IOVA range of this size in
+		 * this domain" -- dump the domain's IOVA tree so the holder is
+		 * visible (fastrpc's own accounting cannot see it).
+		 */
+		iommu_dma_dump_iova(sess->dev);
 		goto map_err;
 	}
 	map->table = table;
