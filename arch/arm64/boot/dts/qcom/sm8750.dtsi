@@ -6161,28 +6161,7 @@
 				label = "cdsp";
 
 				fastrpc {
-					/*
-					 * erhai: the Hexagon NPU path needs the
-					 * Kaanapali (== SM8750) soc_data, not the
-					 * generic one.  kaanapali_soc_data has
-					 * dma_addr_bits_cdsp = 34 and sid_pos = 56
-					 * (16 GB IOVA arena on the CDSP), while
-					 * default_soc_data caps it with a 32-bit DMA
-					 * mask (4 GB arena) -- which is what makes
-					 * the NPU run out of mapping space after ~20
-					 * model loads (each load peaks at 1.84 GiB;
-					 * see npu-MEMORY-2026-09-21.md).
-					 *
-					 * The two knobs are coupled: with sid_pos=32
-					 * the SID occupies the very address bits a
-					 * >4 GB IOVA would need.  Upstream uses the
-					 * same compatible for this SoC (see
-					 * arch/arm64/boot/dts/qcom/kaanapali.dtsi).
-					 * Deliberately CDSP-only: the ADSP node keeps
-					 * the generic compatible so sensors/audio (the
-					 * working FastRPC clients) are untouched.
-					 */
-					compatible = "qcom,kaanapali-fastrpc", "qcom,fastrpc";
+					compatible = "qcom,fastrpc";
 					qcom,glink-channels = "fastrpcglink-apps-dsp";
 					label = "cdsp";
 					memory-region = <&cdsp_rpc_remote_heap_mem>;
