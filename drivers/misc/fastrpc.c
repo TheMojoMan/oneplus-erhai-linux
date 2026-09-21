@@ -911,8 +911,12 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	int err = 0, sgl_index = 0;
 
 	map = kzalloc_obj(*map);
-	if (!map)
+	if (!map) {
+		dev_err(sess->dev,
+			"erhai: map_attach: kzalloc failed (fd = %d len 0x%llx)\n",
+			fd, len);
 		return -ENOMEM;
+	}
 
 	INIT_LIST_HEAD(&map->node);
 	kref_init(&map->refcount);
@@ -922,6 +926,9 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	map->buf = dma_buf_get(fd);
 	if (IS_ERR(map->buf)) {
 		err = PTR_ERR(map->buf);
+		dev_err(sess->dev,
+			"erhai: map_attach: dma_buf_get failed (fd = %d len 0x%llx err %d)\n",
+			fd, len, err);
 		goto get_err;
 	}
 
@@ -935,6 +942,18 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	table = dma_buf_map_attachment_unlocked(map->attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(table)) {
 		err = PTR_ERR(table);
+		/*
+		 * erhai: this is where the 2026-09-21 mapping-exhaustion
+		 * failure lands -- the only message it produced was
+		 * "failed to map buffer, fd = N" in fastrpc_req_mem_map(),
+		 * while upstream prints nothing here.  -ENOMEM means the
+		 * SMMU/IOVA or dma-buf mapping space is full; -EINVAL/-EBUSY
+		 * would mean the mapping is being refused for another reason.
+		 * See npu-MEMORY-2026-09-21.md (continuation 13).
+		 */
+		dev_err(sess->dev,
+			"erhai: map_attach: dma_buf_map_attachment failed (fd = %d len 0x%llx err %d)\n",
+			fd, len, err);
 		goto map_err;
 	}
 	map->table = table;
@@ -947,8 +966,10 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		sgl_index)
 		map->size += sg_dma_len(sgl);
 	if (len > map->size) {
-		dev_dbg(sess->dev, "Bad size passed len 0x%llx map size 0x%llx\n",
-				len, map->size);
+		/* erhai: surface this rejected map at the default log level. */
+		dev_err(sess->dev,
+			"erhai: map_attach: bad size passed len 0x%llx map size 0x%llx (fd = %d)\n",
+			len, map->size, fd);
 		err = -EINVAL;
 		goto map_err;
 	}
