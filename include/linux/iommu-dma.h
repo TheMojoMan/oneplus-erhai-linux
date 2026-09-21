@@ -29,8 +29,14 @@ static inline bool use_dma_iommu(struct device *dev)
  * See the implementation for why it exists.
  */
 void iommu_dma_dump_iova(struct device *dev);
+/*
+ * erhai: one-line summary (ranges + bytes) of the same domain, cheap enough for
+ * the fastrpc map/buffer free paths -- shows whether a free returns space.
+ */
+void iommu_dma_iova_summary(struct device *dev, const char *tag);
 #else
 static inline void iommu_dma_dump_iova(struct device *dev) { }
+static inline void iommu_dma_iova_summary(struct device *dev, const char *tag) { }
 #endif /* CONFIG_IOMMU_DMA */
 
 dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
