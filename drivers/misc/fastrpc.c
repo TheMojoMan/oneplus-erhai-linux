@@ -112,6 +112,36 @@ module_param(release_failed_unmap, bool, 0644);
 MODULE_PARM_DESC(release_failed_unmap,
 	"erhai: release the host buffer/mapping when the DSP refuses to unmap it (default 0 = upstream/vendor)");
 
+/*
+ * erhai: release a closing client's IOVA-bearing resources at fd close.
+ *
+ * WHY (measured, npu-MEMORY-2026-09-21.md continuations 25 + 26): a user invoke
+ * whose wait is interrupted (the client's thread is killed at process exit ->
+ * -ERESTARTSYS) is left in `fl->pending` WITH the reference
+ * `fastrpc_context_alloc()` took on `fastrpc_user`, and that reference is only
+ * released by `fastrpc_context_free()` -- which needs the *other* context
+ * reference (the one `fastrpc_invoke_send()` took for the DSP's reply) to be
+ * dropped first.  The result is an immortal context, so
+ * `fastrpc_user_free()` never runs for that client and its `init_mem`, its
+ * `fl->maps` and its `fl->mmaps` keep their IOVA ranges forever: measured as
+ * one copy per NPU model load (~49 MiB), which is what exhausts the 4 GiB CDSP
+ * arena after ~20 loads ("failed to map buffer, fd = N").
+ *
+ * The fix is not to make the context die sooner (it must stay alive until the
+ * DSP's reply arrives, exactly as upstream intends) but to release the
+ * *resources* of a client that is gone: by the time this runs
+ * `fastrpc_release_current_dsp_process()` has destroyed the DSP-side process,
+ * so no in-flight invoke of this client can still touch them.  The leftover
+ * contexts are ALSO unlinked and their extra reference dropped, so the client's
+ * `fastrpc_user` is reclaimed as soon as the late reply lands instead of never.
+ *
+ * `erhai_release_at_close=0` restores upstream behaviour without a rebuild.
+ */
+static bool erhai_release_at_close = true;
+module_param(erhai_release_at_close, bool, 0644);
+MODULE_PARM_DESC(erhai_release_at_close,
+	"erhai: release a closing fastrpc client's buffers/mappings at fd close even if an interrupted context still holds a reference (default 1)");
+
 /* Retrives number of input buffers from the scalars parameter */
 #define REMOTE_SCALARS_INBUFS(sc)	(((sc) >> 16) & 0x0ff)
 
@@ -594,8 +624,9 @@ static void fastrpc_dump_user_state(struct fastrpc_user *fl, const char *why)
 		 (unsigned long long)maps_sz, nmmaps,
 		 (unsigned long long)mmaps_sz,
 		 (unsigned long long)(fl->init_mem ? fl->init_mem->size : 0),
-		 kref == 1 ? "WILL RUN (next put is the last)"
-			   : "WILL NOT RUN (references still held)");
+		 kref == 0 ? "RUNNING NOW (kref 0)"
+			   : (kref == 1 ? "WILL RUN (next put is the last)"
+					: "WILL NOT RUN (references still held)"));
 
 	spin_lock_irqsave(&fl->lock, flags);
 	list_for_each_entry(ctx, &fl->pending, node) {
@@ -651,7 +682,7 @@ static void fastrpc_free_map(struct kref *ref)
 
 	if (map->fl) {
 		spin_lock(&map->fl->lock);
-		list_del(&map->node);
+		list_del_init(&map->node);
 		spin_unlock(&map->fl->lock);
 		map->fl = NULL;
 	}
@@ -804,12 +835,123 @@ static void fastrpc_channel_ctx_put(struct fastrpc_channel_ctx *cctx)
 
 static void fastrpc_context_put(struct fastrpc_invoke_ctx *ctx);
 
+/*
+ * erhai: release everything a client owns that holds CDSP IOVA ranges.
+ * Idempotent (it NULLs what it took), so it can run both at fd close and again
+ * from fastrpc_user_free() when the last reference finally drops.  Must be
+ * called with no locks held: fastrpc_buf_free()/fastrpc_map_put() call into the
+ * DMA/dma-buf layer and may sleep.
+ */
+static void fastrpc_user_release_buffers(struct fastrpc_user *fl, const char *why)
+{
+	struct fastrpc_map *map, *m;
+	struct fastrpc_buf *buf, *b, *imem;
+	LIST_HEAD(intr);
+	unsigned long flags;
+	unsigned int nmaps = 0, nmmaps = 0, nintr = 0;
+	u64 maps_sz = 0, imem_sz = 0;
+
+	spin_lock_irqsave(&fl->lock, flags);
+	imem = fl->init_mem;
+	fl->init_mem = NULL;
+	list_for_each_entry(map, &fl->maps, node) {
+		nmaps++;
+		maps_sz += map->size;
+	}
+	list_for_each_entry(buf, &fl->mmaps, node)
+		nmmaps++;
+	spin_unlock_irqrestore(&fl->lock, flags);
+	imem_sz = imem ? imem->size : 0;
+
+	/*
+	 * mmaps that an interrupted invoke parked on the channel (upstream only
+	 * frees those when the whole CDSP goes away -- i.e. never here).
+	 */
+	spin_lock_irqsave(&fl->cctx->lock, flags);
+	list_for_each_entry_safe(buf, b, &fl->cctx->invoke_interrupted_mmaps, node) {
+		if (buf->fl != fl)
+			continue;
+		list_del(&buf->node);
+		list_add_tail(&buf->node, &intr);
+		nintr++;
+	}
+	spin_unlock_irqrestore(&fl->cctx->lock, flags);
+
+	if (!imem && !nmaps && !nmmaps && !nintr)
+		return;
+
+	dev_warn(fl->sctx->dev,
+		 "erhai: %s: releasing client %d resources: init_mem 0x%llx, maps %u / 0x%llx, mmaps %u, parked-mmaps %u\n",
+		 why, fl->client_id, (unsigned long long)imem_sz, nmaps,
+		 (unsigned long long)maps_sz, nmmaps, nintr);
+
+	if (imem) {
+		fastrpc_buf_free(imem);
+		fastrpc_iova_summary(fl, "exit-after-init_mem");
+	}
+
+	list_for_each_entry_safe(map, m, &fl->maps, node) {
+		list_del_init(&map->node);
+		fastrpc_map_put(map);
+	}
+	fastrpc_iova_summary(fl, "exit-after-maps");
+
+	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
+		list_del(&buf->node);
+		fastrpc_buf_free(buf);
+	}
+	fastrpc_iova_summary(fl, "exit-after-mmaps");
+
+	list_for_each_entry_safe(buf, b, &intr, node) {
+		list_del(&buf->node);
+		fastrpc_buf_free(buf);
+	}
+	fastrpc_iova_summary(fl, "exit-after-parked");
+}
+
+/*
+ * erhai: unlink the contexts an interrupted invoke left in `fl->pending` and
+ * drop the reference each one holds on `fastrpc_user` (taken in
+ * fastrpc_context_alloc(), released in fastrpc_context_free()).
+ *
+ * The context object itself is NOT freed here -- the DSP's late reply owns the
+ * other reference and frees it (fastrpc_rpmsg_callback() -> put_work ->
+ * fastrpc_context_put()), which then lets fastrpc_user_free() run for a client
+ * that would otherwise be pinned forever.  Dropping our reference is safe in
+ * either order: the object can only be freed by the last of the two puts.
+ */
+static unsigned int fastrpc_cancel_pending_contexts(struct fastrpc_user *fl,
+						    const char *why)
+{
+	struct fastrpc_invoke_ctx *ctx, *n;
+	LIST_HEAD(dead);
+	unsigned long flags;
+	unsigned int count = 0;
+
+	spin_lock_irqsave(&fl->lock, flags);
+	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
+		list_del(&ctx->node);
+		list_add_tail(&ctx->node, &dead);
+		count++;
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+
+	list_for_each_entry_safe(ctx, n, &dead, node) {
+		dev_warn(fl->sctx->dev,
+			 "erhai: %s: dropping the user reference of left-over context ctxid 0x%llx sc 0x%x pid %d refs %d\n",
+			 why, ctx->ctxid, ctx->sc, ctx->pid,
+			 kref_read(&ctx->refcount));
+		list_del(&ctx->node);
+		fastrpc_context_put(ctx);
+	}
+
+	return count;
+}
+
 static void fastrpc_user_free(struct kref *ref)
 {
 	struct fastrpc_user *fl = container_of(ref, struct fastrpc_user, refcount);
 	struct fastrpc_invoke_ctx *ctx, *n;
-	struct fastrpc_map *map, *m;
-	struct fastrpc_buf *buf, *b;
 
 	/* erhai: what is still held here, and by whom (see the helper) */
 	fastrpc_dump_user_state(fl, "user-free");
@@ -817,10 +959,6 @@ static void fastrpc_user_free(struct kref *ref)
 	/* erhai: the arena state as this client goes away */
 	fastrpc_iova_summary(fl, "exit-in");
 
-	if (fl->init_mem) {
-		fastrpc_buf_free(fl->init_mem);
-		fastrpc_iova_summary(fl, "exit-after-init_mem");
-	}
 	/*
 	 * erhai: report what this client still holds at the moment it goes away
 	 * -- a non-zero footprint here is a mapping (and the IOVA range behind
@@ -837,21 +975,18 @@ static void fastrpc_user_free(struct kref *ref)
 				 nmaps, held);
 	}
 
+	/*
+	 * erhai: init_mem / maps / mmaps / parked mmaps -- normally already gone
+	 * (fastrpc_user_release_buffers() at fd close), so this is the no-op
+	 * second half of an idempotent pair.
+	 */
+	fastrpc_user_release_buffers(fl, "user-free");
+
 	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
 		list_del(&ctx->node);
 		fastrpc_context_put(ctx);
 	}
 	fastrpc_iova_summary(fl, "exit-after-pending");
-
-	list_for_each_entry_safe(map, m, &fl->maps, node)
-		fastrpc_map_put(map);
-	fastrpc_iova_summary(fl, "exit-after-maps");
-
-	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
-		list_del(&buf->node);
-		fastrpc_buf_free(buf);
-	}
-	fastrpc_iova_summary(fl, "exit-after-mmaps");
 
 	fastrpc_channel_ctx_put(fl->cctx);
 	mutex_destroy(&fl->mutex);
@@ -1757,6 +1892,18 @@ bail:
 		list_del(&ctx->node);
 		spin_unlock(&fl->lock);
 		fastrpc_context_put(ctx);
+	} else {
+		/*
+		 * erhai: this context, and the reference it holds on `fl`, stay
+		 * in fl->pending for the DSP's late reply -- which a client that
+		 * is exiting never lives to see, so at fd close the reference is
+		 * dropped there instead (fastrpc_cancel_pending_contexts()).
+		 * Logged because it is the entry point of the whole CDSP IOVA
+		 * exhaustion (npu-MEMORY-2026-09-21.md, continuation 26).
+		 */
+		dev_warn(fl->sctx->dev,
+			 "erhai: invoke left pending (err %d): handle 0x%x sc 0x%x pid %d client %d kernel %u\n",
+			 err, handle, sc, current->pid, fl->client_id, kernel);
 	}
 
 	if (err == -ERESTARTSYS) {
@@ -2103,6 +2250,24 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 	fastrpc_dump_user_state(fl, "fd-close");
 
 	fastrpc_release_current_dsp_process(fl);
+
+	/*
+	 * erhai: the client is gone and its DSP-side process has just been
+	 * released, so nothing of this client can be using its memory any more
+	 * -- give its IOVA ranges back now.  Needed because an interrupted
+	 * invoke leaves a context that pins `fastrpc_user` (see the b73 verdict
+	 * in npu-MEMORY-2026-09-21.md), i.e. fastrpc_user_free() may not run at
+	 * all; measured cost without this: ~49 MiB stranded per NPU model load.
+	 */
+	if (erhai_release_at_close) {
+		unsigned int cancelled;
+
+		fastrpc_user_release_buffers(fl, "fd-close");
+		cancelled = fastrpc_cancel_pending_contexts(fl, "fd-close");
+		dev_warn(fl->sctx->dev,
+			 "erhai: fd-close: client %d released its resources, cancelled %u left-over context(s), kref now %d\n",
+			 fl->client_id, cancelled, kref_read(&fl->refcount));
+	}
 
 	spin_lock_irqsave(&cctx->lock, flags);
 	list_del(&fl->user);
