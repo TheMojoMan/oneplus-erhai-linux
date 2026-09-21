@@ -803,6 +803,98 @@ done:
 	return (dma_addr_t)iova << shift;
 }
 
+/*
+ * erhai: dump the IOVA space that @dev's DMA domain is using.
+ *
+ * Why this exists: a failed dma-buf mapping on the CDSP reports -ENOMEM from
+ * alloc_iova_fast(), i.e. "no free IOVA range of this size" -- and nothing
+ * involved says WHO holds the space.  fastrpc's own accounting only sees its
+ * clients' live `maps`, so a few GiB of allocated IOVAs can be invisible while
+ * a 601 MB mapping fails.  Walking the iova rbtree answers it directly: how many
+ * ranges exist, their total size, the largest free gap and the biggest holders.
+ * Called only from fastrpc's mapping-failure path (rare), so it prints at warn.
+ */
+void iommu_dma_dump_iova(struct device *dev)
+{
+	struct iommu_domain *domain = iommu_get_domain_for_dev(dev);
+	struct iommu_dma_cookie *cookie;
+	struct iova_domain *iovad;
+	unsigned long shift, flags, prev_end, limit_pfn;
+	unsigned long long total = 0, gap_max = 0, gap_at = 0;
+	unsigned long long big_sz[8] = { }, big_lo[8] = { };
+	unsigned int count = 0;
+	struct rb_node *n;
+	int i, j;
+
+	if (!domain || domain->cookie_type != IOMMU_COOKIE_DMA_IOVA)
+		return;
+	cookie = domain->iova_cookie;
+	if (!cookie)
+		return;
+	iovad = &cookie->iovad;
+	shift = iova_shift(iovad);
+
+	limit_pfn = (unsigned long)(((u64)dma_get_mask(dev) + 1) >> shift);
+	if (domain->geometry.force_aperture) {
+		unsigned long ap = (unsigned long)
+			(((u64)domain->geometry.aperture_end + 1) >> shift);
+
+		if (ap < limit_pfn)
+			limit_pfn = ap;
+	}
+
+	spin_lock_irqsave(&iovad->iova_rbtree_lock, flags);
+	prev_end = iovad->start_pfn;
+	for (n = rb_first(&iovad->rbroot); n; n = rb_next(n)) {
+		struct iova *iv = container_of(n, struct iova, node);
+		unsigned long long lo = (u64)iv->pfn_lo << shift;
+		unsigned long long sz =
+			((u64)iv->pfn_hi + 1 - iv->pfn_lo) << shift;
+
+		if (iv->pfn_lo > prev_end) {
+			unsigned long long gap =
+				((u64)iv->pfn_lo - prev_end) << shift;
+
+			if (gap > gap_max) {
+				gap_max = gap;
+				gap_at = (u64)prev_end << shift;
+			}
+		}
+		total += sz;
+		count++;
+
+		for (i = 0; i < 8; i++) {
+			if (sz > big_sz[i]) {
+				for (j = 7; j > i; j--) {
+					big_sz[j] = big_sz[j - 1];
+					big_lo[j] = big_lo[j - 1];
+				}
+				big_sz[i] = sz;
+				big_lo[i] = lo;
+				break;
+			}
+		}
+		prev_end = iv->pfn_hi + 1;
+	}
+	if (limit_pfn > prev_end) {
+		unsigned long long gap = ((u64)limit_pfn - prev_end) << shift;
+
+		if (gap > gap_max) {
+			gap_max = gap;
+			gap_at = (u64)prev_end << shift;
+		}
+	}
+	spin_unlock_irqrestore(&iovad->iova_rbtree_lock, flags);
+
+	dev_warn(dev, "erhai: IOVA dump: %u ranges, 0x%llx bytes total; largest free gap 0x%llx at 0x%llx; limit 0x%llx; granule 0x%lx; iova start 0x%llx\n",
+		 count, total, gap_max, gap_at, (u64)limit_pfn << shift,
+		 iovad->granule, (u64)iovad->start_pfn << shift);
+	for (i = 0; i < 8 && big_sz[i]; i++)
+		dev_warn(dev, "erhai: IOVA holder %d: 0x%llx bytes at 0x%llx\n",
+			 i, big_sz[i], big_lo[i]);
+}
+EXPORT_SYMBOL_GPL(iommu_dma_dump_iova);
+
 static void iommu_dma_free_iova(struct iommu_domain *domain, dma_addr_t iova,
 				size_t size, struct iommu_iotlb_gather *gather)
 {

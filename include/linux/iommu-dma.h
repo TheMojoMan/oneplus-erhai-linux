@@ -22,6 +22,17 @@ static inline bool use_dma_iommu(struct device *dev)
 }
 #endif /* CONFIG_IOMMU_DMA */
 
+#ifdef CONFIG_IOMMU_DMA
+/*
+ * erhai: diagnostic dump of the IOVA space of the domain @dev is attached to
+ * (allocated range count/total, largest free gap, biggest individual holders).
+ * See the implementation for why it exists.
+ */
+void iommu_dma_dump_iova(struct device *dev);
+#else
+static inline void iommu_dma_dump_iova(struct device *dev) { }
+#endif /* CONFIG_IOMMU_DMA */
+
 dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
 		enum dma_data_direction dir, unsigned long attrs);
 void iommu_dma_unmap_phys(struct device *dev, dma_addr_t dma_handle,
