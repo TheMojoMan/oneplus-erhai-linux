@@ -1107,15 +1107,18 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 
 		fastrpc_map_footprint(fl, &nmaps, &held);
 		/*
-		 * erhai: `nents`/`first` are the fragmentation of what we just
-		 * mapped: one big segment means the whole buffer needs one
-		 * contiguous IOVA range, many 2 MB segments mean the arena is
-		 * consumed in small pieces (which decides whether "chunking"
-		 * would help at all).
+		 * erhai: `iova` is the address the SMMU/DSP will use, `nents`/`first`
+		 * are the fragmentation of what we just mapped: one big segment means
+		 * the whole buffer needs one contiguous IOVA range, many 2 MB segments
+		 * mean the arena is consumed in small pieces (which decides whether
+		 * "chunking" would help at all).  Watching the iova across loads also
+		 * shows whether the allocator reuses the same ranges or drifts.
 		 */
 		dev_info(sess->dev,
-			 "erhai: map ok fd = %d len 0x%llx (client now holds %u maps / 0x%llx bytes; sg %u nents, first 0x%x)\n",
-			 fd, len, nmaps, held, map->table->nents,
+			 "erhai: map ok fd = %d len 0x%llx iova 0x%llx (client holds %u maps / 0x%llx bytes; sg %u nents, first 0x%x)\n",
+			 fd, len,
+			 (unsigned long long)sg_dma_address(map->table->sgl),
+			 nmaps, held, map->table->nents,
 			 sg_dma_len(map->table->sgl));
 	}
 
@@ -2742,6 +2745,38 @@ static const struct of_device_id fastrpc_poll_supported_machines[] __maybe_unuse
 	{},
 };
 
+/*
+ * erhai: the CDSP address layout (sid_pos, and therefore the IOVA width that
+ * fits below it) is a property of the DSP firmware as much as of the SoC, and
+ * getting it wrong makes EVERY FastRPC call on that domain fail with
+ * "Error: dsp information is incorrect" (the very first DSP capability query
+ * dies, before any client mapping exists).
+ *
+ * Measured 2026-09-21: the kaanapali values (sid_pos 56 / 34 bits) break the
+ * OxygenOS CDSP firmware that this pad runs, so the 16 GB arena is NOT
+ * reachable by just picking the kaanapali compatible -- the firmware has to
+ * accept the layout.
+ *
+ * These parameters make the layout testable at RUNTIME, without a reboot:
+ *   modprobe fastrpc erhai_sid_pos=34 erhai_dma_bits=34   (try a layout)
+ *   modprobe fastrpc                                      (back to the DT)
+ * They apply to the CDSP channel ONLY -- the ADSP (sensors, audio) always
+ * keeps the soc_data its DT node matched.  Both values must move together:
+ * the IOVA width is exactly what sid_pos leaves below it (the DSP strips the
+ * SID bits back off, see fastrpc_ipa_to_dma_addr()).
+ */
+static unsigned int erhai_sid_pos;
+module_param(erhai_sid_pos, uint, 0644);
+MODULE_PARM_DESC(erhai_sid_pos,
+	"erhai: override soc_data.sid_pos on the CDSP channel (0 = matched soc_data)");
+
+static unsigned int erhai_dma_bits;
+module_param(erhai_dma_bits, uint, 0644);
+MODULE_PARM_DESC(erhai_dma_bits,
+	"erhai: override soc_data.dma_addr_bits_cdsp on the CDSP channel (0 = matched soc_data)");
+
+static struct fastrpc_soc_data erhai_override_soc_data;
+
 static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 {
 	struct device *rdev = &rpdev->dev;
@@ -2765,6 +2800,24 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 	if (domain_id < 0) {
 		dev_info(rdev, "FastRPC Domain %s not supported\n", domain);
 		return -EINVAL;
+	}
+
+	/*
+	 * erhai: optional runtime override of the CDSP address layout (see the
+	 * module parameter descriptions above).  Kept off the ADSP channel so
+	 * sensors/audio always run the DT-matched table.
+	 */
+	if ((erhai_sid_pos || erhai_dma_bits) && domain_id == CDSP_DOMAIN_ID) {
+		erhai_override_soc_data = *soc_data;
+		if (erhai_sid_pos)
+			erhai_override_soc_data.sid_pos = erhai_sid_pos;
+		if (erhai_dma_bits)
+			erhai_override_soc_data.dma_addr_bits_cdsp =
+				erhai_dma_bits;
+		soc_data = &erhai_override_soc_data;
+		dev_info(rdev, "erhai: CDSP soc_data override -> sid_pos %u, dma_addr_bits_cdsp %u\n",
+			 erhai_override_soc_data.sid_pos,
+			 erhai_override_soc_data.dma_addr_bits_cdsp);
 	}
 
 	if (of_reserved_mem_device_init_by_idx(rdev, rdev->of_node, 0))
