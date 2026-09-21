@@ -389,6 +389,39 @@ static void fastrpc_map_footprint(struct fastrpc_user *fl,
 	spin_unlock_irqrestore(&fl->lock, flags);
 }
 
+/*
+ * erhai: the mapping footprint of EVERY live client on this channel.  The
+ * per-client number alone cannot tell a fragmented arena from space held by
+ * another client -- cdsprpcd never exits, so whatever it holds is invisible in
+ * the client-exit print.  Diagnostic only, called from the failure path (hence
+ * spinlocks: no sleeping here).
+ */
+static void fastrpc_map_footprint_all(struct fastrpc_channel_ctx *cctx,
+				      unsigned int *nclients,
+				      unsigned int *nmaps, u64 *bytes)
+{
+	struct fastrpc_user *user;
+
+	*nclients = 0;
+	*nmaps = 0;
+	*bytes = 0;
+
+	spin_lock(&cctx->lock);
+	list_for_each_entry(user, &cctx->users, user) {
+		struct fastrpc_map *map;
+		unsigned long uflags;
+
+		(*nclients)++;
+		spin_lock_irqsave(&user->lock, uflags);
+		list_for_each_entry(map, &user->maps, node) {
+			(*nmaps)++;
+			*bytes += map->len;
+		}
+		spin_unlock_irqrestore(&user->lock, uflags);
+	}
+	spin_unlock(&cctx->lock);
+}
+
 static void fastrpc_free_map(struct kref *ref)
 {
 	struct fastrpc_map *map;
@@ -945,11 +978,13 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 
 	table = dma_buf_map_attachment_unlocked(map->attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(table)) {
-		unsigned int nmaps;
-		u64 held;
+		unsigned int nmaps, nclients_all, nmaps_all;
+		u64 held, held_all;
 
 		err = PTR_ERR(table);
 		fastrpc_map_footprint(fl, &nmaps, &held);
+		fastrpc_map_footprint_all(fl->cctx, &nclients_all, &nmaps_all,
+					  &held_all);
 		/*
 		 * erhai: this is where the 2026-09-21 mapping-exhaustion
 		 * failure lands -- the only message it produced was
@@ -957,11 +992,15 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		 * while upstream prints nothing here.  -ENOMEM means the
 		 * SMMU/IOVA or dma-buf mapping space is full; -EINVAL/-EBUSY
 		 * would mean the mapping is being refused for another reason.
-		 * See npu-MEMORY-2026-09-21.md (continuation 13).
+		 * The "ALL clients" figures matter because the arena is shared:
+		 * a long-lived client (cdsprpcd) never exits, so its holdings
+		 * are invisible in the client-exit print.  See
+		 * npu-MEMORY-2026-09-21.md (continuation 13).
 		 */
 		dev_err(sess->dev,
-			"erhai: map_attach: dma_buf_map_attachment failed (fd = %d len 0x%llx err %d; client already holds %u maps / 0x%llx bytes)\n",
-			fd, len, err, nmaps, held);
+			"erhai: map_attach: dma_buf_map_attachment failed (fd = %d len 0x%llx err %d; client holds %u maps / 0x%llx bytes; ALL %u clients hold %u maps / 0x%llx bytes)\n",
+			fd, len, err, nmaps, held, nclients_all, nmaps_all,
+			held_all);
 		goto map_err;
 	}
 	map->table = table;
@@ -1021,9 +1060,17 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		u64 held;
 
 		fastrpc_map_footprint(fl, &nmaps, &held);
+		/*
+		 * erhai: `nents`/`first` are the fragmentation of what we just
+		 * mapped: one big segment means the whole buffer needs one
+		 * contiguous IOVA range, many 2 MB segments mean the arena is
+		 * consumed in small pieces (which decides whether "chunking"
+		 * would help at all).
+		 */
 		dev_info(sess->dev,
-			 "erhai: map ok fd = %d len 0x%llx (client now holds %u maps / 0x%llx bytes)\n",
-			 fd, len, nmaps, held);
+			 "erhai: map ok fd = %d len 0x%llx (client now holds %u maps / 0x%llx bytes; sg %u nents, first 0x%x)\n",
+			 fd, len, nmaps, held, map->table->nents,
+			 sg_dma_len(map->table->sgl));
 	}
 
 	return 0;
@@ -2427,6 +2474,17 @@ static int fastrpc_cb_probe(struct platform_device *pdev)
 		dev_err(dev, "%u-bit DMA enable failed\n", dma_bits);
 		return rc;
 	}
+
+	/*
+	 * erhai: proves which soc_data the DT matched and how big this domain's
+	 * IOVA arena therefore is.  A CDSP compute-cb that prints "32-bit" here
+	 * is the 4 GB arena that runs out after ~20 model loads -- the node must
+	 * carry the "qcom,kaanapali-fastrpc" compatible for 34 bits (16 GB).
+	 * Diagnostic only.
+	 */
+	dev_info(dev, "erhai: compute-cb%u mask %u-bit, sid %u, sid_pos %u (domain %d)\n",
+		 sess->sid, dma_bits, sess->sid, cctx->soc_data->sid_pos,
+		 cctx->domain_id);
 
 	return 0;
 }
