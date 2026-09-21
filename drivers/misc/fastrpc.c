@@ -72,16 +72,21 @@
  * npu-MEMORY-2026-09-20.md (continuation 10: 10 x fastrpc_test -d 3 churn ->
  * every later NPU model load fails with -100201 until the CDSP is restarted).
  *
- * With this enabled (default) the host-side resources are released right away,
- * which makes the mapping space self-healing.  The reason upstream does not do
- * it is the (unproven) possibility that the DSP still refers to the memory the
- * unmap failed on; set fastrpc.release_failed_unmap=0 to get the upstream
- * behaviour back for an A/B without rebuilding the kernel.
+ * With this enabled the host-side resources are released right away, which
+ * makes the mapping space self-healing.  The reason upstream does not do it is
+ * the (unproven) possibility that the DSP still refers to the memory the unmap
+ * failed on, and the vendor OxygenOS kernel parks the mapping for the same
+ * reason -- and the 2026-09-21 b72 measurement proved the deviation fixes
+ * nothing here (the stranded space is not in this path at all; see
+ * npu-MEMORY-2026-09-21.md continuation 21 + 25).  The DEFAULT is therefore
+ * upstream/vendor behaviour (park the mapping); set
+ * fastrpc.release_failed_unmap=1 to re-enable the b65 deviation without
+ * rebuilding the kernel.
  */
-static bool release_failed_unmap = true;
+static bool release_failed_unmap;
 module_param(release_failed_unmap, bool, 0644);
 MODULE_PARM_DESC(release_failed_unmap,
-	"erhai: release the host buffer/mapping when the DSP refuses to unmap it (default 1)");
+	"erhai: release the host buffer/mapping when the DSP refuses to unmap it (default 0 = upstream/vendor)");
 
 /* Retrives number of input buffers from the scalars parameter */
 #define REMOTE_SCALARS_INBUFS(sc)	(((sc) >> 16) & 0x0ff)
@@ -496,6 +501,71 @@ static void fastrpc_iova_summary(struct fastrpc_user *fl, const char *tag)
 		iommu_dma_iova_summary(fl->sctx->dev, tag);
 }
 
+/*
+ * erhai: the state of ONE client at the moment it goes away -- and the verdict
+ * the 2026-09-21 leak investigation needs (npu-MEMORY-2026-09-21.md,
+ * continuation 25).  A client whose fd closes while its `fastrpc_user` kref is
+ * still > 1 never reaches `fastrpc_user_free()`, so its `init_mem`, its
+ * `fl->mmaps` and every map it did not explicitly unmap keep their IOVA ranges
+ * forever -- measured as 50 MiB per NPU model load.  The references are held by
+ * pending contexts (`fastrpc_context_alloc()` takes one each; released only in
+ * `fastrpc_context_free()`), so the pending ones are printed with their id and
+ * scalars.  Diagnostic only, on lifetime edges: fd close, user free, DSP
+ * process creation.
+ */
+static void fastrpc_dump_user_state(struct fastrpc_user *fl, const char *why)
+{
+	struct fastrpc_invoke_ctx *ctx;
+	struct fastrpc_buf *buf;
+	struct fastrpc_map *map;
+	unsigned long flags;
+	u64 maps_sz = 0, mmaps_sz = 0, pend_sz = 0;
+	unsigned int nmaps = 0, nmmaps = 0, npend = 0, shown = 0;
+	int kref;
+
+	if (!fl || !fl->sctx)
+		return;
+
+	kref = kref_read(&fl->refcount);
+
+	spin_lock_irqsave(&fl->lock, flags);
+	list_for_each_entry(map, &fl->maps, node) {
+		nmaps++;
+		maps_sz += map->size;
+	}
+	list_for_each_entry(buf, &fl->mmaps, node) {
+		nmmaps++;
+		mmaps_sz += buf->size;
+	}
+	list_for_each_entry(ctx, &fl->pending, node) {
+		npend++;
+		if (ctx->buf)
+			pend_sz += ctx->buf->size;
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+
+	dev_warn(fl->sctx->dev,
+		 "erhai: %s: client %d pd %d kref %d: pending %u / 0x%llx, maps %u / 0x%llx, mmaps %u / 0x%llx, init_mem 0x%llx -> fastrpc_user_free %s\n",
+		 why, fl->client_id, fl->pd, kref, npend,
+		 (unsigned long long)pend_sz, nmaps,
+		 (unsigned long long)maps_sz, nmmaps,
+		 (unsigned long long)mmaps_sz,
+		 (unsigned long long)(fl->init_mem ? fl->init_mem->size : 0),
+		 kref == 1 ? "WILL RUN (next put is the last)"
+			   : "WILL NOT RUN (references still held)");
+
+	spin_lock_irqsave(&fl->lock, flags);
+	list_for_each_entry(ctx, &fl->pending, node) {
+		if (shown++ >= 4)
+			break;
+		dev_warn(fl->sctx->dev,
+			 "erhai:   pending ctxid 0x%llx sc 0x%x pid %d refs %d buf 0x%llx\n",
+			 ctx->ctxid, ctx->sc, ctx->pid, kref_read(&ctx->refcount),
+			 (unsigned long long)(ctx->buf ? ctx->buf->size : 0));
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+}
+
 static void fastrpc_free_map(struct kref *ref)
 {
 	struct fastrpc_map *map;
@@ -694,6 +764,9 @@ static void fastrpc_user_free(struct kref *ref)
 	struct fastrpc_invoke_ctx *ctx, *n;
 	struct fastrpc_map *map, *m;
 	struct fastrpc_buf *buf, *b;
+
+	/* erhai: what is still held here, and by whom (see the helper) */
+	fastrpc_dump_user_state(fl, "user-free");
 
 	/* erhai: the arena state as this client goes away */
 	fastrpc_iova_summary(fl, "exit-in");
@@ -1839,6 +1912,9 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	if (err)
 		goto err_invoke;
 
+	/* erhai: tie this DSP process to its client, for the leak trace */
+	fastrpc_dump_user_state(fl, "init-create-ok");
+
 	kfree(args);
 
 	return 0;
@@ -1908,6 +1984,13 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 	struct fastrpc_user *fl = (struct fastrpc_user *)file->private_data;
 	struct fastrpc_channel_ctx *cctx = fl->cctx;
 	unsigned long flags;
+
+	/*
+	 * erhai: the moment that decides the whole 2026-09-21 leak -- if the
+	 * kref here is > 1, the user_free below will never run and this client's
+	 * IOVA ranges (init_mem / mmaps / maps) are stranded for good.
+	 */
+	fastrpc_dump_user_state(fl, "fd-close");
 
 	fastrpc_release_current_dsp_process(fl);
 
