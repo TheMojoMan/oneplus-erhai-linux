@@ -18,6 +18,7 @@
 #include <linux/of_platform.h>
 #include <linux/rpmsg.h>
 #include <linux/scatterlist.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <uapi/misc/fastrpc.h>
@@ -355,6 +356,39 @@ static inline u64 fastrpc_sid_offset(struct fastrpc_channel_ctx *cctx,
 	return (u64)sctx->sid << cctx->soc_data->sid_pos;
 }
 
+/*
+ * erhai: FastRPC mapping-footprint accounting for the CDSP mapping-space
+ * exhaustion (see npu-MEMORY-2026-09-21.md).  Every map belongs to exactly one
+ * client (fastrpc_user) and lives on that client's `maps` list, so walking the
+ * list reports the footprint directly -- there are no counters that could drift
+ * out of sync with it.  Two questions this answers:
+ *
+ *  - how much does a client still hold when it EXITS?  A mapping that outlives
+ *    its client is a leak, and the number should be 0 for every client.
+ *  - how much does a client already hold when a LARGE attach fails?  The CDSP
+ *    device is limited to a 32-bit DMA mask (dma_addr_bits_cdsp = 32 for the
+ *    "qcom,fastrpc" compatible), so its IOVA arena is at most 4 GB; the held
+ *    bytes at the moment of -ENOMEM are the floor of what is really consumed.
+ */
+static void fastrpc_map_footprint(struct fastrpc_user *fl,
+				  unsigned int *nmaps, u64 *bytes)
+{
+	struct fastrpc_map *map;
+	unsigned long flags;
+
+	*nmaps = 0;
+	*bytes = 0;
+	if (!fl)
+		return;
+
+	spin_lock_irqsave(&fl->lock, flags);
+	list_for_each_entry(map, &fl->maps, node) {
+		(*nmaps)++;
+		*bytes += map->len;
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+}
+
 static void fastrpc_free_map(struct kref *ref)
 {
 	struct fastrpc_map *map;
@@ -540,6 +574,22 @@ static void fastrpc_user_free(struct kref *ref)
 
 	if (fl->init_mem)
 		fastrpc_buf_free(fl->init_mem);
+
+	/*
+	 * erhai: report what this client still holds at the moment it goes away
+	 * -- a non-zero footprint here is a mapping (and the IOVA range behind
+	 * it) that outlived its user, i.e. exactly the CDSP exhaustion failure.
+	 */
+	{
+		unsigned int nmaps;
+		u64 held;
+
+		fastrpc_map_footprint(fl, &nmaps, &held);
+		if (nmaps)
+			dev_info(fl->sctx->dev,
+				 "erhai: client exiting: still holds %u mappings / 0x%llx bytes\n",
+				 nmaps, held);
+	}
 
 	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
 		list_del(&ctx->node);
@@ -895,7 +945,11 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 
 	table = dma_buf_map_attachment_unlocked(map->attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(table)) {
+		unsigned int nmaps;
+		u64 held;
+
 		err = PTR_ERR(table);
+		fastrpc_map_footprint(fl, &nmaps, &held);
 		/*
 		 * erhai: this is where the 2026-09-21 mapping-exhaustion
 		 * failure lands -- the only message it produced was
@@ -906,8 +960,8 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		 * See npu-MEMORY-2026-09-21.md (continuation 13).
 		 */
 		dev_err(sess->dev,
-			"erhai: map_attach: dma_buf_map_attachment failed (fd = %d len 0x%llx err %d)\n",
-			fd, len, err);
+			"erhai: map_attach: dma_buf_map_attachment failed (fd = %d len 0x%llx err %d; client already holds %u maps / 0x%llx bytes)\n",
+			fd, len, err, nmaps, held);
 		goto map_err;
 	}
 	map->table = table;
@@ -955,6 +1009,22 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	list_add_tail(&map->node, &fl->maps);
 	spin_unlock(&fl->lock);
 	*ppmap = map;
+
+	/*
+	 * erhai: a LARGE mapping is the one that fails once the arena fills up,
+	 * so report the client's footprint for those only (small mappings are
+	 * far too frequent to log) -- this is the growth curve of the
+	 * consumption that ends in -ENOMEM.
+	 */
+	if (len >= SZ_256M) {
+		unsigned int nmaps;
+		u64 held;
+
+		fastrpc_map_footprint(fl, &nmaps, &held);
+		dev_info(sess->dev,
+			 "erhai: map ok fd = %d len 0x%llx (client now holds %u maps / 0x%llx bytes)\n",
+			 fd, len, nmaps, held);
+	}
 
 	return 0;
 
