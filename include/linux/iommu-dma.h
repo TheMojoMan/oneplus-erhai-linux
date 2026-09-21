@@ -34,9 +34,20 @@ void iommu_dma_dump_iova(struct device *dev);
  * the fastrpc map/buffer free paths -- shows whether a free returns space.
  */
 void iommu_dma_iova_summary(struct device *dev, const char *tag);
+/*
+ * erhai: reconcile the domain's allocated IOVA ranges against the bytes the
+ * caller can attribute to live owners, printing the difference ("unaccounted")
+ * plus a size histogram and the biggest ranges -- names the space nobody owns.
+ */
+void iommu_dma_iova_residue(struct device *dev, const char *tag,
+			    unsigned long long accounted,
+			    unsigned int max_holders);
 #else
 static inline void iommu_dma_dump_iova(struct device *dev) { }
 static inline void iommu_dma_iova_summary(struct device *dev, const char *tag) { }
+static inline void iommu_dma_iova_residue(struct device *dev, const char *tag,
+					  unsigned long long accounted,
+					  unsigned int max_holders) { }
 #endif /* CONFIG_IOMMU_DMA */
 
 dma_addr_t iommu_dma_map_phys(struct device *dev, phys_addr_t phys, size_t size,
