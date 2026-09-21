@@ -822,6 +822,7 @@ void iommu_dma_dump_iova(struct device *dev)
 	unsigned long shift, flags, prev_end, limit_pfn;
 	unsigned long long total = 0, gap_max = 0, gap_at = 0;
 	unsigned long long big_sz[8] = { }, big_lo[8] = { };
+	unsigned long long holes[4] = { }, holes_at[4] = { };
 	unsigned int count = 0;
 	struct rb_node *n;
 	int i, j;
@@ -855,6 +856,18 @@ void iommu_dma_dump_iova(struct device *dev)
 			unsigned long long gap =
 				((u64)iv->pfn_lo - prev_end) << shift;
 
+			/* remember the 4 biggest holes, not just the biggest */
+			for (i = 3; i >= 0; i--) {
+				if (gap > holes[i]) {
+					for (j = 3; j > i; j--) {
+						holes[j] = holes[j - 1];
+						holes_at[j] = holes_at[j - 1];
+					}
+					holes[i] = gap;
+					holes_at[i] = (u64)prev_end << shift;
+					break;
+				}
+			}
 			if (gap > gap_max) {
 				gap_max = gap;
 				gap_at = (u64)prev_end << shift;
@@ -862,6 +875,9 @@ void iommu_dma_dump_iova(struct device *dev)
 		}
 		total += sz;
 		count++;
+		if (count <= 240)
+			dev_warn(dev, "erhai: IOVA range %u: 0x%llx bytes at 0x%llx\n",
+				 count, sz, lo);
 
 		for (i = 0; i < 8; i++) {
 			if (sz > big_sz[i]) {
@@ -879,6 +895,10 @@ void iommu_dma_dump_iova(struct device *dev)
 	if (limit_pfn > prev_end) {
 		unsigned long long gap = ((u64)limit_pfn - prev_end) << shift;
 
+		if (gap > holes[0]) {
+			holes[0] = gap;
+			holes_at[0] = (u64)prev_end << shift;
+		}
 		if (gap > gap_max) {
 			gap_max = gap;
 			gap_at = (u64)prev_end << shift;
@@ -889,6 +909,9 @@ void iommu_dma_dump_iova(struct device *dev)
 	dev_warn(dev, "erhai: IOVA dump: %u ranges, 0x%llx bytes total; largest free gap 0x%llx at 0x%llx; limit 0x%llx; granule 0x%lx; iova start 0x%llx\n",
 		 count, total, gap_max, gap_at, (u64)limit_pfn << shift,
 		 iovad->granule, (u64)iovad->start_pfn << shift);
+	for (i = 0; i < 4; i++)
+		dev_warn(dev, "erhai: top hole %d: 0x%llx bytes at 0x%llx\n",
+			 i, holes[i], holes_at[i]);
 	for (i = 0; i < 8 && big_sz[i]; i++)
 		dev_warn(dev, "erhai: IOVA holder %d: 0x%llx bytes at 0x%llx\n",
 			 i, big_sz[i], big_lo[i]);
