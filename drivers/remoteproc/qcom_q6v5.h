@@ -30,6 +30,8 @@ struct qcom_q6v5 {
 	int stop_irq;
 
 	bool handover_issued;
+	/* erhai: a repeated handover signal has already been reported */
+	bool handover_repeat_reported;
 
 	struct completion start_done;
 	struct completion stop_done;
