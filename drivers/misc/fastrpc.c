@@ -162,6 +162,23 @@ module_param(erhai_residue_holders, uint, 0644);
 MODULE_PARM_DESC(erhai_residue_holders,
 	"erhai: how many of the largest IOVA ranges that reconciliation lists (0 = summary + histogram only, max 32)");
 
+/*
+ * erhai (b77): print the ALLOC side of the CDSP IOVA books.
+ *
+ * b76 could only name the SIZE of the post-b75 residue (96 % 4-KiB ranges,
+ * ~19 per HTP model load) because the `iova[...]` stream printed frees only, and
+ * one-page allocations cannot be attributed from free-side deltas (the next
+ * invoke's allocation immediately follows).  With this on, every allocation that
+ * can hold an IOVA range -- coherent buffers and dma-buf mappings -- prints its
+ * call site and size, and the free paths print the same call-site string, so
+ * `allocs per tag - frees per tag` names the path that never returns its ranges.
+ * Turn it off (`erhai_alloc_report=0`) to get exactly the b76 log volume.
+ */
+static bool erhai_alloc_report = true;
+module_param(erhai_alloc_report, bool, 0644);
+MODULE_PARM_DESC(erhai_alloc_report,
+	"erhai: print every IOVA-bearing allocation with its call site (default 1; 0 == b76 logging)");
+
 /* Retrives number of input buffers from the scalars parameter */
 #define REMOTE_SCALARS_INBUFS(sc)	(((sc) >> 16) & 0x0ff)
 
@@ -312,6 +329,12 @@ struct fastrpc_buf {
 	/* mmap support */
 	struct list_head node; /* list of user requested mmaps */
 	uintptr_t raddr;
+	/*
+	 * erhai (b77): the call site that allocated it.  Every allocation that
+	 * can hold an IOVA range carries one, and the free path prints it again,
+	 * so `allocs per tag - frees per tag` closes the arena's books.
+	 */
+	const char *atag;
 };
 
 struct fastrpc_dma_buf_attachment {
@@ -334,6 +357,8 @@ struct fastrpc_map {
 	u64 raddr;
 	u32 attr;
 	struct kref refcount;
+	/* erhai (b77): which path attached it: "ctx", "user", "init-file" */
+	const char *kind;
 };
 
 struct fastrpc_invoke_ctx {
@@ -577,16 +602,35 @@ static void fastrpc_dump_client_iova(struct fastrpc_channel_ctx *cctx,
  * empty while a 601 MB mapping failed.  This is the corrected version, matching
  * fastrpc_map_footprint(); see npu-MEMORY-2026-09-21.md continuations 23 + 27.)
  */
+/*
+ * erhai (b77): what the accounting found -- overall, and for ONE device.
+ *
+ * The b76 version returned only the channel-wide total while the residue print
+ * measured a single device's IOVA domain, so `unaccounted` mixed domains (and
+ * "space no live client owns" could just be another client's
+ * compute-cb@N).  `dev_*` is the same sum restricted to the clients whose
+ * session device IS the device being reconciled, which is what
+ * iommu_dma_iova_residue() measures; the overall figures stay in the print for
+ * context.  See npu-MEMORY-2026-09-21.md continuation 28.
+ */
+struct fastrpc_acct {
+	unsigned int clients;
+	unsigned int objects;
+	u64 bytes;
+	unsigned int dev_clients;
+	u64 dev_bytes;
+};
+
+static void fastrpc_dev_label(const struct device *dev, char *buf, size_t len);
+
 static u64 fastrpc_account_clients(struct fastrpc_channel_ctx *cctx,
 				   struct device *dev, const char *tag,
-				   unsigned int *nclients,
-				   unsigned int *nobjects)
+				   struct device *for_dev,
+				   struct fastrpc_acct *out)
 {
 	struct fastrpc_user *user;
-	u64 total = 0;
-
-	*nclients = 0;
-	*nobjects = 0;
+	unsigned int nclients = 0, nobjects = 0, devclients = 0;
+	u64 total = 0, devbytes = 0;
 
 	spin_lock(&cctx->lock);
 	list_for_each_entry(user, &cctx->users, user) {
@@ -616,17 +660,40 @@ static u64 fastrpc_account_clients(struct fastrpc_channel_ctx *cctx,
 			imem_sz = user->init_mem->size;
 		spin_unlock_irqrestore(&user->lock, uflags);
 
-		(*nclients)++;
-		*nobjects += nmaps + nmmaps + npend + (imem_sz ? 1 : 0);
+		nclients++;
+		nobjects += nmaps + nmmaps + npend + (imem_sz ? 1 : 0);
 		total += maps_sz + mmaps_sz + pend_sz + imem_sz;
 
-		if (dev)
-			dev_warn(dev, "erhai: acct[%s] client %d pd %d: maps %u / 0x%llx, mmaps %u / 0x%llx, pending %u / 0x%llx, init_mem 0x%llx -> 0x%llx bytes\n",
+		/*
+		 * erhai (b77): the client's OWN session device is appended, because
+		 * the line's log prefix is the device DOING the reporting, not the
+		 * device this client holds its IOVA ranges in.
+		 */
+		if (user->sctx && user->sctx->dev == for_dev) {
+			devclients++;
+			devbytes += maps_sz + mmaps_sz + pend_sz + imem_sz;
+		}
+
+		if (dev) {
+			char label[40];
+
+			fastrpc_dev_label(user->sctx ? user->sctx->dev : NULL,
+					  label, sizeof(label));
+			dev_warn(dev, "erhai: acct[%s] client %d pd %d: maps %u / 0x%llx, mmaps %u / 0x%llx, pending %u / 0x%llx, init_mem 0x%llx -> 0x%llx bytes dev %s\n",
 				 tag, user->client_id, user->pd, nmaps, maps_sz,
 				 nmmaps, mmaps_sz, npend, pend_sz, imem_sz,
-				 maps_sz + mmaps_sz + pend_sz + imem_sz);
+				 maps_sz + mmaps_sz + pend_sz + imem_sz, label);
+		}
 	}
 	spin_unlock(&cctx->lock);
+
+	if (out) {
+		out->clients = nclients;
+		out->objects = nobjects;
+		out->bytes = total;
+		out->dev_clients = devclients;
+		out->dev_bytes = devbytes;
+	}
 
 	return total;
 }
@@ -642,7 +709,12 @@ static void fastrpc_map_footprint_all(struct fastrpc_channel_ctx *cctx,
 				      unsigned int *nclients,
 				      unsigned int *nobjects, u64 *bytes)
 {
-	*bytes = fastrpc_account_clients(cctx, NULL, NULL, nclients, nobjects);
+	struct fastrpc_acct acct = { };
+
+	fastrpc_account_clients(cctx, NULL, NULL, NULL, &acct);
+	*nclients = acct.clients;
+	*nobjects = acct.objects;
+	*bytes = acct.bytes;
 }
 
 /*
@@ -656,6 +728,69 @@ static void fastrpc_iova_summary(struct fastrpc_user *fl, const char *tag)
 {
 	if (fl && fl->sctx)
 		iommu_dma_iova_summary(fl->sctx->dev, tag);
+}
+
+/*
+ * erhai (b77): "32300000.remoteproc:glink-edge:fastrpc:compute-cb@2" ->
+ * "32300000/compute-cb@2".  The remoteproc address is kept because the CDSP and
+ * the ADSP both have compute-cb@N nodes (and separate IOVA domains), and the
+ * b76 reconciliation missed exactly that: it measured one device's arena while
+ * summing every client of the channel.
+ */
+static void fastrpc_dev_label(const struct device *dev, char *buf, size_t len)
+{
+	const char *n = dev ? dev_name(dev) : "?";
+	const char *p = strrchr(n, ':');
+
+	if (p && p[1])
+		snprintf(buf, len, "%.8s/%s", n, p + 1);
+	else
+		snprintf(buf, len, "%s", n);
+}
+
+/*
+ * erhai (b77): the ALLOC side of the books.  @tag is the call site (stored in
+ * buf->atag and reprinted by fastrpc_buf_free()), @ctxid the invoke context for
+ * the per-invoke packet buffer and 0 for the others.  The arena summary is
+ * printed AFTER the allocation, so every arena delta now has a printed cause.
+ */
+static void fastrpc_alloc_buf_report(struct fastrpc_user *fl, struct device *dev,
+				     const char *tag, u64 size, u64 ctxid)
+{
+	char sum[96], label[40];
+
+	if (!erhai_alloc_report || !fl || !fl->sctx)
+		return;
+
+	fastrpc_dev_label(dev, label, sizeof(label));
+	dev_warn(dev,
+		 "erhai: alloc-buf[%s] client %d ctxid 0x%llx size 0x%llx dev %s\n",
+		 tag, fl->client_id, ctxid, size, label);
+
+	snprintf(sum, sizeof(sum), "alloc-buf %s size 0x%llx", tag, size);
+	fastrpc_iova_summary(fl, sum);
+}
+
+/* erhai (b77): the same for a dma-buf mapping, which is where map->size (the
+ * IOVA cost) first differs from the length the client asked for. */
+static void fastrpc_alloc_map_report(struct fastrpc_user *fl, int fd,
+				     const char *kind, struct fastrpc_map *map,
+				     u64 len)
+{
+	char sum[96], label[40];
+
+	if (!erhai_alloc_report || !fl || !fl->sctx)
+		return;
+
+	fastrpc_dev_label(fl->sctx->dev, label, sizeof(label));
+	dev_warn(fl->sctx->dev,
+		 "erhai: alloc-map[%s] client %d fd %d len 0x%llx -> size 0x%llx iova 0x%llx dev %s\n",
+		 kind, fl->client_id, fd, len, map->size,
+		 (unsigned long long)sg_dma_address(map->table->sgl), label);
+
+	snprintf(sum, sizeof(sum), "alloc-map %s fd %d size 0x%llx len 0x%llx",
+		 kind, fd, map->size, len);
+	fastrpc_iova_summary(fl, sum);
 }
 
 /*
@@ -755,12 +890,16 @@ static void fastrpc_free_map(struct kref *ref)
 	}
 
 	{
-		char tag[64];
+		char tag[96];
 
-		/* erhai: did THIS free give the IOVA range back? */
+		/*
+		 * erhai: did THIS free give the IOVA range back?  b77 appends the
+		 * attaching call site, so the mapping books balance per path.
+		 */
 		snprintf(tag, sizeof(tag),
-			 "free-map fd %d size 0x%llx len 0x%llx attr 0x%x tbl %d",
-			 map->fd, map->size, map->len, map->attr, !!map->table);
+			 "free-map fd %d size 0x%llx len 0x%llx attr 0x%x tbl %d kind=%s",
+			 map->fd, map->size, map->len, map->attr, !!map->table,
+			 map->kind ? map->kind : "?");
 		fastrpc_iova_summary(map->fl, tag);
 	}
 
@@ -824,22 +963,28 @@ static int fastrpc_map_lookup(struct fastrpc_user *fl, int fd,
 
 static void fastrpc_buf_free(struct fastrpc_buf *buf)
 {
-	char tag[64];
+	char tag[96];
 
 	if (!buf)
 		return;
 
 	dma_free_coherent(buf->dev, buf->size, buf->virt,
 			  fastrpc_ipa_to_dma_addr(buf->fl->cctx, buf->dma_addr));
-	/* erhai: did this coherent-buffer free return its IOVA range? */
-	snprintf(tag, sizeof(tag), "free-buf size 0x%llx dev %s",
-		 buf->size, dev_name(buf->dev));
+	/*
+	 * erhai: did this coherent-buffer free return its IOVA range?  b77 adds
+	 * the allocating call site, so a range that comes back can be balanced
+	 * against the allocation that took it (the prefix is unchanged -- the
+	 * b75/b76 analysers parse "free-buf size 0x... ").
+	 */
+	snprintf(tag, sizeof(tag), "free-buf size 0x%llx dev %s from=%s",
+		 buf->size, dev_name(buf->dev), buf->atag ? buf->atag : "?");
 	fastrpc_iova_summary(buf->fl, tag);
 	kfree(buf);
 }
 
 static int __fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
-			     u64 size, struct fastrpc_buf **obuf)
+			     u64 size, struct fastrpc_buf **obuf,
+			     const char *tag, u64 ctxid)
 {
 	struct fastrpc_buf *buf;
 
@@ -857,6 +1002,7 @@ static int __fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 	buf->size = size;
 	buf->dev = dev;
 	buf->raddr = 0;
+	buf->atag = tag;
 
 	buf->virt = dma_alloc_coherent(dev, buf->size, &buf->dma_addr,
 				       GFP_KERNEL);
@@ -866,18 +1012,22 @@ static int __fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 		return -ENOMEM;
 	}
 
+	/* erhai (b77): the allocation that took the range, and the arena after it */
+	fastrpc_alloc_buf_report(fl, dev, tag, size, ctxid);
+
 	*obuf = buf;
 
 	return 0;
 }
 
 static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
-			     u64 size, struct fastrpc_buf **obuf)
+			     u64 size, struct fastrpc_buf **obuf,
+			     const char *tag, u64 ctxid)
 {
 	int ret;
 	struct fastrpc_buf *buf;
 
-	ret = __fastrpc_buf_alloc(fl, dev, size, obuf);
+	ret = __fastrpc_buf_alloc(fl, dev, size, obuf, tag, ctxid);
 	if (ret)
 		return ret;
 
@@ -890,11 +1040,12 @@ static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 }
 
 static int fastrpc_remote_heap_alloc(struct fastrpc_user *fl, struct device *dev,
-				     u64 size, struct fastrpc_buf **obuf)
+				     u64 size, struct fastrpc_buf **obuf,
+				     const char *tag, u64 ctxid)
 {
 	struct device *rdev = &fl->cctx->rpdev->dev;
 
-	return  __fastrpc_buf_alloc(fl, rdev, size, obuf);
+	return  __fastrpc_buf_alloc(fl, rdev, size, obuf, tag, ctxid);
 }
 
 static void fastrpc_channel_ctx_free(struct kref *ref)
@@ -1372,7 +1523,8 @@ static dma_addr_t fastrpc_compute_dma_addr(struct fastrpc_user *fl, dma_addr_t s
 }
 
 static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
-			      u64 len, u32 attr, struct fastrpc_map **ppmap)
+			      u64 len, u32 attr, struct fastrpc_map **ppmap,
+			      const char *kind)
 {
 	struct fastrpc_session_ctx *sess = fl->sctx;
 	struct fastrpc_map *map = NULL;
@@ -1464,6 +1616,10 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	}
 	map->va = sg_virt(map->table->sgl);
 	map->len = len;
+	map->kind = kind;
+
+	/* erhai (b77): the ALLOC side for mappings (freed in fastrpc_free_map) */
+	fastrpc_alloc_map_report(fl, fd, kind, map, len);
 
 	if (attr & FASTRPC_ATTR_SECUREMAP) {
 		/*
@@ -1531,12 +1687,13 @@ get_err:
 }
 
 static int fastrpc_map_create(struct fastrpc_user *fl, int fd,
-			      u64 len, u32 attr, struct fastrpc_map **ppmap)
+			      u64 len, u32 attr, struct fastrpc_map **ppmap,
+			      const char *kind)
 {
 	if (!fastrpc_map_lookup(fl, fd, ppmap, true))
 		return 0;
 
-	return fastrpc_map_attach(fl, fd, len, attr, ppmap);
+	return fastrpc_map_attach(fl, fd, len, attr, ppmap, kind);
 }
 
 /*
@@ -1614,10 +1771,12 @@ static int fastrpc_create_maps(struct fastrpc_invoke_ctx *ctx)
 
 		if (i < ctx->nbufs)
 			err = fastrpc_map_create(ctx->fl, ctx->args[i].fd,
-				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i]);
+				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i],
+				 "ctx");
 		else
 			err = fastrpc_map_attach(ctx->fl, ctx->args[i].fd,
-				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i]);
+				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i],
+				 "ctx");
 		if (err) {
 			dev_err(dev, "Error Creating map %d\n", err);
 			return -EINVAL;
@@ -1660,9 +1819,11 @@ static int fastrpc_get_args(u32 kernel, struct fastrpc_invoke_ctx *ctx)
 	ctx->msg_sz = pkt_size;
 
 	if (ctx->fl->sctx->sid)
-		err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
+		err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf,
+					"invoke-pkt", ctx->ctxid);
 	else
-		err = fastrpc_remote_heap_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
+		err = fastrpc_remote_heap_alloc(ctx->fl, dev, pkt_size, &ctx->buf,
+						"invoke-pkt-rh", ctx->ctxid);
 	if (err)
 		return err;
 
@@ -2061,7 +2222,8 @@ static int fastrpc_init_create_static_process(struct fastrpc_user *fl,
 	inbuf.pageslen = 0;
 	if (!fl->cctx->remote_heap) {
 		err = fastrpc_remote_heap_alloc(fl, fl->sctx->dev, init.memlen,
-						&fl->cctx->remote_heap);
+						&fl->cctx->remote_heap,
+						"remote-heap", 0);
 		if (err)
 			goto err_name;
 
@@ -2182,17 +2344,24 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	 * print names the object classes it is made of.
 	 */
 	if (fl && fl->cctx && fl->sctx && erhai_residue_report) {
-		unsigned int nclients = 0, nobjects = 0;
-		u64 accounted =
-			fastrpc_account_clients(fl->cctx, fl->sctx->dev,
-						"init-create-in",
-						&nclients, &nobjects);
+		char label[40];
+		struct fastrpc_acct acct = { };
+
+		/*
+		 * erhai (b77): reconcile the device whose arena is about to be
+		 * measured -- the b76 print used the channel-wide client total
+		 * against one device's domain (see struct fastrpc_acct).
+		 */
+		fastrpc_account_clients(fl->cctx, fl->sctx->dev,
+					"init-create-in", fl->sctx->dev, &acct);
+		fastrpc_dev_label(fl->sctx->dev, label, sizeof(label));
 
 		dev_warn(fl->sctx->dev,
-			 "erhai: acct[init-create-in] %u clients account for %u objects / 0x%llx bytes\n",
-			 nclients, nobjects, accounted);
+			 "erhai: acct[init-create-in] %u clients account for %u objects / 0x%llx bytes (device %s: %u clients / 0x%llx bytes)\n",
+			 acct.clients, acct.objects, acct.bytes, label,
+			 acct.dev_clients, acct.dev_bytes);
 		iommu_dma_iova_residue(fl->sctx->dev, "init-create-in",
-				       accounted, erhai_residue_holders);
+				       acct.dev_bytes, erhai_residue_holders);
 	}
 
 	args = kzalloc_objs(*args, FASTRPC_CREATE_PROCESS_NARGS);
@@ -2226,7 +2395,8 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	fl->pd = USER_PD;
 
 	if (init.filelen && init.filefd) {
-		err = fastrpc_map_create(fl, init.filefd, init.filelen, 0, &map);
+		err = fastrpc_map_create(fl, init.filefd, init.filelen, 0, &map,
+					 "init-file");
 		if (err)
 			goto err;
 	}
@@ -2234,7 +2404,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	memlen = ALIGN(max(INIT_FILELEN_MAX, (int)init.filelen * 4),
 		       1024 * 1024);
 	err = fastrpc_buf_alloc(fl, fl->sctx->dev, memlen,
-				&imem);
+				&imem, "init_mem", 0);
 	if (err)
 		goto err_alloc;
 
@@ -2442,7 +2612,7 @@ static int fastrpc_dmabuf_alloc(struct fastrpc_user *fl, char __user *argp)
 	if (copy_from_user(&bp, argp, sizeof(bp)))
 		return -EFAULT;
 
-	err = fastrpc_buf_alloc(fl, fl->sctx->dev, bp.size, &buf);
+	err = fastrpc_buf_alloc(fl, fl->sctx->dev, bp.size, &buf, "dmabuf", 0);
 	if (err)
 		return err;
 	exp_info.ops = &fastrpc_dma_buf_ops;
@@ -2748,9 +2918,10 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 	}
 
 	if (req.flags == ADSP_MMAP_REMOTE_HEAP_ADDR)
-		err = fastrpc_remote_heap_alloc(fl, dev, req.size, &buf);
+		err = fastrpc_remote_heap_alloc(fl, dev, req.size, &buf,
+						"mmap-rh", 0);
 	else
-		err = fastrpc_buf_alloc(fl, dev, req.size, &buf);
+		err = fastrpc_buf_alloc(fl, dev, req.size, &buf, "mmap", 0);
 
 	if (err) {
 		dev_err(dev, "failed to allocate buffer\n");
@@ -2915,7 +3086,7 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 		return -EFAULT;
 
 	/* create SMMU mapping */
-	err = fastrpc_map_create(fl, req.fd, req.length, 0, &map);
+	err = fastrpc_map_create(fl, req.fd, req.length, 0, &map, "user");
 	if (err) {
 		dev_err(dev, "failed to map buffer, fd = %d\n", req.fd);
 		return err;
