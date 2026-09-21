@@ -399,6 +399,16 @@ struct fastrpc_user {
 	struct list_head maps;
 	struct list_head pending;
 	struct list_head mmaps;
+	/*
+	 * erhai: this client's own mmaps that an interrupted invoke parked --
+	 * per user, not per channel: upstream keeps them in
+	 * cctx->invoke_interrupted_mmaps, where a client can only be attributed
+	 * by peeking at buf->fl and where the add (fl->lock) and the drain
+	 * (cctx->lock / none) are not mutually exclusive.  Here every access is
+	 * under fl->lock and the buffers are freed at fd close (see
+	 * fastrpc_user_release_buffers()).
+	 */
+	struct list_head interrupted_mmaps;
 
 	struct fastrpc_channel_ctx *cctx;
 	struct fastrpc_session_ctx *sctx;
@@ -860,22 +870,19 @@ static void fastrpc_user_release_buffers(struct fastrpc_user *fl, const char *wh
 	}
 	list_for_each_entry(buf, &fl->mmaps, node)
 		nmmaps++;
-	spin_unlock_irqrestore(&fl->lock, flags);
-	imem_sz = imem ? imem->size : 0;
-
 	/*
-	 * mmaps that an interrupted invoke parked on the channel (upstream only
-	 * frees those when the whole CDSP goes away -- i.e. never here).
+	 * erhai: the client's mmaps that an interrupted invoke parked (see
+	 * struct fastrpc_user) -- upstream only unlinks those when the whole
+	 * CDSP goes away, so they are lost for good.  Same lock as the add
+	 * path, so this cannot race with it.
 	 */
-	spin_lock_irqsave(&fl->cctx->lock, flags);
-	list_for_each_entry_safe(buf, b, &fl->cctx->invoke_interrupted_mmaps, node) {
-		if (buf->fl != fl)
-			continue;
+	list_for_each_entry_safe(buf, b, &fl->interrupted_mmaps, node) {
 		list_del(&buf->node);
 		list_add_tail(&buf->node, &intr);
 		nintr++;
 	}
-	spin_unlock_irqrestore(&fl->cctx->lock, flags);
+	spin_unlock_irqrestore(&fl->lock, flags);
+	imem_sz = imem ? imem->size : 0;
 
 	if (!imem && !nmaps && !nmmaps && !nintr)
 		return;
@@ -1910,7 +1917,8 @@ bail:
 		spin_lock(&fl->lock);
 		list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
 			list_del(&buf->node);
-			list_add_tail(&buf->node, &fl->cctx->invoke_interrupted_mmaps);
+			/* erhai: per-client, see struct fastrpc_user */
+			list_add_tail(&buf->node, &fl->interrupted_mmaps);
 		}
 		spin_unlock(&fl->lock);
 	}
@@ -2304,6 +2312,7 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 	INIT_LIST_HEAD(&fl->pending);
 	INIT_LIST_HEAD(&fl->maps);
 	INIT_LIST_HEAD(&fl->mmaps);
+	INIT_LIST_HEAD(&fl->interrupted_mmaps);
 	INIT_LIST_HEAD(&fl->user);
 	fl->cctx = cctx;
 	fl->is_secure_dev = fdevice->secure;
