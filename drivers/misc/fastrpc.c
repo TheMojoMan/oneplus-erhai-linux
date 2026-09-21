@@ -385,9 +385,69 @@ static void fastrpc_map_footprint(struct fastrpc_user *fl,
 	spin_lock_irqsave(&fl->lock, flags);
 	list_for_each_entry(map, &fl->maps, node) {
 		(*nmaps)++;
-		*bytes += map->len;
+		/*
+		 * erhai: `size` (= what was actually mapped in the IOVA space),
+		 * NOT `len` (the length the client asked for, which can be far
+		 * smaller than the buffer -- summing `len` made a 4 GB arena
+		 * look empty while a 601 MB mapping failed; see
+		 * npu-MEMORY-2026-09-21.md continuation 23).
+		 */
+		*bytes += map->size;
 	}
 	spin_unlock_irqrestore(&fl->lock, flags);
+}
+
+/*
+ * erhai: full per-client IOVA footprint.  `maps` are the dma-buf mappings, but
+ * a client also consumes IOVA through `mmaps` (the coherent buffers it asked the
+ * kernel to allocate via the MAP ioctls) and through every pending invocation
+ * context's own coherent buffer, plus `init_mem`.  Those were invisible before,
+ * which is why the arena looked empty at the wall.
+ */
+static void fastrpc_dump_client_iova(struct fastrpc_channel_ctx *cctx,
+				     struct device *dev)
+{
+	struct fastrpc_user *user;
+
+	spin_lock(&cctx->lock);
+	list_for_each_entry(user, &cctx->users, user) {
+		struct fastrpc_invoke_ctx *ctx;
+		struct fastrpc_buf *buf;
+		struct fastrpc_map *map;
+		unsigned long uflags;
+		u64 maps_sz = 0, maps_len = 0, mmaps_sz = 0, pend_sz = 0;
+		unsigned int nmaps = 0, nmmaps = 0, npend = 0;
+
+		spin_lock_irqsave(&user->lock, uflags);
+		list_for_each_entry(map, &user->maps, node) {
+			nmaps++;
+			maps_sz += map->size;
+			maps_len += map->len;
+		}
+		list_for_each_entry(buf, &user->mmaps, node) {
+			nmmaps++;
+			mmaps_sz += buf->size;
+		}
+		list_for_each_entry(ctx, &user->pending, node) {
+			npend++;
+			if (ctx->buf)
+				pend_sz += ctx->buf->size;
+		}
+		spin_unlock_irqrestore(&user->lock, uflags);
+
+		dev_warn(dev, "erhai: client id %d pd %d: maps %u (mapped 0x%llx, requested 0x%llx), mmaps %u / 0x%llx, pending %u / 0x%llx, init_mem 0x%llx\n",
+			 user->client_id, user->pd, nmaps, maps_sz, maps_len,
+			 nmmaps, mmaps_sz, npend, pend_sz,
+			 user->init_mem ? user->init_mem->size : 0);
+
+		spin_lock_irqsave(&user->lock, uflags);
+		list_for_each_entry(map, &user->maps, node)
+			dev_warn(dev, "erhai:   map fd %d iova 0x%llx size 0x%llx len 0x%llx\n",
+				 map->fd, (unsigned long long)map->dma_addr,
+				 map->size, map->len);
+		spin_unlock_irqrestore(&user->lock, uflags);
+	}
+	spin_unlock(&cctx->lock);
 }
 
 /*
@@ -1004,9 +1064,12 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 			held_all);
 		/*
 		 * erhai: -ENOMEM here means "no free IOVA range of this size in
-		 * this domain" -- dump the domain's IOVA tree so the holder is
-		 * visible (fastrpc's own accounting cannot see it).
+		 * this domain".  Print what every client really holds (maps by
+		 * mapped size, plus mmaps/init_mem/pending buffers) and dump the
+		 * domain's IOVA tree, so the holder of the space is visible --
+		 * fastrpc's own accounting alone cannot see it.
 		 */
+		fastrpc_dump_client_iova(fl->cctx, sess->dev);
 		iommu_dma_dump_iova(sess->dev);
 		goto map_err;
 	}
