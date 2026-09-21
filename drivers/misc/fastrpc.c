@@ -118,6 +118,26 @@ module_param(erhai_release_at_close, bool, 0644);
 MODULE_PARM_DESC(erhai_release_at_close,
 	"erhai: release a closing fastrpc client's buffers/mappings at fd close even if an interrupted context still holds a reference (default 1)");
 
+/*
+ * erhai (b76): name what the CDSP IOVA arena still holds that no live client
+ * owns.  The b75 verification (npu-MEMORY-2026-09-21.md) brought the per-load
+ * leak down from ~50 MiB to ~0.14 MiB / ~18 ranges and left exactly that residue
+ * unnamed: at every DSP process creation fastrpc now prints what its live
+ * clients account for, and iommu_dma_iova_residue() prints the domain's own
+ * total, the difference, a size histogram and the biggest holders.
+ *
+ * Both knobs are runtime-only (no rebuild): erhai_residue_report=0 silences the
+ * whole reconciliation, erhai_residue_holders=N limits the holder list.
+ */
+static bool erhai_residue_report = true;
+module_param(erhai_residue_report, bool, 0644);
+MODULE_PARM_DESC(erhai_residue_report,
+	"erhai: reconcile the IOVA arena against the live clients at every DSP process creation (default 1)");
+static unsigned int erhai_residue_holders = 8;
+module_param(erhai_residue_holders, uint, 0644);
+MODULE_PARM_DESC(erhai_residue_holders,
+	"erhai: how many of the largest IOVA ranges that reconciliation lists (0 = summary + histogram only, max 32)");
+
 /* Retrives number of input buffers from the scalars parameter */
 #define REMOTE_SCALARS_INBUFS(sc)	(((sc) >> 16) & 0x0ff)
 
@@ -496,36 +516,90 @@ static void fastrpc_dump_client_iova(struct fastrpc_channel_ctx *cctx,
 }
 
 /*
- * erhai: the mapping footprint of EVERY live client on this channel.  The
- * per-client number alone cannot tell a fragmented arena from space held by
- * another client -- cdsprpcd never exits, so whatever it holds is invisible in
- * the client-exit print.  Diagnostic only, called from the failure path (hence
- * spinlocks: no sleeping here).
+ * erhai (b76): what EVERY live client accounts for, in the four categories that
+ * hold IOVA ranges: `maps` (dma-buf mappings, by MAPPED size), `mmaps` (coherent
+ * buffers the client asked the kernel for), each `pending` context's own coherent
+ * buffer, and `init_mem`.  The per-client list alone cannot tell a fragmented
+ * arena from space held by another client -- cdsprpcd never exits, so whatever it
+ * holds is invisible in the client-exit print -- and it cannot see the space NO
+ * client owns, which is why the caller compares the returned total against the
+ * domain's own range total (iommu_dma_iova_residue()).
+ *
+ * Returns the accounted bytes; *nclients / *nobjects receive the client and
+ * object counts.  One line per client is printed when @dev is non-NULL; the
+ * mapping-failure path passes NULL and keeps its own single-line format.
+ *
+ * (b67/b71 summed `map->len` -- the length the client ASKED for -- and ignored
+ * mmaps / init_mem / pending buffers, which is why a 4 GiB arena looked almost
+ * empty while a 601 MB mapping failed.  This is the corrected version, matching
+ * fastrpc_map_footprint(); see npu-MEMORY-2026-09-21.md continuations 23 + 27.)
  */
-static void fastrpc_map_footprint_all(struct fastrpc_channel_ctx *cctx,
-				      unsigned int *nclients,
-				      unsigned int *nmaps, u64 *bytes)
+static u64 fastrpc_account_clients(struct fastrpc_channel_ctx *cctx,
+				   struct device *dev, const char *tag,
+				   unsigned int *nclients,
+				   unsigned int *nobjects)
 {
 	struct fastrpc_user *user;
+	u64 total = 0;
 
 	*nclients = 0;
-	*nmaps = 0;
-	*bytes = 0;
+	*nobjects = 0;
 
 	spin_lock(&cctx->lock);
 	list_for_each_entry(user, &cctx->users, user) {
+		struct fastrpc_invoke_ctx *ctx;
+		struct fastrpc_buf *buf;
 		struct fastrpc_map *map;
 		unsigned long uflags;
+		u64 maps_sz = 0, mmaps_sz = 0, pend_sz = 0, imem_sz = 0;
+		unsigned int nmaps = 0, nmmaps = 0, npend = 0;
 
-		(*nclients)++;
 		spin_lock_irqsave(&user->lock, uflags);
 		list_for_each_entry(map, &user->maps, node) {
-			(*nmaps)++;
-			*bytes += map->len;
+			nmaps++;
+			/* erhai: the MAPPED size, not the requested length */
+			maps_sz += map->size;
 		}
+		list_for_each_entry(buf, &user->mmaps, node) {
+			nmmaps++;
+			mmaps_sz += buf->size;
+		}
+		list_for_each_entry(ctx, &user->pending, node) {
+			npend++;
+			if (ctx->buf)
+				pend_sz += ctx->buf->size;
+		}
+		if (user->init_mem)
+			imem_sz = user->init_mem->size;
 		spin_unlock_irqrestore(&user->lock, uflags);
+
+		(*nclients)++;
+		*nobjects += nmaps + nmmaps + npend + (imem_sz ? 1 : 0);
+		total += maps_sz + mmaps_sz + pend_sz + imem_sz;
+
+		if (dev)
+			dev_warn(dev, "erhai: acct[%s] client %d pd %d: maps %u / 0x%llx, mmaps %u / 0x%llx, pending %u / 0x%llx, init_mem 0x%llx -> 0x%llx bytes\n",
+				 tag, user->client_id, user->pd, nmaps, maps_sz,
+				 nmmaps, mmaps_sz, npend, pend_sz, imem_sz,
+				 maps_sz + mmaps_sz + pend_sz + imem_sz);
 	}
 	spin_unlock(&cctx->lock);
+
+	return total;
+}
+
+/*
+ * erhai: the mapping footprint of EVERY live client on this channel, for the
+ * mapping-failure print.  The single-line format is historical (the b67-era
+ * analysers parse it verbatim), but the numbers are now the corrected ones:
+ * *nobjects counts maps + mmaps + pending buffers + init_mem, and *bytes uses
+ * the mapped size.  Diagnostic only, called from the failure path.
+ */
+static void fastrpc_map_footprint_all(struct fastrpc_channel_ctx *cctx,
+				      unsigned int *nclients,
+				      unsigned int *nobjects, u64 *bytes)
+{
+	*bytes = fastrpc_account_clients(cctx, NULL, NULL, nclients, nobjects);
 }
 
 /*
@@ -1985,6 +2059,30 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	 * directly (a flat series means the loads recycle their space).
 	 */
 	fastrpc_iova_summary(fl, "init-create-in");
+
+	/*
+	 * erhai (b76): the b74/b75 fd-close release cut the per-load CDSP leak
+	 * from ~50 MiB to ~0.14 MiB / ~18 ranges and left exactly that residue
+	 * unnamed (npu-MEMORY-2026-09-21.md).  A DSP process creation is the only
+	 * moment the arena is quiet -- nothing this client has allocated yet --
+	 * so reconcile it here: print what the live clients account for, then let
+	 * the IOMMU side print the domain's own total and the difference.
+	 * unaccounted > 0 is space no client owns, and the size histogram in that
+	 * print names the object classes it is made of.
+	 */
+	if (fl && fl->cctx && fl->sctx && erhai_residue_report) {
+		unsigned int nclients = 0, nobjects = 0;
+		u64 accounted =
+			fastrpc_account_clients(fl->cctx, fl->sctx->dev,
+						"init-create-in",
+						&nclients, &nobjects);
+
+		dev_warn(fl->sctx->dev,
+			 "erhai: acct[init-create-in] %u clients account for %u objects / 0x%llx bytes\n",
+			 nclients, nobjects, accounted);
+		iommu_dma_iova_residue(fl->sctx->dev, "init-create-in",
+				       accounted, erhai_residue_holders);
+	}
 
 	args = kzalloc_objs(*args, FASTRPC_CREATE_PROCESS_NARGS);
 	if (!args)
