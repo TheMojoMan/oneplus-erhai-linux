@@ -23,7 +23,7 @@ fi
 CLEAN_KVER="${KVER//-sm8750-themojoman/}"
 
 # erhai UKI file naming: use the +b<N> Debian revision as part of the EFI
-# filename (<release>-b<N>.efi, e.g. 7.3.0-rc2-b1.efi, b2, ...) so the rEFInd
+# filename (<release>-b<N>.efi, e.g. 7.3.0-rc4-b33.efi) so the rEFInd
 # menu clearly identifies which build+kernel is booted (owner request
 # 2026-09-13). Fall back to the release-based name when there is no +b<N>
 # (e.g. a base image build).
