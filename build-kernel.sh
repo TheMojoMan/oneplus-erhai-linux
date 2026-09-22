@@ -116,19 +116,35 @@ build_kernel() {
 # the kernelrelease alone -- two builds would compare equal and apt would
 # never offer an upgrade. A "+b<N>" Debian revision is therefore appended to
 # the .deb Version ONLY (never to the kernelrelease); postinst/postrm strip
-# it again before deriving KVER. N auto-increments past the highest revision
-# already visible in the PPA suites; override with DEB_REV=<n>.
+# it again before deriving KVER.
+#
+# N is PER LINE (2026-09-22): it counts only revisions of THIS kernelrelease, so
+# a new release string starts its own numbering at b1.  (The 7.3-rc4 line's first
+# build came out +b33 because the counter followed the PACKAGE name, which the
+# rc2 line shares; it was renamed to +b1.)  Every source below is filtered to
+# "<kver>+b<digits>": the PPA suites' Packages metadata, the .deb files in the
+# PPA suites, the .debs built in this tree and the wrapper's directory, and the
+# INSTALLED package version -- the last one matters because a re-versioned build
+# is not in the PPA yet and would otherwise be handed the same N twice.
+# Override with DEB_REV=<n>.
 next_deb_rev() {
-	local pkg="$1" max=0 root f v n
+	local pkg="$1" kver="$2" max=0 n=0 root f v d
 	root="$HERE/../themojoman.github.io/ppa/oneplus-erhai/ubuntu"
+	# One place applies the line filter; every loop below just feeds versions in.
+	bump() {
+		case "${1:-}" in
+		"$kver"+b[0-9]*) : ;;
+		*) return 0 ;;
+		esac
+		n="${1##*+b}"
+		if [ "$n" -gt "$max" ] 2>/dev/null; then max="$n"; fi
+		return 0
+	}
 	if [ -d "$root" ]; then
 		# Published metadata (may lag behind freshly moved .debs) ...
 		for f in "$root"/*/Packages; do
 			[ -f "$f" ] || continue
-			while read -r v; do
-				case "$v" in *+b[0-9]*) n="${v##*+b}" ;; *) continue ;; esac
-				if [ "$n" -gt "$max" ] 2>/dev/null; then max="$n"; fi
-			done < <(awk -v pkg="$pkg" '
+			while read -r v; do bump "$v"; done < <(awk -v pkg="$pkg" '
 				$1 == "Package:" { inp = ($2 == pkg); next }
 				inp && $1 == "Version:" { print $2; inp = 0 }' "$f")
 		done
@@ -136,9 +152,21 @@ next_deb_rev() {
 		for f in "$root"/*/"${pkg}"_*_arm64.deb; do
 			[ -f "$f" ] || continue
 			v="${f##*/}"; v="${v#"${pkg}"_}"; v="${v%_arm64.deb}"
-			case "$v" in *+b[0-9]*) n="${v##*+b}" ;; *) continue ;; esac
-			if [ "$n" -gt "$max" ] 2>/dev/null; then max="$n"; fi
+			bump "$v"
 		done
+	fi
+	# ... plus the debs built locally: this tree packs its own, the wrapper packs
+	# the canonical artefact in the workspace.
+	for d in "$HERE" "$HERE/../oneplus-erhai-ubuntu"; do
+		for f in "$d"/"${pkg}"_*_arm64.deb; do
+			[ -f "$f" ] || continue
+			v="${f##*/}"; v="${v#"${pkg}"_}"; v="${v%_arm64.deb}"
+			bump "$v"
+		done
+	done
+	# ... and the version installed right now (see the header comment).
+	if v="$(dpkg-query --show --showformat='${Version}' "$pkg" 2>/dev/null)"; then
+		bump "$v"
 	fi
 	echo $((max + 1))
 }
@@ -149,7 +177,7 @@ build_deb() {
 	rm -rf "$PKG_DIR"
 	mkdir -p "$PKG_DIR/DEBIAN" "$PKG_DIR/boot"
 
-	DEB_REV="${DEB_REV:-$(next_deb_rev "$PKG_NAME")}"
+	DEB_REV="${DEB_REV:-$(next_deb_rev "$PKG_NAME" "$kernel_version_full")}"
 	DEB_VERSION="${kernel_version_full}+b${DEB_REV}"
 
 	cat > "$PKG_DIR/DEBIAN/control" <<EOF
