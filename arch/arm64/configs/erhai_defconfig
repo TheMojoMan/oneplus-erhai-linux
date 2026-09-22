@@ -725,6 +725,12 @@ CONFIG_QCOM_HIDMA_MGMT=y
 CONFIG_QCOM_HIDMA=y
 CONFIG_DW_EDMA=m
 CONFIG_UDMABUF=y
+# erhai: DMABUF_DEBUG stays OFF.  Upstream now defaults it to y on DEBUG_KERNEL
+# kernels (143755bdab, fixing a never-working default) and it hands every dma-buf
+# importer a page-less sg_table: msm_gem_import()'s page array then holds NULLs
+# and fastrpc's map->va becomes a garbage token.  Parity with the validated 7.2
+# and 7.3-rc2 lines; set it to y in a throwaway build to get upstream's checks.
+# CONFIG_DMABUF_DEBUG is not set
 CONFIG_DMABUF_HEAPS=y
 CONFIG_DMABUF_HEAPS_SYSTEM=y
 CONFIG_DMABUF_HEAPS_CMA=y
