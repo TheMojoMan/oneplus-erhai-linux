@@ -36,6 +36,47 @@
 #include <linux/workqueue.h>
 #include <linux/usb/wcd939x-usbss.h>
 
+/*
+ * Android parity for slow/noisy third-party (S)VOOC adapters.  The vendor
+ * engine (v2/voocphy/oplus_adsp_voocphy.c) classifies SVOOC from BOTH the
+ * ADSP/PD verdict (oplus_chglib_is_pd_svooc_adapter / adapter_sid_power over
+ * pmic-glink) AND the D+/D- serial ladder, and on a comm error/timeout it
+ * DELAYS and RETRIES instead of declining ("abnormal adapter need delay") —
+ * which is why a non-OEM "SuperVOOC" brick that this driver's old single
+ * SC8547_AUTO_IDENTIFY_MS=4000 window could never pass still fast-charges
+ * on Android.  These knobs mirror that behaviour: the identify window is
+ * re-armed (identify_retries) only when the charger shows VOOC signs — an
+ * ADSP fast-charge-type verdict (adsp_classify) or actual VOOC serial frames
+ * (sc->vooc_saw_any) — so a non-VOOC charger still declines on the FIRST
+ * window exactly as before (D+/D- restored promptly).
+ */
+static unsigned int identify_ms = 4000;
+module_param(identify_ms, uint, 0644);
+MODULE_PARM_DESC(identify_ms,
+		 "SVOOC serial-identify window per attempt (ms, default 4000)");
+
+static unsigned int identify_retries = 3;
+module_param(identify_retries, uint, 0644);
+MODULE_PARM_DESC(identify_retries,
+		 "re-arm the identify ladder this many times on a slow adapter (default 3)");
+
+static bool adsp_classify = true;
+module_param(adsp_classify, bool, 0644);
+MODULE_PARM_DESC(adsp_classify,
+		 "back identify retries by the ADSP VOOC fast-charge type (Android parity, default Y)");
+
+static unsigned int adsp_fastchg_type_prop = 26;	/* USB_VOOC_FAST_CHG_TYPE */
+module_param(adsp_fastchg_type_prop, uint, 0644);
+MODULE_PARM_DESC(adsp_fastchg_type_prop,
+		 "ADSP USB property id for the VOOC fast-charge type (vendor oplus_hal_adsp.h, default 26)");
+
+static unsigned int adsp_fastchg_svooc_min = 2;
+module_param(adsp_fastchg_svooc_min, uint, 0644);
+MODULE_PARM_DESC(adsp_fastchg_svooc_min,
+		 "ADSP fast-charge type >= this counts as VOOC-family (default 2)");
+
+#include "erhai_otg_glink.h"
+
 /* ---- register map (charge-pump / VOOC-PHY function, I2C addr 0x6F) ---- */
 #define SC8547_REG_00			0x00	/* VBAT_OVP */
 #define SC8547_REG_01			0x01	/* BAT_OCP */
@@ -372,6 +413,8 @@ struct sc8547a_device {
 	int			auto_curve_idx;	/* current row (descends only) */
 	int			auto_step_cnt;	/* advance debounce counter */
 	int			auto_reservo_cnt;	/* consecutive adapter-reset re-servos */
+	int			auto_ident_retries;	/* identify re-arms on this plug */
+	bool			vooc_saw_any;	/* any decodable VOOC frame this attempt */
 	unsigned long		auto_deliver_since;	/* jiffies of last (re)escalation */
 };
 
@@ -855,6 +898,10 @@ static int vooc_get_mesg_from_adapter(struct sc8547a_device *sc)
 	vooc_read_mesg_mask(sc->vooc_move_head ? VOOC_MESG_MOVE_READ_MASK :
 			    VOOC_MESG_READ_MASK, sc->voocphy_rx_buff,
 			    &sc->adapter_mesg);
+	/* Evidence gate for the identify-retry loop (Android "abnormal adapter
+	 * need delay"): any decodable VOOC frame marks a live VOOC adapter even
+	 * if the check-commu exchange has not completed yet. */
+	sc->vooc_saw_any = true;
 	return 0;
 }
 
@@ -1455,6 +1502,7 @@ static void sc8547_vooc_reset_state(struct sc8547a_device *sc)
 	sc->ask_batt_sys = 0;
 	sc->curve_sent = false;
 	sc->vooc_head = SVOOC_INVERT_HEAD;
+	sc->vooc_saw_any = false;
 	/* delivery-phase state (gates fastchg_deliver / fastchg_curr_code persist) */
 	sc->cp_enabled = false;
 	sc->hw_profile_set = false;
@@ -1593,12 +1641,70 @@ static void sc8547_auto_reservo(struct sc8547a_device *sc)
 }
 
 /*
+ * Android parity for a slow/noisy serial ladder: when the identify window
+ * expires without adapter_check_ok, RE-ARM the PHY + handshake (the vendor
+ * engine's "abnormal adapter need delay" retry) up to identify_retries times,
+ * instead of the old permanent single-shot decline.  The ADSP fast-charge
+ * verdict is consulted (adsp_classify) as a second signal — the vendor keys
+ * the retry off oplus_chglib_is_pd_svooc_adapter()/get_adapter_sid_power()
+ * [>= 80 W] — but even without it we still give the serial ladder its bounded
+ * chance, because the final decision stays with the serial exchange.
+ * Returns true when re-armed (stay in IDENTIFY), false when declining.
+ */
+static bool sc8547_auto_identify_retry(struct sc8547a_device *sc)
+{
+	bool adsp_vooc = false;
+	int ft = -ENODEV;
+
+	if (sc->auto_ident_retries >= identify_retries)
+		return false;
+
+	if (adsp_classify) {
+		ft = erhai_otg_adsp_usb_prop(adsp_fastchg_type_prop);
+		adsp_vooc = ft >= 0 && (ft & 0x7f) >= adsp_fastchg_svooc_min;
+		if (ft >= 0)
+			dev_info(sc->dev,
+				 "slow adapter: ADSP fast-chg type %d (%s)\n",
+				 ft & 0x7f,
+				 adsp_vooc ? "VOOC-class" : "not VOOC");
+	}
+
+	/*
+	 * Only keep the ladder alive on VOOC evidence: an ADSP VOOC-family
+	 * verdict (Android's is_pd_svooc_adapter / sid_power) or actual VOOC
+	 * serial frames.  A plain PD/5 V charger has neither and declines on
+	 * the FIRST window — identical to the old single-shot behaviour, so
+	 * D+/D- and normal charging are not held hostage by the retry loop.
+	 */
+	if (!adsp_vooc && !sc->vooc_saw_any) {
+		dev_info(sc->dev,
+			 "no VOOC evidence (adsp %d, frames %d) — declining\n",
+			 ft, sc->vooc_saw_any);
+		return false;
+	}
+
+	dev_info(sc->dev, "slow adapter%s: re-arming identify %d/%u\n",
+		 adsp_vooc ? " (ADSP VOOC)" :
+		 (sc->vooc_saw_any ? " (serial frames)" : ""),
+		 sc->auto_ident_retries + 1, identify_retries);
+
+	sc->auto_ident_retries++;
+	sc8547_vooc_arm_hw(sc);		/* re-init PHY + resend handshake */
+	if (sc->auto_state == SC_AUTO_DECLINED)	/* DP alt-mode owns the switch */
+		return false;
+	sc->auto_state = SC_AUTO_IDENTIFY;
+	sc->auto_identify_deadline = jiffies + msecs_to_jiffies(identify_ms);
+	return true;
+}
+
+/*
  * Auto path identify tick: run while armed in observation, before any current.
  * Once the adapter has authenticated as a genuine (S)VOOC adapter, read the
  * gauge, pick the CC/CV curve for this SOC/temp and check vbat headroom, then
  * escalate to delivery in place (the single ladder is still pre-curve, so
  * setting fastchg_enable/deliver here is seen when the allow-bit is later read).
- * Decline on identify-timeout or any failed precondition.
+ * Decline only on identify-window exhaustion (after the Android-parity retry
+ * loop) or any failed precondition.
  */
 static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 {
@@ -1606,8 +1712,11 @@ static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 	int soc, temp_ddc, vbat, len, idx, ret;
 
 	if (!sc->adapter_check_ok) {
-		if (time_after(jiffies, sc->auto_identify_deadline))
-			sc8547_auto_decline(sc, "no VOOC adapter");
+		if (time_before(jiffies, sc->auto_identify_deadline))
+			return;
+		if (sc8547_auto_identify_retry(sc))
+			return;
+		sc8547_auto_decline(sc, "no VOOC adapter");
 		return;
 	}
 
@@ -1746,6 +1855,7 @@ static void sc8547_attach_work(struct work_struct *work)
 			sc->auto_curve = NULL;
 			sc->auto_step_cnt = 0;
 			sc->auto_reservo_cnt = 0;	/* fresh plug: full budget */
+			sc->auto_ident_retries = 0;	/* fresh plug: full retry budget */
 			dev_info(sc->dev,
 				 "auto fast-charge: attach, identifying adapter\n");
 		}
@@ -1769,7 +1879,7 @@ static void sc8547_attach_work(struct work_struct *work)
 		sc->auto_armed = true;
 		if (sc->auto_state == SC_AUTO_IDENTIFY)
 			sc->auto_identify_deadline = jiffies +
-				msecs_to_jiffies(SC8547_AUTO_IDENTIFY_MS);
+				msecs_to_jiffies(identify_ms);
 		dev_info(sc->dev, "VOOC armed post-attach, vbus %d mV (%s)\n", vbus,
 			 sc->fastchg_enable ? "fastchg-enabled" : "observation");
 	}
@@ -2251,9 +2361,10 @@ static int sc8547_state_show(struct seq_file *m, void *unused)
 		"off", "identify", "deliver", "declined", "done",
 	};
 
-	seq_printf(m, "auto_armed %d state %s code %u max_soc %d%% reservo %d/%d vbus %d mV vbat %d mV ibus %d mA (master %d slave %d) cp %s\n",
+	seq_printf(m, "auto_armed %d state %s code %u max_soc %d%% reservo %d/%d ident_retry %d/%u vbus %d mV vbat %d mV ibus %d mA (master %d slave %d) cp %s\n",
 		   sc->fastchg_auto, names[sc->auto_state], sc->fastchg_curr_code,
 		   sc->max_soc, sc->auto_reservo_cnt, SC8547_AUTO_RESERVO_MAX,
+		   sc->auto_ident_retries, identify_retries,
 		   sc8547_get_vbus(sc), sc8547_get_vbat(sc),
 		   sc8547_get_ibus(sc) + sc8547_slave_ibus(),
 		   sc8547_get_ibus(sc), sc8547_slave_ibus(),

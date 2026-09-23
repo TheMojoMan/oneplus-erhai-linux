@@ -57,6 +57,8 @@
 #include <linux/soc/qcom/pdr.h>
 #include <linux/soc/qcom/pmic_glink.h>
 
+#include "erhai_otg_glink.h"
+
 /* battery_charger glink opcodes */
 #define BC_BATTERY_PROPERTY_GET		0x30	/* BC_BATTERY_STATUS_GET (req/resp) */
 #define BC_BATTERY_PROPERTY_SET		0x31	/* BC_BATTERY_STATUS_SET (req/resp) */
@@ -682,6 +684,24 @@ static void erhai_otg_vbus_apply(struct erhai_otg *otg, bool on)
 }
 
 static struct erhai_otg *erhai_otg_glink_dev;
+/*
+ * ADSP USB-property read (Android parity): lets the SC8547 fast-charge
+ * driver consult the ADSP charger classification (vendor usb_property_id,
+ * e.g. USB_VOOC_FAST_CHG_TYPE=26, USB_ADAP_TYPE=7) as a second signal while
+ * the serial VOOC ladder is still identifying — this mirrors the vendor
+ * engine's oplus_chglib_is_pd_svooc_adapter()/get_adapter_sid_power()
+ * retry policy ("abnormal adapter need delay") for slow/noisy third-party
+ * SuperVOOC bricks. Returns the property value >= 0, or a negative errno
+ * (-ENODEV glink session down, -ENODATA unknown/unsupported property).
+ */
+int erhai_otg_adsp_usb_prop(u32 property)
+{
+	if (!erhai_otg_glink_dev)
+		return -ENODEV;
+	return erhai_otg_get_op(erhai_otg_glink_dev, BC_USB_PROPERTY_GET,
+				 property);
+}
+EXPORT_SYMBOL_GPL(erhai_otg_adsp_usb_prop);
 static bool erhai_session_sync_enable = true;
 module_param(erhai_session_sync_enable, bool, 0644);
 MODULE_PARM_DESC(erhai_session_sync_enable,
