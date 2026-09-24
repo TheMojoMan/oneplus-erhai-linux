@@ -107,7 +107,10 @@ MODULE_PARM_DESC(pps_identify_ms,
 
 static unsigned int pps_start_volt_mv = 5500;
 module_param(pps_start_volt_mv, uint, 0644);
-MODULE_PARM_DESC(pps_start_volt_mv, "PPS entry VBUS (mV), vendor PPS_START_DEF_VOL_MV");
+MODULE_PARM_DESC(pps_start_volt_mv,
+		 "legacy PPS entry VBUS (mV) - entry now writes the TARGET directly (validated "
+		 "2026-09-24: the ADSP latches the PPS APDO range to the first 34 write, so a "
+		 "5.5 V seed + step-ramp caps VBUS at ~6.6 V); kept as the ramp liveness floor");
 
 static unsigned int pps_target_volt_mv = 8400;
 module_param(pps_target_volt_mv, uint, 0644);
@@ -126,19 +129,21 @@ static unsigned int pps_start_curr_ma = 1000;
 module_param(pps_start_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_start_curr_ma, "PPS entry current (mA)");
 
-static unsigned int pps_target_curr_ma = 2000;
+static unsigned int pps_target_curr_ma = 3000;
 module_param(pps_target_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_target_curr_ma,
-		 "PPS input current target (mA) - Android holds 2.0-2.2 A with the Anker");
+		 "PPS input current target (mA) - live-validated 3000 with the 100 W Anker "
+		 "(8.2-8.6 V x 3 A in = ~24 W); Android's 2 A ICL is a floor, not a ceiling");
 
 static unsigned int pps_max_curr_ma = 3000;
 module_param(pps_max_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_max_curr_ma, "hard PPS input current ceiling (mA)");
 
-static unsigned int pps_iclim_ma = 2000;
+static unsigned int pps_iclim_ma = 3000;
 module_param(pps_iclim_ma, uint, 0644);
 MODULE_PARM_DESC(pps_iclim_ma,
-		 "USB_INPUT_CURR_LIMIT written on PPS entry (mA); ADSP normal-profile cap ~2 A");
+		 "USB_INPUT_CURR_LIMIT written on PPS entry (mA); the ADSP honours 3000 when "
+		 "the battery demand is granted (validated 2026-09-24)");
 
 static unsigned int pps_fcc_ma = 4400;
 module_param(pps_fcc_ma, uint, 0644);
@@ -500,9 +505,36 @@ static void pps_poll(struct erhai_pps *p)
 	}
 	case PPS_NEGOTIATE: {
 		/*
-		 * Android-parity entry sequence: grant the pack demand
-		 * (battery profile gate), then the PPS PHY, then the PDO.
+		 * Entry sequence — ORDER IS LOAD-BEARING (live-validated 2026-09-24,
+		 * 100 W Anker, b3 kernel): the ADSP charger_pd latches its PPS APDO
+		 * from the first writes and grants the pack demand only after the
+		 * battery profile gate is set.  The working order is:
+		 *
+		 *   49 PPS_EN -> 34 VOLT at TARGET (first!) -> 35 CURR -> 5 ICL,
+		 * then the battery profile gate (46/24/10) and the CP PHY init
+		 * (40/39) AFTER the PDO is established.
+		 *
+		 * Measured with the reverse/enhanced variants: CURR-before-VOLT plus
+		 * either a 5.5 V seed+step-ramp (VBUS caps at ~6.64 V = ~9 W pack)
+		 * or a one-shot 8.4 V request (VBUS 4.6 V); granting the gate before
+		 * the PDO caps input at ~1.3 A.  The sequence below delivers
+		 * 8.2-8.6 V x 3 A in ~= 24 W, pack 3.6-4 A and climbing.
 		 */
+		rc = pps_usb_set(PPS_PROP_USB_PPS_VOOCPHY_ENABLE, 1);
+		if (rc)
+			goto fail;
+		rc = pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, pps_target_volt_mv);
+		if (rc)
+			goto fail;
+		rc = pps_usb_set(PPS_PROP_USB_SET_PPS_CURR, pps_start_curr_ma);
+		if (rc)
+			goto fail;
+		rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT,
+				 pps_iclim_ma * 1000);
+		if (rc)
+			goto fail;
+
+		/* profile gate + CP PHY init AFTER the PDO (validated order) */
 		rc = pps_batt_set(PPS_PROP_BATT_AP_FASTCHG_ALLOW, 1);
 		if (rc)
 			goto fail;
@@ -510,10 +542,6 @@ static void pps_poll(struct erhai_pps *p)
 		if (rc)
 			goto fail;
 		rc = pps_batt_set(PPS_PROP_BATT_CHG_CTRL_LIM, pps_fcc_ma * 1000);
-		if (rc)
-			goto fail;
-
-		rc = pps_usb_set(PPS_PROP_USB_PPS_VOOCPHY_ENABLE, 1);
 		if (rc)
 			goto fail;
 		if (pps_cp_init) {
@@ -524,19 +552,8 @@ static void pps_poll(struct erhai_pps *p)
 			if (rc)
 				goto fail;
 		}
-		rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT,
-				 pps_iclim_ma * 1000);
-		if (rc)
-			goto fail;
 
-		rc = pps_usb_set(PPS_PROP_USB_SET_PPS_CURR, pps_start_curr_ma);
-		if (rc)
-			goto fail;
-		rc = pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, pps_start_volt_mv);
-		if (rc)
-			goto fail;
-
-		p->set_volt_mv = pps_start_volt_mv;
+		p->set_volt_mv = pps_target_volt_mv;
 		p->set_curr_ma = pps_start_curr_ma;
 		p->target_curr_ma = min(pps_target_curr_ma, pps_max_curr_ma);
 		p->sessions++;
