@@ -58,6 +58,60 @@
 #include "erhai_otg_glink.h"
 #include "sc8547a.h"
 
+/* sc8547a PPS-CP API (see drivers/power/supply/sc8547a.c) — the 2:1 charge-pump
+ * entry points this engine drives when the chip window is reachable.  Resolved
+ * lazily via symbol_get() exactly like pps_sc_delivering(): this module must
+ * load (and degrade to the buck path) even when the sc8547a module is absent. */
+struct erhai_pps_sc_api {
+	int	(*snapshot)(int *vbus_mv, int *vbat_mv, int *ibus_ma);
+	bool	(*cp_engaged)(void);
+	int	(*cp_engage)(int *need_mv);
+	int	(*cp_feed)(int *vbus_mv, int *vbat_mv);
+	void	(*cp_disengage)(void);
+};
+
+static const struct erhai_pps_sc_api *pps_sc_cp_get(void)
+{
+	static struct erhai_pps_sc_api api;
+	static bool once;
+
+	if (!once) {
+		once = true;
+		api.snapshot = (void *)symbol_get(sc8547a_pps_snapshot);
+		api.cp_engaged = (void *)symbol_get(sc8547a_pps_cp_engaged);
+		api.cp_engage = (void *)symbol_get(sc8547a_pps_cp_engage);
+		api.cp_feed = (void *)symbol_get(sc8547a_pps_cp_feed);
+		api.cp_disengage = (void *)symbol_get(sc8547a_pps_cp_disengage);
+		if (!api.snapshot || !api.cp_engaged || !api.cp_engage ||
+		    !api.cp_feed || !api.cp_disengage) {
+			symbol_put(sc8547a_pps_snapshot);
+			symbol_put(sc8547a_pps_cp_engaged);
+			symbol_put(sc8547a_pps_cp_engage);
+			symbol_put(sc8547a_pps_cp_feed);
+			symbol_put(sc8547a_pps_cp_disengage);
+			memset(&api, 0, sizeof(api));
+			return NULL;
+		}
+	}
+	return api.snapshot ? &api : NULL;
+}
+
+/* returns true while the CP is engaged AND the API is reachable */
+static bool pps_cp_is_engaged(void)
+{
+	const struct erhai_pps_sc_api *a = pps_sc_cp_get();
+
+	return a && a->cp_engaged();
+}
+
+static void pps_cp_drop(void)
+{
+	const struct erhai_pps_sc_api *a = pps_sc_cp_get();
+
+	if (a && a->cp_engaged())
+		a->cp_disengage();
+}
+
 /* ---- ADSP v2 property ids (oplus_hal_adsp.h), our subset ---- */
 /* usb_property_id (BC_USB_PROPERTY_* / opcode 0x32,0x33) */
 #define PPS_PROP_USB_INPUT_CURR_LIMIT	5
@@ -195,6 +249,36 @@ module_param(pps_cp_init, bool, 0644);
 MODULE_PARM_DESC(pps_cp_init,
 		 "also write USB_PPS_CP_MODE_INIT(40)=1 + USB_PPS_MOS_CTRL(39)=1 on entry (vendor PHY init)");
 
+/* ---- SC8547A charge-pump 2:1 (CP direct-charge from the PPS bus) ---- */
+static bool pps_cp_enable = true;
+module_param(pps_cp_enable, bool, 0644);
+MODULE_PARM_DESC(pps_cp_enable,
+		 "drive the SC8547A charge pump 2:1 from the PPS bus when the chip window is reachable "
+		 "(b5; owner-testing).  Disable = pure buck path (b4 behaviour).");
+
+static unsigned int pps_cp_target_mv = 150;
+module_param(pps_cp_target_mv, uint, 0644);
+MODULE_PARM_DESC(pps_cp_target_mv,
+		 "CP servo target for vbus - 2*vbat at the chip (mV; engage window is 110..700)");
+
+static unsigned int pps_cp_vstep_mv = 50;
+module_param(pps_cp_vstep_mv, uint, 0644);
+MODULE_PARM_DESC(pps_cp_vstep_mv, "CP PPS-voltage servo step (mV) per poll");
+
+static unsigned int pps_cp_max_volt_mv = 9500;
+module_param(pps_cp_max_volt_mv, uint, 0644);
+MODULE_PARM_DESC(pps_cp_max_volt_mv, "CP servo PPS VBUS ceiling (mV)");
+
+static unsigned int pps_cp_min_volt_mv = 8400;
+module_param(pps_cp_min_volt_mv, uint, 0644);
+MODULE_PARM_DESC(pps_cp_min_volt_mv, "CP servo PPS VBUS floor (mV) - never undershoot the buck point");
+
+static unsigned int pps_cp_feed_ms = 500;
+module_param(pps_cp_feed_ms, uint, 0644);
+MODULE_PARM_DESC(pps_cp_feed_ms,
+		 "engine poll period (ms) while the CP is engaged - must stay under the "
+		 "SC8547A 1000 ms REG_09 watchdog window");
+
 /* ---- state machine ---- */
 enum pps_state {
 	PPS_IDLE = 0,		/* nothing attached / not a PPS adapter */
@@ -257,6 +341,8 @@ struct erhai_pps {
 	u32			entries;
 	unsigned int		exits;
 	unsigned long		charg_ticks;
+	unsigned int		cp_engages;
+	unsigned int		cp_drops;
 };
 
 static struct erhai_pps *g_pps;
@@ -453,6 +539,10 @@ static void pps_exit(struct erhai_pps *p, const char *reason)
 	p->exits++;
 	p->charg_ticks = 0;
 	pr_info("erhai_pps: exit: %s\n", reason);
+	/* drop the charge pump BEFORE the 5 V revert: at 5 V the 2:1 window is
+	 * gone and a latched CHG_EN has nothing to drive but also no watchdog. */
+	if (pps_cp_is_engaged())
+		pps_cp_drop();
 	pps_revert(p);
 	pps_enter(p, PPS_IDLE, NULL);
 }
@@ -673,6 +763,67 @@ fail:
 				p->set_curr_ma = n;
 		}
 
+		/*
+		 * CP 2:1 direct-charge (b5, owner-testing): run the SC8547A pump
+		 * from the PPS bus when the chip's vbus - 2*vbat sits inside the
+		 * engage window, servoing the PPS VOLT setpoint in small steps
+		 * toward pps_cp_target_mv (the ADSP's settle is its own closed-loop
+		 * choice — open-loop setpoints wander ~8.1-8.3 V — so the chip ADC
+		 * is the only reliable steering input).  On any excursion the CP
+		 * disengages and we keep the buck path (stay in PPS).  Never runs
+		 * while the serial VOOC ladder is delivering; the engine's
+		 * collapse/soc/temp/vbat exits drop the CP via pps_exit BEFORE
+		 * the 5 V revert.
+		 */
+		if (pps_cp_enable && charging) {
+			const struct erhai_pps_sc_api *a = pps_sc_cp_get();
+
+			if (a) {
+				int cvbus = 0, cvbat = 0, diff = 0, rc;
+
+				rc = a->snapshot(&cvbus, &cvbat, NULL);
+				if (rc == 0) {
+					diff = cvbus - cvbat * 2;
+					if (a->cp_engaged()) {
+						rc = a->cp_feed(&cvbus, &cvbat);
+						if (rc) {
+							pr_info("erhai_pps: CP feed drop rc=%d (diff %d mV) - buck path\n",
+								rc, diff);
+							p->cp_drops++;
+						}
+					} else if (diff >= 0 &&
+						   p->set_volt_mv <= pps_cp_max_volt_mv) {
+						int need = 0;
+
+						rc = a->cp_engage(&need);
+						if (rc == 0) {
+							p->cp_engages++;
+							pr_info("erhai_pps: CP 2:1 ENGAGED (chip vbus %d mV vbat %d mV diff %d mV)\n",
+								cvbus, cvbat, diff);
+						} else if (rc == -EAGAIN && p->charg_ticks > 3) {
+							unsigned int nv;
+							int target = pps_cp_target_mv;
+
+							/* servo PPS VOLT toward 2*vbat + target */
+							if (diff < target) {
+								nv = min(p->set_volt_mv +
+									 pps_cp_vstep_mv,
+									 pps_cp_max_volt_mv);
+								if (nv > p->set_volt_mv &&
+									    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
+									p->set_volt_mv = nv;
+							} else if (diff > target + (int)pps_cp_vstep_mv) {
+								nv = p->set_volt_mv - pps_cp_vstep_mv;
+								if (nv >= pps_cp_min_volt_mv &&
+									    nv < p->set_volt_mv &&
+									    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
+									p->set_volt_mv = nv;
+							}
+						}
+					}
+				}
+			}
+		}
 		p->charg_ticks++;
 		if (p->charg_ticks < 60)	/* ~first 2 minutes */
 			pr_info("erhai_pps: %s vbus %d mV vbat %d mV ibat %d mA soc %d%% t %dC curr %u mA\n",
@@ -694,7 +845,13 @@ static void pps_ws(struct work_struct *work)
 	mutex_lock(&pps_lock);
 	pps_poll(p);
 	mutex_unlock(&pps_lock);
-	schedule_delayed_work(&p->work, msecs_to_jiffies(pps_poll_ms));
+	/* while the charge pump is engaged, poll at the REG_09 watchdog feed
+	 * interval (must stay under the SC8547A 1000 ms window); otherwise the
+	 * normal telemetry cadence is fine.  A dropped poll = a watchdog expiry
+	 * self-clears REG_07, so this can only slow the CP down, never strand it. */
+	schedule_delayed_work(&p->work,
+			      msecs_to_jiffies(pps_cp_is_engaged() ?
+					      pps_cp_feed_ms : pps_poll_ms));
 }
 
 
@@ -712,8 +869,10 @@ static int pps_state_show(struct seq_file *s, void *v)
 		seq_printf(s, "read vbus %d mV vbat %d mV ibat %d mA soc %d%% t %d C\n",
 			   p->vbus_mv, p->vbat_mv, p->ibat_ma, p->soc,
 			   p->temp_c);
-	seq_printf(s, "sessions %llu entries %u exits %u\n",
-		   p->sessions, p->entries, p->exits);
+	seq_printf(s, "sessions %llu entries %u exits %u cp %s (eng %u drop %u)\n",
+		   p->sessions, p->entries, p->exits,
+		   pps_cp_is_engaged() ? "on" : "off",
+		   p->cp_engages, p->cp_drops);
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(pps_state);

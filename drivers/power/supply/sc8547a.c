@@ -36,6 +36,8 @@
 #include <linux/workqueue.h>
 #include <linux/usb/wcd939x-usbss.h>
 
+#include "sc8547a.h"
+
 /*
  * Android parity for slow/noisy third-party (S)VOOC adapters.  The vendor
  * engine (v2/voocphy/oplus_adsp_voocphy.c) classifies SVOOC from BOTH the
@@ -709,6 +711,145 @@ static int sc8547_reset_voocphy(struct sc8547a_device *sc)
 	sc8547_write_byte(sc, SC8547A_REG_OTG_EN, 0x04);
 	return 0;
 }
+
+/* ------------------ PPS host-engine CP API (erhai_pps) ------------------ *
+ * The serial VOOC ladder correctly refuses PD/PPS-only adapters, so the PPS
+ * engine negotiates a high-V PPS contract through the ADSP itself.  These
+ * entry points let that engine also run the SC8547A charge pump in 2:1 from
+ * the PPS bus (the genuine-SVOOC delivery path minus the serial ladder): the
+ * engine servos the PPS voltage so the chip input sits at ~2*vbat + margin,
+ * then engages the CP through the SAME hardware sequence the VOOC frame path
+ * uses (svooc profile + REG_09 1000 ms watchdog + CHG_EN) and feeds the
+ * watchdog every poll.  The serial ladder keeps first ownership of the CP:
+ * whenever sc8547a_fastchg_delivering() is true this path refuses to run.
+ * Gated on the master instance; slave stays idle (single-CP delivery).  The
+ * engine MUST call sc8547a_pps_cp_feed() more often than the 1000 ms watchdog
+ * window or REG_07 self-clears and the CP drops out on its own (safety).
+ */
+static bool pps_cp_engaged;
+static bool sc8547_slave_is_on(void);	/* defined in the slave section below */
+
+void sc8547a_pps_cp_disengage(void);	/* defined below, called by feed()'s drop path */
+
+/* Snapshot the chip's own VBUS/VBAT/IBUS ADCs (V is upstream of the CP). */
+int sc8547a_pps_snapshot(int *vbus_mv, int *vbat_mv, int *ibus_ma)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+	int vbus, vbat, ibus;
+
+	if (!sc)
+		return -ENODEV;
+	vbus = sc8547_get_vbus(sc);
+	vbat = sc8547_get_vbat(sc);
+	ibus = sc8547_get_ibus(sc);
+	if (vbus < 0 || vbat < 0)
+		return -EIO;
+	if (vbus_mv)
+		*vbus_mv = vbus;
+	if (vbat_mv)
+		*vbat_mv = vbat;
+	if (ibus_ma)
+		*ibus_ma = ibus;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_snapshot);
+
+bool sc8547a_pps_cp_engaged(void)
+{
+	return pps_cp_engaged;
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_cp_engaged);
+
+/*
+ * Engage the master CP for 2:1 delivery.  The chip input must be inside the
+ * 2:1 error window (110 mV <= vbus - 2*vbat <= 700 mV, same constants as the
+ * VOOC deliver path).  Applies the SVOOC constant-current profile (idempotent),
+ * arms the 1000 ms REG_09 watchdog, then latches CHG_EN.  Returns 0 on
+ * success; -EAGAIN (*need_mv = midpoint-target difference) while outside the
+ * window so the caller can servo the PPS voltage toward it.
+ */
+int sc8547a_pps_cp_engage(int *need_mv)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+	int vbus, vbat, diff, target;
+
+	if (!sc)
+		return -ENODEV;
+	if (sc8547a_fastchg_delivering() || sc8547_slave_is_on())
+		return -EBUSY;	/* serial VOOC / slave owns the CP */
+	if (pps_cp_engaged)
+		return 0;
+
+	vbus = sc8547_get_vbus(sc);
+	vbat = sc8547_get_vbat(sc);
+	if (vbus < 0 || vbat < 0)
+		return -EIO;
+	diff = vbus - vbat * 2;
+	target = (SC8547_CP_RESTART_MARGIN_MV + SC8547_CP_RESTART_MARGIN_CEIL_MV) / 2;
+	if (need_mv)
+		*need_mv = target - diff;
+	if (diff < SC8547_CP_RESTART_MARGIN_MV ||
+	    diff > SC8547_CP_RESTART_MARGIN_CEIL_MV)
+		return -EAGAIN;
+
+	sc8547_svooc_hw_setting(sc);
+	sc8547_write_byte(sc, SC8547_REG_09, 0x13);	/* watchdog 1000 ms */
+	sc8547_set_chg_enable(sc, true);
+	pps_cp_engaged = true;
+	dev_info(sc->dev,
+		 "PPS CP: master engaged 2:1 (vbus %d mV vbat %d mV diff %d mV)\n",
+		 vbus, vbat, diff);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_cp_engage);
+
+/*
+ * Feed the 1000 ms watchdog and report state.  Call on every engine poll
+ * while engaged.  Re-latches CHG_EN (a watchdog expiry self-clears REG_07)
+ * and recomputes the 2:1 window: leaving it disengages the CP (safe fallback
+ * to the buck path) and returns -EAGAIN so the engine stops servoing.
+ */
+int sc8547a_pps_cp_feed(int *vbus_mv, int *vbat_mv)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+	int vbus, vbat, diff;
+
+	if (!sc || !pps_cp_engaged)
+		return -ENODEV;
+	vbus = sc8547_get_vbus(sc);
+	vbat = sc8547_get_vbat(sc);
+	if (vbus < 0 || vbat < 0)
+		goto drop;
+	if (vbus_mv)
+		*vbus_mv = vbus;
+	if (vbat_mv)
+		*vbat_mv = vbat;
+	diff = vbus - vbat * 2;
+	if (diff < SC8547_CP_RESTART_MARGIN_MV ||
+	    diff > SC8547_CP_RESTART_MARGIN_CEIL_MV)
+		goto drop;
+	sc8547_write_byte(sc, SC8547_REG_09, 0x13);
+	sc8547_set_chg_enable(sc, true);
+	return 0;
+drop:
+	sc8547a_pps_cp_disengage();
+	return -EAGAIN;
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_cp_feed);
+
+void sc8547a_pps_cp_disengage(void)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+
+	pps_cp_engaged = false;
+	if (!sc)
+		return;
+	/* full teardown mirrors the VOOC exit path (reset_voocphy): CP off,
+	 * watchdog off, OCP/OVP and ADC back to base defaults. */
+	sc8547_reset_voocphy(sc);
+	dev_info(sc->dev, "PPS CP: master disengaged - buck path restored\n");
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_cp_disengage);
 
 /* ------------------ slave charge-pump (2:1 parallel) ------------------ *
  * The slave SC8547A shares the bus current in parallel with the master so
