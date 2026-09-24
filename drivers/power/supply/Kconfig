@@ -1224,6 +1224,24 @@ config MACSMC_POWER
 
 	  Say Y or M here if you have an Apple Silicon based Mac.
 
+config CHARGER_ERHAI_PPS
+	tristate "erhai (OnePlus Pad 3) ADSP PPS fast-charge host engine"
+	depends on ERHAI_OTG_GLINK
+	help
+	  Say Y/M to enable the PPS fast-charge engine for the OnePlus Pad 3
+	  (erhai / SM8750).  PD/PPS-only chargers (3rd-party bricks Android
+	  labels "SuperVOOC", e.g. a 100 W Anker) never speak the proprietary
+	  serial VOOC the sc8547a driver handles; this engine negotiates a PPS
+	  APDO through the ADSP charger_pd firmware (VBUS ~8.4 V) and grants
+	  the pack charge demand through the battery-psy profile props, the
+	  same total handshake Android's engine drives.
+
+	  It engages only for PD_PPS adapters with no serial VOOC active, waits
+	  for the serial ladder to decline first, steps VBUS up in small
+	  increments, servos the PPS current against pack state, and always
+	  reverts to the ordinary 5 V contract on detach/limit/abnormal.
+	  Module parameters disable or retune it without a rebuild.
+
 config CHARGER_SC8547A
 	tristate "Southchip SC8547A charge pump / VOOC PHY"
 	depends on I2C

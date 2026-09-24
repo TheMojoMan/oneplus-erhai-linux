@@ -81,6 +81,13 @@
 #define USB_OTG_VBUS_REGULATOR_ENABLE	24
 #define USB_OTG_BOOST_CURRENT		64
 
+/* battery_property_id (V2, oplus_hal_adsp.h battery enum): charging enable.
+ * The current ADSP charger_pd IGNORES the legacy USB_CHARGE_OUTPUT_SUSPEND
+ * (19) above — verified live 2026-09-23 — and suspends charging only through
+ * this battery-psy property (0 = stop charging; system keeps running from
+ * input).  See erhai_otg_chglim_set() + charging-MEMORY-2026-09-23.md. */
+#define BATT_CHG_EN			24
+
 /*
  * battery_property_id enum (battmgr family — the same ids upstream
  * qcom_battmgr sends; subset used by the ADSP battery psy below).
@@ -211,9 +218,17 @@ MODULE_PARM_DESC(erhai_detach_disarm_enable,
 
 /*
  * Max-SoC charge limit. When 1..99, charging is inhibited at/above this SoC
- * (battery held, system runs from input via USB_CHARGE_OUTPUT_SUSPEND) and
- * resumed once SoC falls ERHAI_CHGLIM_HYST below it. 0 or 100 disables the
- * limit (charge to full). Uses the reliable bq27z561 AP-I2C gauge.
+ * (battery held, system runs from input) and resumed once SoC falls
+ * ERHAI_CHGLIM_HYST below it. 0 or 100 disables the limit (charge to full).
+ * Uses the reliable bq27z561 AP-I2C gauge.
+ *
+ * The inhibit mechanism is the ADSP battery-psy "charging enable"
+ * (BATT_CHG_EN = 24 via BC_BATTERY_PROPERTY_SET).  The legacy
+ * USB_CHARGE_OUTPUT_SUSPEND (usb-prop 19) is accepted but IGNORED by the
+ * current ADSP charger_pd (live proof 2026-09-23: writing 19=1 changes
+ * nothing while BATT_CHG_EN=0 drains the draw to system-only) — that dead
+ * property is why max_soc stopped working "quite a while ago".  The legacy
+ * prop stays selectable via chglim_charge_enable=0 for older firmware.
  */
 static int max_soc = ERHAI_CHGLIM_DEFAULT_MAXSOC;
 module_param(max_soc, int, 0644);
@@ -485,6 +500,49 @@ static int erhai_otg_chglimit_soc(struct erhai_otg *otg)
 	return soc;
 }
 
+/* Select the charge-inhibit property: modern BATT_CHG_EN vs legacy suspend. */
+static bool chglim_charge_enable = true;
+module_param(chglim_charge_enable, bool, 0644);
+MODULE_PARM_DESC(chglim_charge_enable,
+		 "inhibit via BATT_CHG_EN (battery psy, prop 24) instead of the "
+		 "legacy USB_CHARGE_OUTPUT_SUSPEND (usb psy, prop 19, now ignored "
+		 "by the ADSP)");
+
+/*
+ * Apply the charge-inhibit state on the ADSP (1 = hold the pack: charging
+ * disabled, system keeps running from input; 0 = allow charging).  Returns 0
+ * on ack or a negative errno, and LOGS the result — pre-2026-09-23 the return
+ * was swallowed, so a silently-rejected suspend looked exactly like a
+ * regression that "used to work".
+ */
+static int erhai_otg_chglim_set(struct erhai_otg *otg, int inhibit)
+{
+	u32 prop, opcode, value;
+	int ret;
+
+	if (chglim_charge_enable) {
+		prop = BATT_CHG_EN;
+		opcode = BC_BATTERY_PROPERTY_SET;
+		value = inhibit ? 0 : 1;	/* BATT_CHG_EN: 0 = stop */
+	} else {
+		prop = USB_CHARGE_OUTPUT_SUSPEND;
+		opcode = BC_USB_PROPERTY_SET;
+		value = inhibit ? 1 : 0;	/* legacy 19: 1 = suspend */
+	}
+
+	ret = erhai_otg_set_op(otg, opcode, prop, value);
+	if (ret < 0)
+		dev_warn(otg->dev, "chglim: %s %s failed %d\n",
+			 chglim_charge_enable ? "charge-enable" : "suspend",
+			 inhibit ? "inhibit" : "release", ret);
+	else if (otg->chglim_state != inhibit)
+		dev_info(otg->dev, "chglim: charging %s by %s (soc %d%%, max %d%%)\n",
+			 inhibit ? "suspended" : "resumed",
+			 chglim_charge_enable ? "BATT_CHG_EN" : "suspend-prop",
+			 erhai_otg_soc_pct(erhai_otg_adsp_soc(otg)), max_soc);
+	return ret;
+}
+
 /*
  * Max-SoC charge limit. Holds the pack at the max_soc ceiling by suspending the
  * charge output above it (system keeps running from input) and resuming below
@@ -496,13 +554,13 @@ static void erhai_otg_chglim_work(struct work_struct *work)
 	struct erhai_otg *otg = container_of(to_delayed_work(work),
 					     struct erhai_otg, chglim_work);
 	int max = max_soc;
-	int soc;
+	int soc, ret;
 
 	if (max < 1 || max >= 100) {
 		/* limit disabled -> release any standing inhibit */
 		if (otg->chglim_state == 1) {
 			if (otg->service_up)
-				erhai_otg_set(otg, USB_CHARGE_OUTPUT_SUSPEND, 0);
+				erhai_otg_chglim_set(otg, 0);
 			otg->chglim_state = 0;
 		}
 		goto out;
@@ -516,12 +574,14 @@ static void erhai_otg_chglim_work(struct work_struct *work)
 		goto out;		/* gauge/ADSP not ready; retry */
 
 	if (soc >= max) {
-		erhai_otg_set(otg, USB_CHARGE_OUTPUT_SUSPEND, 1);
-		otg->chglim_state = 1;
+		ret = erhai_otg_chglim_set(otg, 1);
+		if (ret == 0)
+			otg->chglim_state = 1;
 	} else if (soc <= max - ERHAI_CHGLIM_HYST) {
 		if (otg->chglim_state != 0) {
-			erhai_otg_set(otg, USB_CHARGE_OUTPUT_SUSPEND, 0);
-			otg->chglim_state = 0;
+			ret = erhai_otg_chglim_set(otg, 0);
+			if (ret == 0)
+				otg->chglim_state = 0;
 		}
 	}
 	/* in the [max-hyst, max) band: hold the current state */
@@ -702,6 +762,33 @@ int erhai_otg_adsp_usb_prop(u32 property)
 				 property);
 }
 EXPORT_SYMBOL_GPL(erhai_otg_adsp_usb_prop);
+
+/*
+ * General ADSP battery_charger property access (USB or battery psy).  The
+ * opcode gates which psy is addressed; anything else is rejected up front so
+ * a caller cannot deadlock the glink ack on a reply that will never come.
+ */
+int erhai_otg_adsp_prop_get(u32 opcode, u32 property)
+{
+	if (!erhai_otg_glink_dev)
+		return -ENODEV;
+	if (opcode != BC_USB_PROPERTY_GET &&
+	    opcode != BC_BATTERY_PROPERTY_GET)
+		return -EINVAL;
+	return erhai_otg_get_op(erhai_otg_glink_dev, opcode, property);
+}
+EXPORT_SYMBOL_GPL(erhai_otg_adsp_prop_get);
+
+int erhai_otg_adsp_prop_set(u32 opcode, u32 property, u32 value)
+{
+	if (!erhai_otg_glink_dev)
+		return -ENODEV;
+	if (opcode != BC_USB_PROPERTY_SET &&
+	    opcode != BC_BATTERY_PROPERTY_SET)
+		return -EINVAL;
+	return erhai_otg_set_op(erhai_otg_glink_dev, opcode, property, value);
+}
+EXPORT_SYMBOL_GPL(erhai_otg_adsp_prop_set);
 static bool erhai_session_sync_enable = true;
 module_param(erhai_session_sync_enable, bool, 0644);
 MODULE_PARM_DESC(erhai_session_sync_enable,

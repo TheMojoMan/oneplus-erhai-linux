@@ -76,6 +76,7 @@ MODULE_PARM_DESC(adsp_fastchg_svooc_min,
 		 "ADSP fast-charge type >= this counts as VOOC-family (default 2)");
 
 #include "erhai_otg_glink.h"
+#include "sc8547a.h"
 
 /* ---- register map (charge-pump / VOOC-PHY function, I2C addr 0x6F) ---- */
 #define SC8547_REG_00			0x00	/* VBAT_OVP */
@@ -426,6 +427,21 @@ struct sc8547a_device {
  * VBUS_ERRORLO under CC). NULL on a single-CP board — every slave op no-ops.
  */
 static struct sc8547a_device *sc8547_slave_dev;
+/* master instance (the VOOC ladder / CP owner), for out-of-tree state queries */
+static struct sc8547a_device *sc8547_master_dev;
+
+/*
+ * Exported for the PPS host engine (erhai_pps): is the serial VOOC ladder
+ * currently DELIVERING?  The PPS path must stand down while genuine serial
+ * SuperVOOC owns the plug (it drives the CP itself); this is the gate.
+ */
+bool sc8547a_fastchg_delivering(void)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+
+	return sc && sc->fastchg_deliver;
+}
+EXPORT_SYMBOL_GPL(sc8547a_fastchg_delivering);
 
 /* ------------------------- register accessors ------------------------- */
 
@@ -2466,6 +2482,8 @@ static int sc8547a_probe(struct i2c_client *client)
 
 	if (sc->is_slave)
 		sc8547_slave_dev = sc;	/* master delivery path drives it */
+	else
+		sc8547_master_dev = sc;
 
 	/*
 	 * Hands-free: start the master's attach poller now so a SuperVOOC adapter
@@ -2493,6 +2511,8 @@ static void sc8547a_remove(struct i2c_client *client)
 	sc8547_reset_voocphy(sc);
 	if (sc->is_slave && sc8547_slave_dev == sc)
 		sc8547_slave_dev = NULL;
+	if (!sc->is_slave && sc8547_master_dev == sc)
+		sc8547_master_dev = NULL;
 }
 
 static void sc8547a_shutdown(struct i2c_client *client)
