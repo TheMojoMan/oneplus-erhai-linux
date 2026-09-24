@@ -791,33 +791,50 @@ fail:
 								rc, diff);
 							p->cp_drops++;
 						}
-					} else if (diff >= 0 &&
-						   p->set_volt_mv <= pps_cp_max_volt_mv) {
-						int need = 0;
+					} else {
+						/* engage only once the chip window is
+						 * (at least) reachable */
+						if (diff >= 0 &&
+						    p->set_volt_mv <= pps_cp_max_volt_mv) {
+							int need = 0;
 
-						rc = a->cp_engage(&need);
-						if (rc == 0) {
-							p->cp_engages++;
-							pr_info("erhai_pps: CP 2:1 ENGAGED (chip vbus %d mV vbat %d mV diff %d mV)\n",
-								cvbus, cvbat, diff);
-						} else if (rc == -EAGAIN && p->charg_ticks > 3) {
+							rc = a->cp_engage(&need);
+							if (rc == 0) {
+								p->cp_engages++;
+								pr_info("erhai_pps: CP 2:1 ENGAGED (chip vbus %d mV vbat %d mV diff %d mV)\n",
+								    cvbus, cvbat, diff);
+							}
+						}
+						/* b6: servo PPS VOLT toward 2*vbat + target
+						 * even when diff < 0.  The ADSP settle is
+						 * its own closed loop and at higher SOC it
+						 * can sit UNDER 2*vbat (measured -470 mV on
+						 * the b5 boot); b5 only servoed after a
+						 * -EAGAIN engage attempt, which can never
+						 * happen with diff < 0, so the engine never
+						 * even tried to reach the window.  Keep
+						 * walking toward the target (ceiling
+						 * pps_cp_max_volt_mv, floor
+						 * pps_cp_min_volt_mv); the engage gate
+						 * above fires the chip the moment the window
+						 * appears. */
+						if (p->charg_ticks > 3) {
 							unsigned int nv;
 							int target = pps_cp_target_mv;
 
-							/* servo PPS VOLT toward 2*vbat + target */
 							if (diff < target) {
 								nv = min(p->set_volt_mv +
-									 pps_cp_vstep_mv,
-									 pps_cp_max_volt_mv);
+								     pps_cp_vstep_mv,
+								     pps_cp_max_volt_mv);
 								if (nv > p->set_volt_mv &&
-									    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
-									p->set_volt_mv = nv;
+								    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
+								    p->set_volt_mv = nv;
 							} else if (diff > target + (int)pps_cp_vstep_mv) {
 								nv = p->set_volt_mv - pps_cp_vstep_mv;
 								if (nv >= pps_cp_min_volt_mv &&
-									    nv < p->set_volt_mv &&
-									    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
-									p->set_volt_mv = nv;
+								    nv < p->set_volt_mv &&
+								    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
+								    p->set_volt_mv = nv;
 							}
 						}
 					}
