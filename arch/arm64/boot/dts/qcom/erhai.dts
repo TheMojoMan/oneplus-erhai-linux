@@ -1839,8 +1839,16 @@
 		pinctrl-0 = <&ts_int_active>;
 
 		novatek,swrst-n8-addr = <0x1FB43E>;
+		/*
+		 * Pen (stylus) support.  The driver puts the IC into pen scan mode
+		 * with the NT36536 extended command (0x7F + sub-command 0x10, the
+		 * vendor's default pencil type) — see nvt_pen_ext_cmd_send().
+		 * There is deliberately NO "novatek,wgp-stylus" here: that nabu
+		 * property described an *8 pen resolution/protocol this panel does
+		 * not use (it left the cursor in a corner), and OxygenOS' erhai DT
+		 * has no such property either.
+		 */
 		novatek,pen-support;
-		novatek,wgp-stylus;
 
 		/*
 		 * Raw NT bin (header_end 0x250, cascade=1) stripped from the
