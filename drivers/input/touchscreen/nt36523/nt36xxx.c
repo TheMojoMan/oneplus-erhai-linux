@@ -972,9 +972,15 @@ static void nvt_esd_check_func(struct work_struct *work)
 
 #if NVT_TOUCH_WDT_RECOVERY
 static uint8_t recovery_cnt = 0;
+static unsigned long last_wdt_flash = 0;
+/* erhai: the controller re-download is NOT free - the panel shows it as a
+ * flicker.  Never flash more than once per minute, and only after a real
+ * reset has persisted through the raised threshold (transient 0xFD/0xFE SPI
+ * bursts under heavy SoC load self-heal and must not trigger a flash storm). */
+#define NVT_WDT_REFLASH_DELAY_MSECS 60000UL
 static uint8_t nvt_wdt_fw_recovery(uint8_t *point_data)
 {
-   uint32_t recovery_cnt_max = 10;
+   uint32_t recovery_cnt_max = 30;
    uint8_t recovery_enable = false;
    uint8_t i = 0;
 
@@ -1109,7 +1115,16 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 			NVT_ERR("Dump FW history:\n");
 			nvt_dump_fw_history();
 		}
-		nvt_update_firmware(ts->fw_name);
+		if (time_before(jiffies, last_wdt_flash +
+				msecs_to_jiffies(NVT_WDT_REFLASH_DELAY_MSECS))) {
+			/* transient SPI-link glitch (heavy SoC/memory-bus load): the
+			 * controller is fine, the frame stream returned to normal by
+			 * itself in every erhai observation.  Drop the frame, no flash. */
+			NVT_LOG("fw-reset markers look transient - no reflash");
+		} else {
+			last_wdt_flash = jiffies;
+			nvt_update_firmware(ts->fw_name);
+		}
 		goto XFER_ERROR;
 	}
 #endif /* #if NVT_TOUCH_WDT_RECOVERY */
