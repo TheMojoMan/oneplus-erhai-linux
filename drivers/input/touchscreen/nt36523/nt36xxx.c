@@ -46,6 +46,38 @@ uint8_t esd_retry = 0;
 
 struct nvt_ts_data *ts;
 
+/*
+ * erhai stylus knobs.
+ *
+ * pen_mode_on_cmd — the extended-command sub-command used to enter pen scan
+ *   mode.  0x10 (TYPE_PENCIL_HAVON) is what Android's touch HAL writes for the
+ *   default pencil type; if a sticker does not respond, try the other families
+ *   (0x12/0x13/0x18 maxeye, 0x15 Xingwangda) at runtime instead of rebuilding:
+ *     echo 0x12 > /sys/module/nt36523_ts/parameters/pen_mode_on_cmd
+ *     echo 1    > /sys/module/nt36523_ts/parameters/pen_resend
+ * pen_resend — write anything to re-send the pen-mode command now (the verdict
+ *   from the FW lands in dmesg next to "pen cmd 0x.. acked" / "not accepted").
+ * pen_dump — non-zero prints the raw 14-byte pen report block (event buffer
+ *   bytes 66..79) whenever it changes: the direct way to see whether the IC
+ *   emits stylus packets at all, before any coordinate interpretation.
+ */
+static uint pen_mode_on_cmd = EVENTBUFFER_EXT_PEN_MODE_ON;
+module_param(pen_mode_on_cmd, uint, 0644);
+MODULE_PARM_DESC(pen_mode_on_cmd, "NT36536 extended pen-mode sub-command (0x10 havon default, 0x12/0x13/0x18 maxeye, 0x15 xingwangda)");
+static uint pen_dump;
+module_param(pen_dump, uint, 0644);
+MODULE_PARM_DESC(pen_dump, "non-zero: print the raw 14-byte pen report block whenever it changes");
+static uint pen_resend;
+static int nvt_pen_resend_set(const char *val, const struct kernel_param *kp);
+static const struct kernel_param_ops nvt_pen_resend_ops = {
+	.set = nvt_pen_resend_set,
+	.get = param_get_uint,
+};
+module_param_cb(pen_resend, &nvt_pen_resend_ops, &pen_resend, 0200);
+MODULE_PARM_DESC(pen_resend, "write any value to re-send the pen-mode command");
+
+static int32_t disable_pen_input_device(bool disable);
+
 #ifdef NVT_XIAOMI_MI_DRM_NOTIFIER
 static int nvt_drm_notifier_callback(struct notifier_block *self, unsigned long event, void *data);
 #endif
@@ -777,6 +809,33 @@ static void release_pen_event(void) {
 	}
 }
 
+/*
+ * erhai: (re)apply the pen input device's coordinate ranges.
+ *
+ * The pen reports in the SAME space as the fingers (FW advertises
+ * abs_x_max x abs_y_max = 33920 x 24000; the vendor DT's
+ * touchpanel,pen-panel-coords = <24000 33920> is that very grid in portrait
+ * axes), so the pen limits are abs_{x,y}_max - 1 and nothing is scaled.  The
+ * retired nabu "wgp-stylus" path used to multiply by 8 here, which left the
+ * cursor confined to a small corner of the screen.
+ *
+ * This runs again whenever the ranges become known/changed: at pen device
+ * creation they are still TOUCH_DEFAULT_MAX_* (the FW info / FW download land
+ * later on this in-cell panel).
+ */
+static void nvt_pen_abs_config(void)
+{
+	if (!ts || !ts->pen_input_dev)
+		return;
+
+	input_set_abs_params(ts->pen_input_dev, ABS_X, 0, ts->abs_x_max - 1, 0, 0);
+	input_set_abs_params(ts->pen_input_dev, ABS_Y, 0, ts->abs_y_max - 1, 0, 0);
+	input_abs_set_res(ts->pen_input_dev, ABS_X, (ts->abs_x_max - 1) / PANEL_DEFAULT_WIDTH_MM);
+	input_abs_set_res(ts->pen_input_dev, ABS_Y, (ts->abs_y_max - 1) / PANEL_DEFAULT_HEIGHT_MM);
+
+	NVT_LOG("pen ABS range set to %dx%d\n", ts->abs_x_max - 1, ts->abs_y_max - 1);
+}
+
 /*******************************************************
 Description:
 	Novatek touchscreen parse device tree function.
@@ -804,9 +863,6 @@ static int32_t nvt_parse_dt(struct device *dev)
 
 	ts->pen_support = of_property_read_bool(np, "novatek,pen-support");
 	NVT_LOG("novatek,pen-support=%d\n", ts->pen_support);
-
-	ts->wgp_stylus = of_property_read_bool(np, "novatek,wgp-stylus");
-	NVT_LOG("novatek,wgp-stylus=%d\n", ts->wgp_stylus);
 
 	ret = of_property_read_u32(np, "novatek,swrst-n8-addr", &SWRST_N8_ADDR);
 	if (ret) {
@@ -959,6 +1015,8 @@ static void nvt_esd_check_func(struct work_struct *work)
 		/* do esd recovery, reload fw */
 		nvt_update_firmware(ts->fw_name);
 		mutex_unlock(&ts->lock);
+		/* erhai: the FW reload clears pen scan mode — put the stylus back on */
+		disable_pen_input_device(false);
 		/* update interrupt timer */
 		irq_timer = jiffies;
 		/* update esd_retry counter */
@@ -1124,6 +1182,8 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 		} else {
 			last_wdt_flash = jiffies;
 			nvt_update_firmware(ts->fw_name);
+			/* erhai: the FW reload clears pen scan mode */
+			disable_pen_input_device(false);
 		}
 		goto XFER_ERROR;
 	}
@@ -1257,29 +1317,45 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 	input_sync(ts->input_dev);
 
 	if (ts->pen_support && ts->pen_input_dev_enable && !(ts->pen_is_charge)) {
-/*
-		//--- dump pen buf ---
-		printk("%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
-			point_data[66], point_data[67], point_data[68], point_data[69], point_data[70],
-			point_data[71], point_data[72], point_data[73], point_data[74], point_data[75],
-			point_data[76], point_data[77], point_data[78], point_data[79]);
-*/
+		/*
+		 * erhai: raw pen report block (event buffer bytes 66..79) on change.
+		 * The cheapest way to tell "the IC never emits stylus packets" from
+		 * "it does, but we decode them wrong": echo 1 > .../parameters/pen_dump
+		 */
+		if (pen_dump) {
+			static uint8_t pen_dump_last[PEN_DATA_LEN];
+
+			if (memcmp(pen_dump_last, &point_data[66], PEN_DATA_LEN)) {
+				memcpy(pen_dump_last, &point_data[66], PEN_DATA_LEN);
+				NVT_LOG("pen buf %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
+					point_data[66], point_data[67], point_data[68], point_data[69], point_data[70],
+					point_data[71], point_data[72], point_data[73], point_data[74], point_data[75],
+					point_data[76], point_data[77], point_data[78], point_data[79]);
+			}
+		}
+
 		// parse and handle pen report
 		pen_format_id = point_data[66];
 		if (pen_format_id != 0xFF) {
 			if (pen_format_id == 0x01) {
 				// report pen data
-				/* erhai: portrait-vs-landscape transpose, see finger high_reso note above */
+				/*
+				 * erhai: the pen reports in the SAME space as the fingers
+				 * (FW abs 33920x24000; the vendor DT's pen-panel-coords
+				 * <24000 33920> is that same grid in portrait axes), so
+				 * bytes [69:70] are the long edge (landscape X) and
+				 * [67:68] the short one (landscape Y).  The old nabu
+				 * "wgp-stylus" *8 scaling here is gone — it left the
+				 * cursor in a corner and capped pressure at 1/4 range.
+				 */
 				pen_x = (uint32_t)(point_data[69] << 8) + (uint32_t)(point_data[70]);
 				pen_y = (uint32_t)(point_data[67] << 8) + (uint32_t)(point_data[68]);
-				if (pen_x >= ts->abs_x_max * 8 - 1) {
-					pen_x -= 1;
-				}
-				if (pen_y >= ts->abs_y_max * 8 - 1) {
-					pen_y -= 1;
-				}
-				/* erhai: mirror pen Y to match the finger Y flip (8x pen res) */
-				pen_y = (ts->abs_y_max * 8 - 1) - pen_y;
+				if (pen_x > ts->abs_x_max - 1)
+					pen_x = ts->abs_x_max - 1;
+				if (pen_y > ts->abs_y_max - 1)
+					pen_y = ts->abs_y_max - 1;
+				/* erhai: mirror pen Y to match the finger Y flip */
+				pen_y = (ts->abs_y_max - 1) - pen_y;
 				pen_pressure = (uint32_t)(point_data[71] << 8) + (uint32_t)(point_data[72]);
 				pen_tilt_x = (int32_t)point_data[73];
 				pen_tilt_y = (int32_t)point_data[74];
@@ -1289,6 +1365,7 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 				pen_battery = (uint32_t)point_data[78];
 //				printk("x=%d,y=%d,p=%d,tx=%d,ty=%d,d=%d,b1=%d,b2=%d,bat=%d\n", pen_x, pen_y, pen_pressure,
 //						pen_tilt_x, pen_tilt_y, pen_distance, pen_btn1, pen_btn2, pen_battery);
+
 
 				input_report_abs(ts->pen_input_dev, ABS_X, pen_x);
 				input_report_abs(ts->pen_input_dev, ABS_Y, pen_y);
@@ -1430,8 +1507,65 @@ out:
 	return ret;
 }
 
+/*
+ * erhai: send one NT36536 extended host command and wait for the FW to consume
+ * it, exactly like the vendor driver's nvt_extend_cmd_store(): the command goes
+ * to EVENT_MAP_HOST_CMD as { EV <EVENTBUFFER_EXT_CMD>, <sub-command> } and the
+ * FW clears the status byte back to 0x00 once it has been taken.
+ *
+ * This port used to write the nabu byte 0x7B here.  In THIS IC's command set
+ * 0x7B is EVENTBUFFER_EDGE_LIMIT_LEFT_UP — an edge-limit command — so the
+ * controller was never switched into pen scan mode and a stylus produced no
+ * input events at all (verified against the OxygenOS sources in
+ * tmp/android-dt-pad3 vendor/oplus/kernel/touchpanel/oplus_touchscreen_v2/
+ * Novatek/NT36536_noflash/).
+ */
+static int32_t nvt_pen_ext_cmd_send(uint8_t subcmd)
+{
+	uint8_t buf[4] = {0};
+	int32_t ret = -EIO;
+	int i;
+
+	for (i = 0; i < 5; i++) {
+		ret = nvt_set_page(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD);
+		if (ret < 0) {
+			NVT_ERR("set page for pen cmd 0x%02X failed, ret=%d\n", subcmd, ret);
+			return ret;
+		}
+
+		buf[0] = EVENT_MAP_HOST_CMD;
+		buf[1] = EVENTBUFFER_EXT_CMD;
+		buf[2] = subcmd;
+		ret = CTP_SPI_WRITE(ts->client, buf, 3);
+		if (ret < 0) {
+			NVT_ERR("write pen cmd 0x%02X failed, ret=%d\n", subcmd, ret);
+			return ret;
+		}
+
+		msleep(20);
+
+		/*---read cmd status back (0x00 = accepted)---*/
+		ret = nvt_set_page(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD);
+		if (ret < 0)
+			return ret;
+
+		buf[0] = EVENT_MAP_HOST_CMD;
+		buf[1] = 0xFF;
+		buf[2] = 0xFF;
+		ret = CTP_SPI_READ(ts->client, buf, 3);
+		if (ret < 0)
+			return ret;
+
+		if (buf[1] == 0x00)
+			return 0;
+	}
+
+	NVT_ERR("pen cmd 0x%02X NOT accepted by FW (status=0x%02X)\n", subcmd, buf[1]);
+	return ret;
+}
+
 static int32_t disable_pen_input_device(bool disable) {
-	uint8_t buf[8] = {0};
+	uint8_t subcmd;
 	int32_t ret = 0;
 
 	NVT_LOG("++\n");
@@ -1443,29 +1577,48 @@ static int32_t disable_pen_input_device(bool disable) {
 	msleep(35);
 	disable = (!(ts->pen_input_dev_enable) || ts->pen_is_charge) ? true : disable;
 
-	//---set xdata index to EVENT BUF ADDR---
-	ret = nvt_set_page(ts->mmap->EVENT_BUF_ADDR | EVENT_MAP_HOST_CMD);
-	if (ret < 0) {
-		NVT_ERR("Set event buffer index fail!\n");
-		goto nvt_set_pen_enable_out;
-	}
+	subcmd = disable ? EVENTBUFFER_EXT_PEN_MODE_OFF : (uint8_t)pen_mode_on_cmd;
 
-	buf[0] = EVENT_MAP_HOST_CMD;
-	buf[1] = 0x7B;
-	buf[2] = !!disable;
-	ret = CTP_SPI_WRITE(ts->client, buf, 3);
-	if (ret < 0) {
-		NVT_ERR("set pen %s failed!\n", disable ? "DISABLE" : "ENABLE");
+	ret = nvt_pen_ext_cmd_send(subcmd);
+	if (ret < 0)
 		goto nvt_set_pen_enable_out;
-	}
-	NVT_LOG("pen charge state is %s, %s pen input device\n",
-	ts->pen_is_charge ? "ENABLE" : "DISABLE",
-	disable ? "DISABLE" : "ENABLE");
+
+	NVT_LOG("pen charge state is %s, %s pen input device (pen cmd 0x7F/0x%02X acked)\n",
+		ts->pen_is_charge ? "ENABLE" : "DISABLE",
+		disable ? "DISABLE" : "ENABLE", subcmd);
 
 nvt_set_pen_enable_out:
 	NVT_LOG("--\n");
 	return ret;
 }
+
+/*
+ * pen_resend: re-send the pen-mode command right now, in this (process) sysfs
+ * context — used to test the other pencil families ("pen_mode_on_cmd") without
+ * rebuilding the kernel.  Nothing else in the driver holds ts->lock here, and
+ * the helper only sleeps + talks SPI, so no workqueue is needed.
+ */
+static int nvt_pen_resend_set(const char *val, const struct kernel_param *kp)
+{
+	uint32_t v;
+	int ret = kstrtou32(val, 0, &v);
+
+	if (ret)
+		return ret;
+
+	pen_resend = v;
+
+	if (!ts || !ts->pen_support || !ts->pen_input_dev) {
+		NVT_ERR("pen_resend: pen support not ready (pen_support=%d)\n",
+			ts ? ts->pen_support : -1);
+		return -ENODEV;
+	}
+
+	disable_pen_input_device(false);
+
+	return 0;
+}
+
 
 /*
  * Boot firmware download (deferred).
@@ -1522,6 +1675,14 @@ static void nvt_boot_fw_work_func(struct work_struct *work)
 	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y, 0, ts->abs_y_max - 1, 0, 0);
 	NVT_LOG("boot firmware ready (retry=%d); input ABS range set to %dx%d\n",
 			ts->boot_fw_retry, ts->abs_x_max, ts->abs_y_max);
+
+	/*
+	 * erhai: the pen device was created before this (with the default panel
+	 * ranges) and a FW (re)load clears the IC's pen scan mode, so re-apply
+	 * both now: pen ABS ranges + the pen-mode command.
+	 */
+	nvt_pen_abs_config();
+	disable_pen_input_device(false);
 
 	/* deferred bring-up: chip is up + FW loaded — now safe to start sensing */
 	if (ts->deferred_bringup)
@@ -1778,20 +1939,12 @@ static int32_t nvt_ts_probe(struct spi_device *client)
 		ts->pen_input_dev->keybit[BIT_WORD(BTN_STYLUS2)] |= BIT_MASK(BTN_STYLUS2);
 		ts->pen_input_dev->propbit[0] = BIT(INPUT_PROP_DIRECT);
 
-		int x_max, y_max;
-
-		if (ts->wgp_stylus) {
-			x_max = ts->abs_x_max * 8 - 1;
-			y_max = ts->abs_y_max * 8 - 1;
-		} else {
-			x_max = ts->abs_x_max - 1;
-			y_max = ts->abs_y_max - 1;
-		}
-
-		input_set_abs_params(ts->pen_input_dev, ABS_X, 0, x_max, 0, 0);
-		input_set_abs_params(ts->pen_input_dev, ABS_Y, 0, y_max , 0, 0);
-		input_abs_set_res(ts->pen_input_dev, ABS_X, x_max / PANEL_DEFAULT_WIDTH_MM);
-		input_abs_set_res(ts->pen_input_dev, ABS_Y, y_max / PANEL_DEFAULT_HEIGHT_MM);
+		/*
+		 * erhai: 1:1 with the finger grid (no nabu *8 scaling) — the real
+		 * ranges are re-applied by nvt_pen_abs_config() once the FW info
+		 * is known; these are only the pre-FW defaults.
+		 */
+		nvt_pen_abs_config();
 
 		input_set_abs_params(ts->pen_input_dev, ABS_PRESSURE, 0, PEN_PRESSURE_MAX, 0, 0);
 		input_set_abs_params(ts->pen_input_dev, ABS_DISTANCE, 0, PEN_DISTANCE_MAX, 0, 0);
