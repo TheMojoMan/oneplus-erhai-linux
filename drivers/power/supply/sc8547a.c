@@ -445,6 +445,23 @@ bool sc8547a_fastchg_delivering(void)
 }
 EXPORT_SYMBOL_GPL(sc8547a_fastchg_delivering);
 
+/*
+ * Is the serial VOOC ladder currently in the identify or deliver phase (i.e. it
+ * owns this plug and delivery is still possible/active)?  The PPS host engine
+ * must not capture the connector while this is true — including DURING the
+ * identify window, not just once CP delivery has latched (the engine's 10 s
+ * debounce otherwise races a slow ladder's retries and lifts VBUS away from the
+ * 5 V identify window).
+ */
+bool sc8547a_fastchg_identifying(void)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+
+	return sc && (sc->auto_state == SC_AUTO_IDENTIFY ||
+		      sc->auto_state == SC_AUTO_DELIVER);
+}
+EXPORT_SYMBOL_GPL(sc8547a_fastchg_identifying);
+
 /* ------------------------- register accessors ------------------------- */
 
 static int sc8547_read_byte(struct sc8547a_device *sc, u8 reg, u8 *val)
@@ -1963,19 +1980,35 @@ static void sc8547_attach_work(struct work_struct *work)
 	vbus = sc8547_get_vbus(sc);
 
 	/*
-	 * Debounce Vbus absence: a raw-absent reading only becomes a logical
-	 * detach after SC8547_DETACH_DEBOUNCE_MS of continuous absence, so brief
-	 * SVOOC protocol Vbus-dips during the servo don't flip vbus_was_present
-	 * (which would fire a spurious detach→attach edge and re-flip the
-	 * crossbar). A real unplug stays absent past the window → detach fires.
+	 * Present source: prefer the ADSP connector state (USB_ONLINE, prop 0)
+	 * while reachable — it tracks the PHYSICAL plug even when the erhai_pps
+	 * engine holds an internal PPS rail that keeps the SC8547 VBUS ADC above
+	 * the present threshold across a real detach.  Relying on the ADC alone
+	 * stranded the serial-VOOC ladder in `declined` for the whole boot on the
+	 * engine kernels (2026-09-25): the SC8547-VBUS attach edge never fired on
+	 * a physical replug, so the historical "replug = fresh 5 V identify"
+	 * recovery was dead and a genuine SuperVOOC brick stayed locked to PPS.
+	 * Fall back to the SC8547 VBUS ADC while the ADSP is not yet reachable
+	 * (early boot / firmware absent).
 	 */
-	if (vbus > SC8547_VBUS_PRESENT_MV) {
-		sc->vbus_absent_since = 0;
-		present = true;
-	} else if (!sc->vbus_was_present) {
-		present = false;		/* already detached, stay so */
-	} else {
+	{
+		int adsp_online = erhai_otg_adsp_usb_prop(0);	/* USB_ONLINE */
+
+		if (adsp_online >= 0)
+			present = adsp_online > 0;
+		else
+			present = vbus > SC8547_VBUS_PRESENT_MV;
+	}
+
+	if (!present) {
 		/*
+		 * Debounce absence: a raw-absent state only becomes a logical
+		 * detach after the debounce window of continuous absence, so brief
+		 * SVOOC protocol Vbus-dips during the servo don't flip
+		 * vbus_was_present (which would fire a spurious detach→attach edge
+		 * and re-flip the crossbar). A real unplug stays absent past the
+		 * window → detach fires.
+		 *
 		 * Widen the absence window while auto is delivering or re-servoing:
 		 * an SVOOC keep-alive reset can hold Vbus low longer than the plain
 		 * detach debounce, and tearing down there would flip the crossbar
@@ -1987,10 +2020,18 @@ static void sc8547_attach_work(struct work_struct *work)
 		    (sc->auto_state == SC_AUTO_IDENTIFY && sc->auto_reservo_cnt > 0))
 			debounce_ms = SC8547_AUTO_DETACH_DEBOUNCE_MS;
 
-		if (!sc->vbus_absent_since)
+		if (!sc->vbus_was_present) {
+			present = false;	/* already detached, stay so */
+			sc->vbus_absent_since = 0;
+		} else if (!sc->vbus_absent_since) {
 			sc->vbus_absent_since = jiffies;
-		present = !time_after(jiffies, sc->vbus_absent_since +
-				      msecs_to_jiffies(debounce_ms));
+			present = true;		/* debounce in progress */
+		} else {
+			present = !time_after(jiffies, sc->vbus_absent_since +
+					      msecs_to_jiffies(debounce_ms));
+		}
+	} else {
+		sc->vbus_absent_since = 0;
 	}
 
 	if (present && !sc->vbus_was_present) {

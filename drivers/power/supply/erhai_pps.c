@@ -367,6 +367,26 @@ static bool pps_sc_delivering(void)
 	return delivering;
 }
 
+/* optional "serial ladder still identifying/delivering" gate (sc8547a module) —
+ * the engine must not capture the connector while the ladder is mid-identify
+ * (2026-09-25): a genuine SuperVOOC brick identifies in its 5 V window and is
+ * only lost when the engine's debounce laps it and lifts VBUS to PPS first. */
+static bool pps_sc_identifying(void)
+{
+	static bool (*fn)(void);
+	bool identifying = false;
+
+	if (!fn) {
+		fn = (bool (*)(void))symbol_get(sc8547a_fastchg_identifying);
+		if (fn)
+			pr_debug("erhai_pps: sc8547a identifying() gate linked\n");
+	}
+	if (fn)
+		identifying = fn();
+
+	return identifying;
+}
+
 /* ---- ADSP prop helpers ---- */
 static int pps_usb_get(u32 prop)
 {
@@ -458,7 +478,8 @@ static bool pps_deployable(struct erhai_pps *p, bool *vooc_engaged)
 
 	if (real != PPS_USB_TYPE_PD_PPS || pps_type != 1)
 		return false;
-	if (fct >= (int)pps_vooc_min || pps_sc_delivering()) {
+	if (fct >= (int)pps_vooc_min || pps_sc_delivering() ||
+	    pps_sc_identifying()) {
 		*vooc_engaged = true;
 		return false;
 	}
