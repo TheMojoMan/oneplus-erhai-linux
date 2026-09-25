@@ -16,6 +16,14 @@
 bool sc8547a_fastchg_delivering(void);
 
 /*
+ * Is the serial VOOC ladder in the identify or deliver phase (see sc8547a.c)?
+ * The PPS host engine stands down while this is true, not just while
+ * sc8547a_fastchg_delivering() reports real current — the identify window must
+ * get its full 5 V chance before PPS negotiates.
+ */
+bool sc8547a_fastchg_identifying(void);
+
+/*
  * PPS host-engine charge-pump API (b5).  Lets erhai_pps run the SC8547A 2:1
  * charge pump from a PD/PPS contract: it servos the PPS voltage so the chip
  * input sits at ~2*vbat + margin, then engages the CP with the same hardware
