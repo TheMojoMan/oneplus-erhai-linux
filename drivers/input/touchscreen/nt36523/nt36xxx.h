@@ -69,10 +69,24 @@ extern const uint16_t touch_key_array[TOUCH_KEY_NUM];
 #endif
 #define TOUCH_FORCE_NUM 1000
 //---for Pen---
-#define PEN_PRESSURE_MAX (4095)
+/* erhai: vendor oplus/tp/erhai-oplus-tp-24924.dtsi touchpanel,pen-max-pressure
+ * = <16384> — the old 4095 capped stylus pressure at a quarter of the range. */
+#define PEN_PRESSURE_MAX (16383)
 #define PEN_DISTANCE_MAX (1)
 #define PEN_TILT_MIN (-60)
 #define PEN_TILT_MAX (60)
+/*
+ * NT36536 pen (stylus) scan mode is switched through the vendor's extended
+ * host-command space: EVENT_MAP_HOST_CMD + EVENTBUFFER_EXT_CMD + sub-command
+ * (see nvt_enable_pen_mode() in the vendor nvt_drivers_nt36536_noflash.c and
+ * its nvt_drivers_nt36536_noflash.h).  The sub-command selects the stylus
+ * protocol family: 0x10 is Android's default (pencil type 1 = TYPE_PENCIL_HAVON,
+ * written by the touch HAL on "pencil connected"), 0x12/0x13/0x18 are the
+ * maxeye families and 0x15 the Xingwangda pen.
+ */
+#define EVENTBUFFER_EXT_CMD              0x7F
+#define EVENTBUFFER_EXT_PEN_MODE_ON      0x10
+#define EVENTBUFFER_EXT_PEN_MODE_OFF     0x11
 //---for pen resolution---
 #define PANEL_DEFAULT_WIDTH_MM 148  // 148mm
 #define PANEL_DEFAULT_HEIGHT_MM 237 // 237mm
@@ -163,7 +177,6 @@ struct nvt_ts_data {
 	bool irq_enabled;
 	uint8_t cascade;
 	bool pen_support;
-	bool wgp_stylus;
 	uint8_t x_gang_num;
 	uint8_t y_gang_num;
 	struct input_dev *pen_input_dev;
