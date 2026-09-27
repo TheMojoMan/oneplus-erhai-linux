@@ -52,6 +52,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_gpio.h>
+#include <linux/pinctrl/consumer.h>
 #include <linux/regmap.h>
 #include <linux/soc/qcom/pmic_glink.h>
 #include <linux/auxiliary_bus.h>
@@ -393,6 +394,10 @@ struct cps_wls_chip {
 	int wls_sleep_gpio;
 	int wls_scan_gpio;
 	int wls_sw_en_gpio;
+	struct pinctrl *cps_pinctrl;
+	struct {
+		struct pinctrl_state *active, *sleep, *def;
+	} st_int, st_sleep, st_scan, st_swen, st_off;
 
 	int ocp_threshold;
 	int ovp_threshold;
@@ -796,35 +801,85 @@ static void free_named_gpio(struct cps_wls_chip *chip)
 		}
 }
 
+static int cps_pin_state_lookup(struct cps_wls_chip *chip, const char *prefix,
+				struct pinctrl_state **active,
+				struct pinctrl_state **sleep,
+				struct pinctrl_state **def)
+{
+	char name[40];
+
+	if (!chip->cps_pinctrl)
+		return -EINVAL;
+	snprintf(name, sizeof(name), "%s_active", prefix);
+	*active = pinctrl_lookup_state(chip->cps_pinctrl, name);
+	if (IS_ERR(*active) || !*active)
+		return -EINVAL;
+	snprintf(name, sizeof(name), "%s_sleep", prefix);
+	*sleep = pinctrl_lookup_state(chip->cps_pinctrl, name);
+	if (IS_ERR(*sleep) || !*sleep)
+		return -EINVAL;
+	snprintf(name, sizeof(name), "%s_default", prefix);
+	*def = pinctrl_lookup_state(chip->cps_pinctrl, name);
+	if (IS_ERR(*def) || !*def)
+		return -EINVAL;
+	return 0;
+}
+
 static int cps_wls_gpio_init(struct cps_wls_chip *chip)
 {
 	int gp;
+
+	chip->cps_pinctrl = devm_pinctrl_get(chip->dev);
+	if (IS_ERR_OR_NULL(chip->cps_pinctrl))
+		chip->cps_pinctrl = NULL;
+	else
+		cps_log("GPIO pinctrl attached\n");
 
 	gp = request_named_gpio(chip, "qcom,cps_wls_int-gpio", "cps-wls-int", 0);
 	if (gp < 0)
 		return gp;
 	chip->wls_charge_int = gp;
 	chip->cps_wls_irq = gpio_to_irq(gp);
+	cps_pin_state_lookup(chip, "wls_charge_int", &chip->st_int.active,
+			     &chip->st_int.sleep, &chip->st_int.def);
+	if (chip->st_int.active)
+		pinctrl_select_state(chip->cps_pinctrl, chip->st_int.active);
 
 	gp = request_named_gpio(chip, "qcom,wls_sw_en-gpio", "cps-wls-swen", 1);
 	if (gp < 0)
 		return gp;
 	chip->wls_sw_en_gpio = gp;
+	cps_pin_state_lookup(chip, "wls_sw_en", &chip->st_swen.active,
+			     &chip->st_swen.sleep, &chip->st_swen.def);
+	if (chip->st_swen.sleep)
+		pinctrl_select_state(chip->cps_pinctrl, chip->st_swen.sleep);
 
 	gp = request_named_gpio(chip, "qcom,wls_sleep-gpio", "cps-wls-sleep", 1);
 	if (gp < 0)
 		return gp;
 	chip->wls_sleep_gpio = gp;
+	cps_pin_state_lookup(chip, "wls_sleep", &chip->st_sleep.active,
+			     &chip->st_sleep.sleep, &chip->st_sleep.def);
+	if (chip->st_sleep.sleep)
+		pinctrl_select_state(chip->cps_pinctrl, chip->st_sleep.sleep);
 
 	gp = request_named_gpio(chip, "qcom,wls_scan-gpio", "cps-wls-scan", 1);
 	if (gp < 0)
 		return gp;
 	chip->wls_scan_gpio = gp;
+	cps_pin_state_lookup(chip, "wls_scan", &chip->st_scan.active,
+			     &chip->st_scan.sleep, &chip->st_scan.def);
+	if (chip->st_scan.sleep)
+		pinctrl_select_state(chip->cps_pinctrl, chip->st_scan.sleep);
 
 	gp = request_named_gpio(chip, "qcom,wls_off_state-gpio", "cps-wls-off", 1);
 	if (gp < 0)
 		return gp;
 	chip->wls_off_state_gpio = gp;
+	cps_pin_state_lookup(chip, "wls_off_state", &chip->st_off.active,
+			     &chip->st_off.sleep, &chip->st_off.def);
+	if (chip->st_off.active)
+		pinctrl_select_state(chip->cps_pinctrl, chip->st_off.active);
 
 	cps_log("GPIOs: int=%d sw_en=%d sleep=%d scan=%d off=%d irq=%d\n",
 		chip->wls_charge_int, chip->wls_sw_en_gpio, chip->wls_sleep_gpio,
@@ -835,25 +890,32 @@ static int cps_wls_gpio_init(struct cps_wls_chip *chip)
 static void cps_gpio_set_value(struct cps_wls_chip *chip, int gp_num, int value)
 {
 	int gp = -1;
+	struct pinctrl_state *st = NULL;
 
 	switch (gp_num) {
 	case GP_SLEEP:
 		gp = chip->wls_sleep_gpio;
+		st = value ? chip->st_sleep.active : chip->st_sleep.sleep;
 		break;
 	case GP_SCAN:
 		gp = chip->wls_scan_gpio;
+		st = value ? chip->st_scan.active : chip->st_scan.sleep;
 		break;
 	case GP_SW_EN:
 		gp = chip->wls_sw_en_gpio;
+		st = value ? chip->st_swen.active : chip->st_swen.sleep;
 		break;
 	case GP_OFF:
 		gp = chip->wls_off_state_gpio;
+		st = value ? chip->st_off.active : chip->st_off.sleep;
 		break;
 	default:
 		return;
 	}
 	if (gpio_is_valid(gp))
 		gpio_direction_output(gp, value ? 1 : 0);
+	if (st && chip->cps_pinctrl)
+		pinctrl_select_state(chip->cps_pinctrl, st);
 }
 
 static void cps_set_hw_state(struct cps_wls_chip *chip, bool charging)
