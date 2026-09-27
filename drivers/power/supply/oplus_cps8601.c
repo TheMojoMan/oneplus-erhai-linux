@@ -50,6 +50,9 @@
 #include <linux/of_gpio.h>
 #include <linux/regmap.h>
 #include <linux/soc/qcom/pmic_glink.h>
+#include <linux/auxiliary_bus.h>
+#include <linux/of_platform.h>
+#include <linux/platform_device.h>
 #include <linux/timekeeping.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
@@ -326,6 +329,9 @@ static const struct regmap_config cps8601_regmap32_config = {
 /* Driver object + tunables                                              */
 /* -------------------------------------------------------------------- */
 
+struct cps_wls_chip;
+struct cps_glink_aux;
+
 struct cps_wls_chip {
 	struct i2c_client *client;
 	struct device *dev;
@@ -379,6 +385,9 @@ struct cps_wls_chip {
 	struct mutex glk_lock;
 
 	struct pmic_glink_client *glk_client;
+	struct cps_glink_aux *glk_aux;
+	struct delayed_work glk_retry_work;
+	unsigned int glk_tries;
 	struct completion glk_ack;
 	int glk_ready;
 
@@ -402,6 +411,10 @@ MODULE_PARM_DESC(cps_uevent,
 
 static unsigned int cps_silent = 0;
 module_param(cps_silent, uint, 0644);
+
+/* =0 disables the pmic_glink H-BoOST rail path entirely (rail never set) */
+static unsigned int cps_hboost_glink = 1;
+module_param_named(erhai_hboost_glink, cps_hboost_glink, uint, 0644);
 MODULE_PARM_DESC(cps_silent,
 		 "1 = quiet (errors only) logging (default 0)");
 
@@ -899,18 +912,172 @@ static void cps_glink_pdr(void *priv, int state)
 		complete(&chip->glk_ack);
 }
 
-static int cps_init_glink(struct cps_wls_chip *chip)
+/*
+ * The glink client is created against an AUXILIARY device on the
+ * pmic_glink platform device.  devm_pmic_glink_client_alloc() derives the
+ * pmic_glink pointer from dev->parent's drvdata, so the client MUST hang
+ * off the pmic_glink device -- an i2c client's parent is the i2c adapter,
+ * and locking its "state_lock" offset would deadlock the whole boot (the
+ * +b10 hang).  This device is created asynchronously from init_work so the
+ * i2c probe never blocks on the glink bus; if pmic_glink never appears the
+ * rail path just stays unset and charging stays blocked (safe).
+ */
+#define GLK_RETRY_MAX		15
+#define GLK_RETRY_DELAY_MS	1000
+
+struct cps_glink_aux {
+	struct auxiliary_device adev;
+	struct cps_wls_chip *chip;
+};
+
+static int cps_glink_aux_probe(struct auxiliary_device *adev,
+			       const struct auxiliary_device_id *id)
 {
-	chip->glk_client = devm_pmic_glink_client_alloc(chip->dev,
+	struct cps_glink_aux *ga =
+		container_of(adev, struct cps_glink_aux, adev);
+	struct cps_wls_chip *chip = ga->chip;
+
+	if (!chip || chip->glk_client)
+		return 0;
+
+	chip->glk_client = devm_pmic_glink_client_alloc(&adev->dev,
 						       MSG_OWNER_HBOOST,
 						       cps_glink_cb,
 						       cps_glink_pdr,
 						       chip);
-	if (IS_ERR(chip->glk_client))
-		return PTR_ERR(chip->glk_client);
+	if (IS_ERR(chip->glk_client)) {
+		cps_err("hboost: glink client alloc failed %ld\n",
+			PTR_ERR(chip->glk_client));
+		chip->glk_client = NULL;
+		return 0;
+	}
 	pmic_glink_client_register(chip->glk_client);
 	chip->glk_ready = 0;
+	cps_log("hboost glink client up (owner %u)\n", MSG_OWNER_HBOOST);
 	return 0;
+}
+
+static void cps_glink_aux_remove(struct auxiliary_device *adev)
+{
+	struct cps_glink_aux *ga =
+		container_of(adev, struct cps_glink_aux, adev);
+
+	if (ga && ga->chip)
+		ga->chip->glk_client = NULL;
+}
+
+static const struct auxiliary_device_id cps_glink_aux_ids[] = {
+	{ .name = "pmic_glink.cps8601-wls" },
+	{}
+};
+MODULE_DEVICE_TABLE(auxiliary, cps_glink_aux_ids);
+
+static struct auxiliary_driver cps_glink_aux_driver = {
+	.probe = cps_glink_aux_probe,
+	.remove = cps_glink_aux_remove,
+	.id_table = cps_glink_aux_ids,
+	.driver = {
+		.name = "cps8601_hboost_glk",
+	},
+};
+
+static int cps_glink_device_create(struct cps_wls_chip *chip)
+{
+	const char *const compat[] = {
+		"qcom,pmic-glink", "qcom,glymur-pmic-glink",
+		"qcom,kaanapali-pmic-glink"
+	};
+	struct device_node *pg_node = NULL;
+	struct platform_device *pg_pdev;
+	struct cps_glink_aux *ga;
+	int i, ret;
+
+	if (!cps_hboost_glink || chip->glk_aux)
+		return 0;
+
+	for (i = 0; i < ARRAY_SIZE(compat); i++) {
+		pg_node = of_find_compatible_node(NULL, NULL, compat[i]);
+		if (pg_node)
+			break;
+	}
+	if (!pg_node) {
+		cps_log("hboost: pmic_glink node not bound yet\n");
+		return -EAGAIN;
+	}
+	pg_pdev = of_find_device_by_node(pg_node);
+	of_node_put(pg_node);
+	if (!pg_pdev) {
+		cps_log("hboost: pmic_glink platform device not created yet\n");
+		return -EAGAIN;
+	}
+
+	ga = kzalloc(sizeof(*ga), GFP_KERNEL);
+	if (!ga) {
+		put_device(&pg_pdev->dev);
+		return -ENOMEM;
+	}
+	ga->chip = chip;
+	ga->adev.name = "cps8601-wls";
+	ga->adev.dev.parent = &pg_pdev->dev;
+
+	ret = auxiliary_device_init(&ga->adev);
+	if (ret)
+		goto fail_free;
+
+	/* modname "pmic_glink" (not KBUILD_MODNAME) so the device binds our
+	 * "pmic_glink.cps8601-wls" id_table entry. */
+	ret = __auxiliary_device_add(&ga->adev, "pmic_glink");
+	if (ret) {
+		auxiliary_device_uninit(&ga->adev);
+		goto fail_free;
+	}
+
+	chip->glk_aux = ga;
+	put_device(&pg_pdev->dev);
+	cps_log("hboost glink aux device on pmic_glink (probe pending)\n");
+	return 0;
+
+fail_free:
+	kfree(ga);
+	put_device(&pg_pdev->dev);
+	return ret;
+}
+
+static void cps_glink_destroy(struct cps_wls_chip *chip)
+{
+	struct cps_glink_aux *ga = chip->glk_aux;
+
+	if (!ga)
+		return;
+	chip->glk_aux = NULL;
+	auxiliary_device_delete(&ga->adev);
+	auxiliary_device_uninit(&ga->adev);
+	kfree(ga);
+}
+
+static void cps_glink_retry_work_func(struct work_struct *work)
+{
+	struct cps_wls_chip *chip =
+		container_of(work, struct cps_wls_chip, glk_retry_work.work);
+	int ret;
+
+	if (!chip || chip->glk_aux)
+		return;
+	if (!cps_hboost_glink) {
+		cps_err("hboost: rail disabled by erhai_hboost_glink=0\n");
+		return;
+	}
+	if (chip->glk_tries++ >= GLK_RETRY_MAX) {
+		cps_err("hboost: pmic_glink never appeared; H-BoOST rail "
+			"unavailable\n");
+		return;
+	}
+	ret = cps_glink_device_create(chip);
+	if (ret == -EAGAIN)
+		schedule_delayed_work(&chip->glk_retry_work,
+				      msecs_to_jiffies(GLK_RETRY_DELAY_MS));
+	else if (ret)
+		cps_err("hboost: glink aux setup failed %d\n", ret);
 }
 
 static int cps_set_boost_volt_mv(struct cps_wls_chip *chip, int volt_mv)
@@ -1333,10 +1500,15 @@ static void cps_init_work_func(struct work_struct *work)
 	chip->init_done = true;
 	cps_log("CPS8601 wireless pen charger up (chipid 0x%x fw %u.%u)\n",
 		chip->chip_id, chip->fw_version >> 8, chip->fw_version & 0xff);
-	if (!chip->is_supply_by_hboost)
-		chip->charge_allow = 1;
-	else
+
+	if (chip->is_supply_by_hboost) {
+		/* Start the pmic_glink aux device (H-BoOST rail client). */
+		schedule_delayed_work(&chip->glk_retry_work,
+				      msecs_to_jiffies(200));
 		cps_set_boost_and_allow(chip, false);
+	} else {
+		chip->charge_allow = 1;
+	}
 	return;
 
 init_fail:
@@ -1516,6 +1688,7 @@ static int cps_wls_chrg_probe(struct i2c_client *client)
 	mutex_init(&chip->glk_lock);
 	init_completion(&chip->glk_ack);
 	INIT_WORK(&chip->init_work, cps_init_work_func);
+	INIT_DELAYED_WORK(&chip->glk_retry_work, cps_glink_retry_work_func);
 	INIT_WORK(&chip->restate_work, cps_restate_work_func);
 	INIT_DELAYED_WORK(&chip->expire_work, cps_expire_work_func);
 	i2c_set_clientdata(client, chip);
@@ -1539,10 +1712,10 @@ static int cps_wls_chrg_probe(struct i2c_client *client)
 		goto free_source;
 
 	if (chip->is_supply_by_hboost) {
-		if (cps_init_glink(chip)) {
-			cps_err("hboost glink client failed; charging will be blocked\n");
-			chip->glk_client = NULL;
-		}
+		/* glink rail is set up asynchronously from init_work: the
+		 * pmic_glink client must live on an auxiliary device under
+		 * qcom_pmic_glink, never be touched from this i2c probe. */
+		chip->charge_allow = 0;
 	}
 
 	cps_create_debugfs(chip);
@@ -1568,6 +1741,8 @@ static void cps_wls_chrg_remove(struct i2c_client *client)
 		return;
 	cps_set_hw_idle(chip);
 	cancel_delayed_work(&chip->expire_work);
+	cancel_delayed_work_sync(&chip->glk_retry_work);
+	cps_glink_destroy(chip);
 	free_named_gpio(chip);
 	debugfs_remove_recursive(chip->debug_root);
 	i2c_set_clientdata(client, NULL);
@@ -1627,7 +1802,27 @@ static struct i2c_driver cps8601_driver = {
 	.remove = cps_wls_chrg_remove,
 	.id_table = cps_wls_charger_id,
 };
-module_i2c_driver(cps8601_driver);
+static int __init cps8601_module_init(void)
+{
+	int ret;
+
+	ret = auxiliary_driver_register(&cps_glink_aux_driver);
+	if (ret)
+		return ret;
+	ret = i2c_add_driver(&cps8601_driver);
+	if (ret)
+		auxiliary_driver_unregister(&cps_glink_aux_driver);
+	return ret;
+}
+module_init(cps8601_module_init);
+
+static void __exit cps8601_module_exit(void)
+{
+	i2c_del_driver(&cps8601_driver);
+	auxiliary_driver_unregister(&cps_glink_aux_driver);
+}
+module_exit(cps8601_module_exit);
 
 MODULE_DESCRIPTION("OnePlus CPS8601 wireless pen charger (erhai)");
+MODULE_LICENSE("GPL");
 MODULE_LICENSE("GPL");
