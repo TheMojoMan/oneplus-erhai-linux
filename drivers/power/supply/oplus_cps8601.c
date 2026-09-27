@@ -24,9 +24,13 @@
  *     power-expired limit, and (optional) the pencil_status / pencil_addr /
  *     pencil_mislocated uevents stock emitted.
  *
- * Deliberately NOT ported (v1): the 32-bit SRAM/OTP paths (firmware
- * update of the cps8601 itself - endian/password/reprogram/flash flows).
- * Flashing is owner-gated follow-up work; charging does not need it.
+ * Bring-up also follows the vendor's BSP boot procedure: the chip comes
+ * out of reset with only its ROM bootloader live - the host must bring the
+ * MCU up over the 32-bit SRAM window (write password + HALT, SRAM-load the
+ * embedded bootloader, CRC-check it), compare the app version against the
+ * embedded cps8601_fw image, reprogram MTP when they differ, then
+ * power-cycle sw_en so the app starts.  The app window (16-bit) answers
+ * only after that.
  *
  * Copyright (C) 2020-2022 Oplus.  Mainline port 2026.
  */
@@ -56,6 +60,10 @@
 #include <linux/timekeeping.h>
 #include <linux/types.h>
 #include <linux/workqueue.h>
+
+/* 32-bit SRAM-window boot firmware for the cps8601 itself */
+#include "oplus_cps8601_bl.h"
+#include "cps8601_fw.h"
 
 #include <linux/gpio/legacy.h>
 
@@ -137,6 +145,39 @@
 #define GP_OFF			3
 
 #define TX_WAKEUP_WAIT_MS	2500
+
+/* cps8601 MCU boot-firmware protocol (32-bit window, regmap32) */
+#define CPS_SRAM_SENDSZ		32
+#define CPS_ADDR_BUFFER0	0x20000A00
+#define CPS_ADDR_BUFFER1	0x20000B00
+#define CPS_ADDR_CMD		0x200009FC
+#define CPS_ADDR_FLAG		0x200009F8
+#define CPS_ADDR_EN_32BIT	0xFFFFFF00
+#define CPS_CMD_EN_32BIT	0x0000000E
+#define CPS_ADDR_ENDIAN		0x40040030
+#define CPS_ENDIAN_LITTLE	0xFFFFFFFF
+#define CPS_ENDIAN_BIG		0x00000000
+#define CPS_ADDR_PASSWORD	0x40040070
+#define CPS_PASSWORD		0x0000A061
+#define CPS_ADDR_SYSCMD		0x40040008
+#define CPS_SYSCMD_HALT_MCU	0x00000008
+#define CPS_SYSCMD_DIS_TRIM	0x00000020
+#define CPS_ADDR_DMA		0x4000E000
+#define CPS_ADDR_WDOG		0x40040048
+#define CPS_WDOG_OVER		0x00000FFF
+#define CPS_ADDR_TRIM		0x40040014
+#define CPS_TRIM_DISABLE	0x00000001
+#define CPS_ADDR_BOOTLOADER	0x20000000
+#define CPS_BOOTLOADER_LEN	0x00000990
+#define CPS_FIRMWARE_LEN	0x00003C00
+#define CPS_FW_VERSION_POS	0xC4
+#define CPS_PGM_BUFFER0		0x10
+#define CPS_PGM_BUFFER1		0x11
+#define CPS_CMD_CRC_TEST	0xB0
+#define CPS_CMD_CRC_APP		0x90
+#define CPS_CMD_ERASE_MTP	0x70
+#define CPS_CMD_DONE_PASS	0x20
+#define CPS_OTA_BUFF_SIZE	256
 #define BOOST_DEFAULT_VOLT_MV	7000
 #define BOOST_ATTACH_VOLT_MV	10000
 #define MAX_BOOST_VOLT_MV	14750
@@ -1474,6 +1515,254 @@ static irqreturn_t cps_wls_irq_handler(int irq, void *dev_id)
 }
 
 /* -------------------------------------------------------------------- */
+/* -------------------------------------------------------------------- */
+/* cps8601 MCU boot bring-up (32-bit SRAM window, ported from the        */
+/* vendor oplus_cps8601.c fw flow)                                       */
+/* -------------------------------------------------------------------- */
+/* Uses the 32-bit window helpers above (cps_wls_read_word / write_word)
+ * and the embedded bootloader/app images from oplus_cps8601_bl.h and
+ * cps8601_fw.h. */
+
+static int cps_wls_w32(struct cps_wls_chip *chip, const char *tag,
+		       u32 addr, u32 val)
+{
+	int rc = cps_wls_write_word(chip, (int)addr, (int)val);
+
+	cps_log("boot: %-16s [%08x]=%08x %s\n", tag, addr, val,
+		rc ? "NACK" : "ok");
+	return rc;
+}
+
+static int cps_wls_sram_write(struct cps_wls_chip *chip, u32 addr,
+			      const u8 *data, int len)
+{
+	int ret;
+
+	while (len > CPS_SRAM_SENDSZ) {
+		mutex_lock(&chip->i2c_lock);
+		ret = regmap_raw_write(chip->regmap32, addr, data,
+				       CPS_SRAM_SENDSZ);
+		mutex_unlock(&chip->i2c_lock);
+		if (ret < 0)
+			return CPS_WLS_FAIL;
+		data += CPS_SRAM_SENDSZ;
+		addr += CPS_SRAM_SENDSZ;
+		len -= CPS_SRAM_SENDSZ;
+	}
+	if (len > 0) {
+		mutex_lock(&chip->i2c_lock);
+		ret = regmap_raw_write(chip->regmap32, addr, data, len);
+		mutex_unlock(&chip->i2c_lock);
+		if (ret < 0)
+			return CPS_WLS_FAIL;
+	}
+	return CPS_WLS_SUCCESS;
+}
+
+static int cps_wls_sram_cmd(struct cps_wls_chip *chip, u32 cmd)
+{
+	return cps_wls_write_word(chip, (int)CPS_ADDR_CMD, (int)cmd);
+}
+
+/* Poll ADDR_FLAG until the program/CRC op finishes:
+ * RUNNING(0x10)/0x00 = keep waiting, PASS(0x20) = done, FAIL(0x30). */
+static int cps_wls_sram_wait(struct cps_wls_chip *chip)
+{
+	int cnt = 0;
+
+	while (cnt++ < 50000) {
+		u32 res, st;
+
+		if (cps_wls_read_word(chip, (int)CPS_ADDR_FLAG, &res) !=
+		    CPS_WLS_SUCCESS)
+			return CPS_WLS_FAIL;
+		st = res & 0xF0;
+		if (st == 0x20)
+			return CPS_WLS_SUCCESS;
+		if (st == 0x10 || st == 0x00)
+			continue;
+		return CPS_WLS_FAIL;
+	}
+	return CPS_WLS_FAIL;
+}
+
+static u16 cps_wls_crc16(const u8 *start, u16 len)
+{
+	u16 crc = 0x0000;
+	u16 i, j;
+
+	for (i = 0; i < len; i++) {
+		crc ^= (start[i] << 8);
+		for (j = 0; j < 8; j++) {
+			if (crc & 0x8000)
+				crc = (crc << 1) ^ 0x1021;
+			else
+				crc = crc << 1;
+		}
+	}
+	return crc;
+}
+/* Load the embedded bootloader into SRAM and let the chip CRC-check it. */
+static int cps_wls_load_bootloader(struct cps_wls_chip *chip)
+{
+	u32 reg;
+	u16 crc_cal;
+
+	cps_wls_w32(chip, "en32bit", CPS_ADDR_EN_32BIT, CPS_CMD_EN_32BIT);
+	msleep(110);
+	cps_wls_w32(chip, "endian little", CPS_ADDR_ENDIAN, CPS_ENDIAN_LITTLE);
+	cps_wls_w32(chip, "password", CPS_ADDR_PASSWORD, CPS_PASSWORD);
+	cps_wls_w32(chip, "halt mcu", CPS_ADDR_SYSCMD, CPS_SYSCMD_HALT_MCU);
+	cps_wls_w32(chip, "disable dma", CPS_ADDR_DMA, 0);
+	cps_wls_w32(chip, "wdog over", CPS_ADDR_WDOG, CPS_WDOG_OVER);
+	cps_wls_w32(chip, "endian big", CPS_ADDR_ENDIAN, CPS_ENDIAN_BIG);
+
+	cps_log("boot: SRAM-loading %d B bootloader @0x%x\n",
+		CPS_BOOTLOADER_LEN, CPS_ADDR_BOOTLOADER);
+	if (cps_wls_sram_write(chip, CPS_ADDR_BOOTLOADER, cps8601_bl,
+			       CPS_BOOTLOADER_LEN) != CPS_WLS_SUCCESS) {
+		cps_err("bootloader: SRAM write failed\n");
+		return CPS_WLS_FAIL;
+	}
+	cps_wls_w32(chip, "endian little", CPS_ADDR_ENDIAN, CPS_ENDIAN_LITTLE);
+	cps_wls_w32(chip, "trim disable", CPS_ADDR_TRIM, CPS_TRIM_DISABLE);
+	cps_wls_w32(chip, "sys dis trim", CPS_ADDR_SYSCMD, CPS_SYSCMD_DIS_TRIM);
+	msleep(10);
+	cps_wls_w32(chip, "en32bit", CPS_ADDR_EN_32BIT, CPS_CMD_EN_32BIT);
+	msleep(110);
+	cps_wls_w32(chip, "endian little", CPS_ADDR_ENDIAN, CPS_ENDIAN_LITTLE);
+	cps_wls_w32(chip, "password", CPS_ADDR_PASSWORD, CPS_PASSWORD);
+	cps_wls_w32(chip, "buf0=len", CPS_ADDR_BUFFER0, CPS_BOOTLOADER_LEN);
+	cps_wls_w32(chip, "cmd crc", CPS_ADDR_CMD, CPS_CMD_CRC_TEST);
+
+	if (cps_wls_sram_wait(chip) != CPS_WLS_SUCCESS) {
+		cps_err("bootloader: CRC command failed\n");
+		return CPS_WLS_FAIL;
+	}
+	if (cps_wls_read_word(chip, (int)CPS_ADDR_BUFFER0, &reg) !=
+	    CPS_WLS_SUCCESS)
+		return CPS_WLS_FAIL;
+	crc_cal = cps_wls_crc16(cps8601_bl, CPS_BOOTLOADER_LEN);
+	cps_log("boot: bootloader CRC chip 0x%04x host 0x%04x %s\n",
+		(u16)reg, crc_cal, (u16)reg == crc_cal ? "MATCH" : "MISMATCH");
+	return (u16)reg == crc_cal ? CPS_WLS_SUCCESS : CPS_WLS_FAIL;
+}
+
+/* Erase MTP then program the app image (double-buffered 256 B pages). */
+static int cps_wls_load_firmware(struct cps_wls_chip *chip)
+{
+	int pages = CPS_FIRMWARE_LEN / CPS_OTA_BUFF_SIZE;
+	int i, buf0 = 0, buf1 = 0;
+
+	cps_wls_w32(chip, "en32bit", CPS_ADDR_EN_32BIT, CPS_CMD_EN_32BIT);
+	msleep(110);
+	cps_wls_w32(chip, "endian little", CPS_ADDR_ENDIAN, CPS_ENDIAN_LITTLE);
+	cps_wls_w32(chip, "erase mtp", CPS_ADDR_CMD, CPS_CMD_ERASE_MTP);
+	msleep(10);
+	if (cps_wls_sram_wait(chip) != CPS_WLS_SUCCESS) {
+		cps_err("fw: MTP erase failed\n");
+		return CPS_WLS_FAIL;
+	}
+
+	for (i = 0; i < pages; i++) {
+		const u8 *page = cps8601_fw + i * CPS_OTA_BUFF_SIZE;
+
+		if (buf0 == 0) {
+			if (cps_wls_sram_write(chip, CPS_ADDR_BUFFER0, page,
+					       CPS_OTA_BUFF_SIZE) !=
+			    CPS_WLS_SUCCESS)
+				return CPS_WLS_FAIL;
+			if (buf1 == 1) {
+				if (cps_wls_sram_wait(chip) != CPS_WLS_SUCCESS)
+					return CPS_WLS_FAIL;
+				buf1 = 0;
+			}
+			cps_wls_sram_cmd(chip, CPS_PGM_BUFFER0);
+			buf0 = 1;
+			continue;
+		}
+		if (buf1 == 0) {
+			if (cps_wls_sram_write(chip, CPS_ADDR_BUFFER1, page,
+					       CPS_OTA_BUFF_SIZE) !=
+			    CPS_WLS_SUCCESS)
+				return CPS_WLS_FAIL;
+			if (buf0 == 1) {
+				if (cps_wls_sram_wait(chip) != CPS_WLS_SUCCESS)
+					return CPS_WLS_FAIL;
+				buf0 = 0;
+			}
+			cps_wls_sram_cmd(chip, CPS_PGM_BUFFER1);
+			buf1 = 1;
+			continue;
+		}
+	}
+	if (buf0 == 1) {
+		if (cps_wls_sram_wait(chip) != CPS_WLS_SUCCESS)
+			return CPS_WLS_FAIL;
+	}
+	if (buf1 == 1) {
+		if (cps_wls_sram_wait(chip) != CPS_WLS_SUCCESS)
+			return CPS_WLS_FAIL;
+	}
+	cps_log("fw: app image programmed (%d B)\n", CPS_FIRMWARE_LEN);
+
+	cps_wls_w32(chip, "buf0=len", CPS_ADDR_BUFFER0, CPS_FIRMWARE_LEN);
+	cps_wls_w32(chip, "cmd crc app", CPS_ADDR_CMD, CPS_CMD_CRC_APP);
+	if (cps_wls_sram_wait(chip) != CPS_WLS_SUCCESS)
+		return CPS_WLS_FAIL;
+	{
+		u32 chip_crc;
+		u16 host_crc = cps_wls_crc16(cps8601_fw, CPS_FIRMWARE_LEN);
+
+		if (cps_wls_read_word(chip, (int)CPS_ADDR_BUFFER0, &chip_crc) !=
+		    CPS_WLS_SUCCESS)
+			return CPS_WLS_FAIL;
+		cps_log("fw: app CRC chip 0x%04x host 0x%04x %s\n",
+			(u16)chip_crc, host_crc,
+			(u16)chip_crc == host_crc ? "MATCH" : "MISMATCH");
+		if ((u16)chip_crc != host_crc)
+			return CPS_WLS_FAIL;
+	}
+	return CPS_WLS_SUCCESS;
+}
+/* Wake the chip, compare its app version to the embedded image, load the
+ * bootloader and reprogram MTP only when they differ. */
+static int cps_wls_fw_bring_up(struct cps_wls_chip *chip)
+{
+	int sys_fw = cps_wls_get_sys_fw_version(chip);
+	u8 sys_h = (sys_fw >> 8) & 0xff;
+	u8 sys_l = sys_fw & 0xff;
+	u8 bin_h = cps8601_fw[CPS_FW_VERSION_POS];
+	u8 bin_l = cps8601_fw[CPS_FW_VERSION_POS + 1];
+
+	cps_log("fw: sys %02x.%02x bin %02x.%02x\n", sys_h, sys_l, bin_h,
+		bin_l);
+	if (sys_fw >= 0 && sys_h == bin_h && sys_l == bin_l) {
+		cps_log("fw: version matches, no reprogram\n");
+		return CPS_WLS_SUCCESS;
+	}
+
+	cps_log("fw: app mismatch/no app - loading bootloader + app\n");
+	if (cps_wls_load_bootloader(chip) != CPS_WLS_SUCCESS) {
+		cps_err("fw: bootloader load failed\n");
+		return CPS_WLS_FAIL;
+	}
+	if (cps_wls_load_firmware(chip) != CPS_WLS_SUCCESS) {
+		cps_err("fw: app program failed\n");
+		return CPS_WLS_FAIL;
+	}
+	return CPS_WLS_SUCCESS;
+}
+
+/* Apply the vendor's hardware reset: power-cycle sw_en so the MCU starts
+ * the freshly programmed app from MTP. */
+static void cps_wls_hw_reset(struct cps_wls_chip *chip)
+{
+	cps_gpio_set_value(chip, GP_SW_EN, 0);
+	msleep(50);
+	cps_gpio_set_value(chip, GP_SW_EN, 1);
+	msleep(50);
+}
 /* Asynchronous bring-up (mirrors the vendor init_work_func)             */
 /* -------------------------------------------------------------------- */
 
@@ -1504,11 +1793,15 @@ static void cps_init_work_func(struct work_struct *work)
 	/* Vendor bring-up order (mirrors its init_work_func):
 	 *   1. H-BoOST supply rail up (hboost path); plain path uses the
 	 *      boost_en line instead.
-	 *   2. sw_en = 1 -- powers the WPT subsystem; the chip's I2C comes up.
-	 *   3. sleep line -> active, wait TX_WAKEUP_WAIT_MS for the chip.
-	 *   4. chipid check, thresholds, irq, coil left to the attach flow.
-	 * b10/b11 read the chipid BEFORE all of that: the unpowered chip NACKs
-	 * every transfer (-ENXIO, id 0xffffffff) and init fails. */
+	 *   2. sw_en = 1 -- powers the WPT subsystem, the chip's I2C comes up.
+	 *   3. boot-firmware bring-up: load the embedded bootloader over the
+	 *      32-bit SRAM window, compare/reprogram the MTP app image.
+	 *   4. sleep line -> active, wait TX_WAKEUP_WAIT_MS for the app.
+	 *   5. chipid check, thresholds, irq; coil left to the attach flow.
+	 * b10/b11 read the chipid before ANY of that (unpowered chip,
+	 * -ENXIO, id 0xffffffff); b12 added the rail+GPIO power but skipped
+	 * the MCU boot firmware, so the 16-bit app window still did not
+	 * exist. */
 	if (chip->is_supply_by_hboost) {
 		/* glink aux device + client are synchronous once created. */
 		ret = cps_glink_device_create(chip);
@@ -1528,9 +1821,21 @@ static void cps_init_work_func(struct work_struct *work)
 		}
 	}
 
-	/* WPT subsystem on, then wake the chip's host side. */
+	/* WPT subsystem on; the MCU ROM bootloader listens on the 32-bit
+	 * window as soon as the supply settles. */
 	cps_gpio_set_value(chip, GP_SW_EN, 1);
 	msleep(200);
+	cps_gpio_set_value(chip, GP_SLEEP, 1);
+
+	/* Boot the chip's firmware (bootloader + possibly the MTP app). */
+	ret = cps_wls_fw_bring_up(chip);
+	if (ret != CPS_WLS_SUCCESS) {
+		cps_err("chip firmware bring-up failed (%d)\n", ret);
+		goto init_fail;
+	}
+
+	/* The app starts after the sw_en power cycle; then wake for real. */
+	cps_wls_hw_reset(chip);
 	cps_gpio_set_value(chip, GP_SLEEP, 1);
 	msleep(TX_WAKEUP_WAIT_MS);
 
@@ -1565,7 +1870,10 @@ static void cps_init_work_func(struct work_struct *work)
 
 	if (chip->is_supply_by_hboost) {
 		/* rail stays at the idle volt; coil raise happens on attach */
+		cps_log("hboost: rail set to %d mV (status %d)\n",
+			chip->hboost_volt, chip->hboost_status);
 		cps_gpio_set_value(chip, GP_SLEEP, 0);
+		cps_wls_hw_reset(chip);
 	} else {
 		chip->charge_allow = 1;
 	}
