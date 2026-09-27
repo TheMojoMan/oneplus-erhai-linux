@@ -114,6 +114,8 @@
 #define MAC_PKG_CMD_CKECK	0xC1
 #define MAC_PKG_CMD_ADD1	0xB6
 #define MAC_PKG_CMD_ADD2	0xB7
+#define POWER_PKG_HEAD		0x28
+#define POWER_PKG_CMD		0x17
 #define TX_PKG_LEN		11
 
 #define CPS8601_CHIPID		0x8601
@@ -362,6 +364,7 @@ struct cps_wls_chip {
 	u64 mac_check_data;
 	int tx_voltage;
 	int tx_current;
+	int pen_soc;
 	u64 ping_succ_time;
 	u64 tx_start_time;
 
@@ -1013,6 +1016,12 @@ static void cps_ask_packet(struct cps_wls_chip *chip)
 		cps_log("pen BLE addr mx%llx valid=%d\n", chip->ble_mac_addr,
 			cps_ble_mac_valid(chip));
 	}
+
+	/* POWER package: byte 2 = pen state of charge (%). */
+	if (data[0] == POWER_PKG_HEAD && data[1] == POWER_PKG_CMD) {
+		chip->pen_soc = data[2];
+		cps_log("pen SoC %d%%\n", chip->pen_soc);
+	}
 }
 
 /* -------------------------------------------------------------------- */
@@ -1340,6 +1349,13 @@ init_fail:
 /* debugfs                                                              */
 /* -------------------------------------------------------------------- */
 
+static int soc_get(void *data, u64 *val)
+{
+	struct cps_wls_chip *chip = data;
+	*val = chip ? (chip->pen_soc > 0 ? (u64)chip->pen_soc : 0) : 0;
+	return 0;
+}
+
 static int pen_present_get(void *data, u64 *val)
 {
 	struct cps_wls_chip *chip = data;
@@ -1443,6 +1459,7 @@ static int q_cali_set(void *data, u64 val)
 }
 
 DEFINE_DEBUGFS_ATTRIBUTE(pen_present_fops, pen_present_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(soc_fops, soc_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(ble_mac_addr_fops, ble_mac_addr_get, NULL, "%llx\n");
 DEFINE_DEBUGFS_ATTRIBUTE(fw_version_fops, fw_version_get, NULL, "%u\n");
 DEFINE_DEBUGFS_ATTRIBUTE(chip_id_fops, chip_id_get, NULL, "%x\n");
@@ -1457,6 +1474,7 @@ static void cps_create_debugfs(struct cps_wls_chip *chip)
 	chip->debug_root = debugfs_create_dir(dev_name(chip->dev), NULL);
 	debugfs_create_file("pen_present", 0444, chip->debug_root, chip,
 			    &pen_present_fops);
+	debugfs_create_file("soc", 0444, chip->debug_root, chip, &soc_fops);
 	debugfs_create_file("ble_mac_addr", 0444, chip->debug_root, chip,
 			    &ble_mac_addr_fops);
 	debugfs_create_file("fw_version", 0444, chip->debug_root, chip,
@@ -1492,6 +1510,7 @@ static int cps_wls_chrg_probe(struct i2c_client *client)
 		return -ENOMEM;
 	chip->client = client;
 	chip->dev = &client->dev;
+	chip->pen_soc = -1;
 	mutex_init(&chip->irq_lock);
 	mutex_init(&chip->i2c_lock);
 	mutex_init(&chip->glk_lock);
