@@ -129,6 +129,14 @@
 #define BOOST_SET_RETRY		60
 #define BOOST_SET_DELAY_MS	500
 #define BOOST_WORK_MAX_RETRY	10
+
+/* GPIO role indices for cps_gpio_set_value() (vendor GP_0..GP_3) */
+#define GP_SLEEP		0
+#define GP_SCAN			1
+#define GP_SW_EN		2
+#define GP_OFF			3
+
+#define TX_WAKEUP_WAIT_MS	2500
 #define BOOST_DEFAULT_VOLT_MV	7000
 #define BOOST_ATTACH_VOLT_MV	10000
 #define MAX_BOOST_VOLT_MV	14750
@@ -781,6 +789,30 @@ static int cps_wls_gpio_init(struct cps_wls_chip *chip)
 		chip->wls_charge_int, chip->wls_sw_en_gpio, chip->wls_sleep_gpio,
 		chip->wls_scan_gpio, chip->wls_off_state_gpio, chip->cps_wls_irq);
 	return 0;
+}
+
+static void cps_gpio_set_value(struct cps_wls_chip *chip, int gp_num, int value)
+{
+	int gp = -1;
+
+	switch (gp_num) {
+	case GP_SLEEP:
+		gp = chip->wls_sleep_gpio;
+		break;
+	case GP_SCAN:
+		gp = chip->wls_scan_gpio;
+		break;
+	case GP_SW_EN:
+		gp = chip->wls_sw_en_gpio;
+		break;
+	case GP_OFF:
+		gp = chip->wls_off_state_gpio;
+		break;
+	default:
+		return;
+	}
+	if (gpio_is_valid(gp))
+		gpio_direction_output(gp, value ? 1 : 0);
 }
 
 static void cps_set_hw_state(struct cps_wls_chip *chip, bool charging)
@@ -1469,9 +1501,39 @@ static void cps_init_work_func(struct work_struct *work)
 	if (!chip)
 		return;
 
-	/* Bring the chip up on the 16-bit window: identity first, then
-	 * thresholds.  sw_en stays OFF until everything below succeeded, so
-	 * a dead/mis-wired chip leaves the coil exactly as it was before. */
+	/* Vendor bring-up order (mirrors its init_work_func):
+	 *   1. H-BoOST supply rail up (hboost path); plain path uses the
+	 *      boost_en line instead.
+	 *   2. sw_en = 1 -- powers the WPT subsystem; the chip's I2C comes up.
+	 *   3. sleep line -> active, wait TX_WAKEUP_WAIT_MS for the chip.
+	 *   4. chipid check, thresholds, irq, coil left to the attach flow.
+	 * b10/b11 read the chipid BEFORE all of that: the unpowered chip NACKs
+	 * every transfer (-ENXIO, id 0xffffffff) and init fails. */
+	if (chip->is_supply_by_hboost) {
+		/* glink aux device + client are synchronous once created. */
+		ret = cps_glink_device_create(chip);
+		if (ret == -EAGAIN) {
+			cps_err("hboost: pmic_glink not up yet; retrying\n");
+			schedule_delayed_work(&chip->glk_retry_work,
+					      msecs_to_jiffies(200));
+			goto init_fail;
+		}
+		if (ret || !chip->glk_client) {
+			cps_err("hboost: glink client unavailable (%d)\n", ret);
+			goto init_fail;
+		}
+		if (cps_set_boost_and_allow(chip, false) != CPS_WLS_SUCCESS) {
+			cps_err("H-BoOST rail setup failed; chip unpowered\n");
+			goto init_fail;
+		}
+	}
+
+	/* WPT subsystem on, then wake the chip's host side. */
+	cps_gpio_set_value(chip, GP_SW_EN, 1);
+	msleep(200);
+	cps_gpio_set_value(chip, GP_SLEEP, 1);
+	msleep(TX_WAKEUP_WAIT_MS);
+
 	if (cps_wls_chipid_check(chip) != CPS_WLS_SUCCESS)
 		goto init_fail;
 	chip->fw_version = (unsigned short)cps_wls_get_sys_fw_version(chip);
@@ -1502,10 +1564,8 @@ static void cps_init_work_func(struct work_struct *work)
 		chip->chip_id, chip->fw_version >> 8, chip->fw_version & 0xff);
 
 	if (chip->is_supply_by_hboost) {
-		/* Start the pmic_glink aux device (H-BoOST rail client). */
-		schedule_delayed_work(&chip->glk_retry_work,
-				      msecs_to_jiffies(200));
-		cps_set_boost_and_allow(chip, false);
+		/* rail stays at the idle volt; coil raise happens on attach */
+		cps_gpio_set_value(chip, GP_SLEEP, 0);
 	} else {
 		chip->charge_allow = 1;
 	}
@@ -1643,7 +1703,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(enable_fops, enable_get, enable_set, "%llu\n");
 
 static void cps_create_debugfs(struct cps_wls_chip *chip)
 {
-	chip->debug_root = debugfs_create_dir(dev_name(chip->dev), NULL);
+	chip->debug_root = debugfs_create_dir("cps-wls-charger", NULL);
 	debugfs_create_file("pen_present", 0444, chip->debug_root, chip,
 			    &pen_present_fops);
 	debugfs_create_file("soc", 0444, chip->debug_root, chip, &soc_fops);
