@@ -1253,4 +1253,18 @@ config CHARGER_SC8547A
 	  the charge-pump hardware and the VOOC serial-protocol register
 	  primitives; the adapter-identify state machine lives elsewhere.
 
+config CHARGER_OPLUS_CPS8601
+	tristate "OnePlus CPS8601 wireless pen charger"
+	depends on I2C
+	help
+	  Say Y to enable support for the OnePlus "wireless pen" (stylus)
+	  charger: a CPS8601 WPT (Qi) transmit controller at I2C 0x41 on
+	  the qupv3 i2c hub of the OnePlus Pad 3 (erhai, SM8750).  A pen
+	  (IDT/Renesas P9418-class receiver) placed on the tablet's coil
+	  is charged wirelessly; the pen reports its own BLE MAC over the
+	  power link (consumed by the pen Bluetooth tooling).  The driver
+	  drives the five platform GPIOs and the H-BoOST supply rail over
+	  pmic_glink, enforces the OCP/OVP/FOD thresholds and a power
+	  expiry, and performs Q-value calibration on first attach.
+
 endif # POWER_SUPPLY
