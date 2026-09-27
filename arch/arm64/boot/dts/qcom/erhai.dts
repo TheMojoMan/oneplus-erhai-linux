@@ -2683,6 +2683,73 @@
 };
 
 /* ---------------------------------------------------------------------------
+ * Pen wireless charger — CPS8601 WPT (Qi) TX on the qupv3 hub i2c 990000
+ * (Android qupv3_hub_i2c3 == mainline i2c_hub_4) at addr 0x41, the tablet's
+ * coil that charges the "wireless pen".  Standalone driver
+ * drivers/power/supply/oplus_cps8601.c (CONFIG_CHARGER_OPLUS_CPS8601).
+ * GPIOs and thresholds taken from the Android OPlus DTS (oplus-chg-erhai):
+ * int gpio172 (falling), sw_en 105, sleep 106, scan 56, off_state 107;
+ * the pen is supplied by the H-BoOST rail (7 V idle / 10 V while attached)
+ * over pmic_glink (owner 32785, opcode 0x10007).
+ * ---------------------------------------------------------------------------
+ */
+&i2c_hub_4 {
+	status = "okay";
+
+	cps8601: pencil-wireless-charger@41 {
+		compatible = "oplus,wls-charger-cps8601";
+		reg = <0x41>;
+
+		interrupts-extended = <&tlmm 172 IRQ_TYPE_EDGE_FALLING>;
+
+		qcom,cps_wls_int-gpio = <&tlmm 172 0x00>;
+		qcom,wls_sw_en-gpio = <&tlmm 105 0x00>;
+		qcom,wls_sleep-gpio = <&tlmm 106 0x00>;
+		qcom,wls_scan-gpio = <&tlmm 56 0x00>;
+		qcom,wls_off_state-gpio = <&tlmm 107 0x00>;
+
+		qcom,ocp_threshold = <500>;
+		qcom,ovp_threshold = <12000>;
+		qcom,lvp_threshold = <4000>;
+		qcom,fod_threshold = <400>;
+		tx,enable_expired_time = <120>;
+		rx,soc_threshold = <80>;
+		qcom,pen_is_supply_by_hboost = <1>;
+		qcom,hboost_default_volt_mv = <7000>;
+		qcom,hboost_attach_volt_mv = <10000>;
+	};
+};
+
+&tlmm {
+	cps8601_int_active: cps8601-int-active-state {
+		pins = "gpio172";
+		function = "gpio";
+		input-enable;
+		bias-pull-up;
+	};
+	cps8601_sw_en: cps8601-sw-en-state {
+		pins = "gpio105";
+		function = "gpio";
+		drive-strength = <2>;
+	};
+	cps8601_sleep: cps8601-sleep-state {
+		pins = "gpio106";
+		function = "gpio";
+		drive-strength = <2>;
+	};
+	cps8601_scan: cps8601-scan-state {
+		pins = "gpio56";
+		function = "gpio";
+		drive-strength = <2>;
+	};
+	cps8601_off: cps8601-off-state {
+		pins = "gpio107";
+		function = "gpio";
+		drive-strength = <2>;
+	};
+};
+
+/* ---------------------------------------------------------------------------
  * Rear main camera — SmartSens SC1320CS 13MP (Phase-A bring-up)
  * CCI0 master1 (gpio115 SDA / gpio116 SCL), slave 0x36, chip id 0xc658,
  * MCLK cambistmclkcc MCLK1 (gpio90, 19.2MHz), reset pm8550ve_i gpio5.
