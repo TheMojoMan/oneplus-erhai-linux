@@ -109,8 +109,9 @@ build_kernel() {
 
 # ----------------------------------------------------------------- package ---
 # Debian revision: the kernelrelease stays frozen per LINE (stable vermagic,
-# module paths and UKI name) -- this branch is the 7.3-rc4 line,
-# 7.3.0-rc4-sm8750-themojoman (tag v7.3-rc4); the linux-7.3 branch freezes
+# module paths and UKI name) -- this branch is the 7.3-rc5 line,
+# 7.3.0-rc5-sm8750-themojoman (tag v7.3-rc5); branch 7.3-rc4 freezes
+# 7.3.0-rc4-sm8750-themojoman (tag v7.3-rc4), linux-7.3 freezes
 # 7.3.0-rc2-sm8750-themojoman and linux-7.2 freezes 7.2.0-sm8750-themojoman --
 # so the .deb Version cannot be
 # the kernelrelease alone -- two builds would compare equal and apt would
