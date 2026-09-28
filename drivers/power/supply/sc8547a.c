@@ -256,12 +256,29 @@ MODULE_PARM_DESC(adsp_fastchg_svooc_min,
 #define SC8547_CURR_CODE_MIN		0x01	/* 100 mA bus (~0.2 A pack) */
 #define SC8547_CURR_CODE_MAX		0x49	/* 7300 mA bus (full SVOOC rung 73) */
 
-/* Safety backstop while the CP is delivering (stage-2 only). */
-#define SC8547_VBAT_CV_CEILING_MV	4500	/* below the 4604 mV curve knee */
+/*
+ * Safety backstop while the CP is delivering (stage-2 only).
+ *
+ * VOLTAGE REFERENCE: the CP's own Vbat ADC sits on the pack's input rail, so
+ * under delivery it reads the CELL voltage PLUS the IR drop of the
+ * harness/pack path (~0.3 V at the 7-8 A this pad pulls: measured 2026-09-28,
+ * 4.49 V on the CP vs 4.20 V on the gauge, while at rest both read 3920 mV).
+ * Judging the CC/CV curve (and the CV end) on that loaded reading aborted every
+ * SVOOC session 15-30 s in, at ~50% SoC.  The bq27z561 gauge reports the CELL
+ * voltage, so it is the reference for the curve steps, the start gate and the
+ * CV ceiling; the CP reading is kept only as an over-voltage guard, set well
+ * above any legitimate loaded reading (the highest seen is ~4.49 V).
+ */
+#define SC8547_VBAT_CV_CEILING_MV	4500	/* cell (gauge) CV end */
+#define SC8547_CP_OVP_CEILING_MV	4800	/* CP-side hard guard: cell CV (4.5 V)
+						 * plus the measured ~0.3 V IR drop
+						 * at 8 A; a wilder reading than this
+						 * is a genuine over-voltage. */
 #define SC8547_IBUS_ABORT_MA		8000	/* total-bus (master+slave) hard abort; > code-73 7300 mA */
 #define SC8547_TEMP_ABORT_DDC		450	/* pack temp 45.0 C -> stop (0.1 C) */
 #define SC8547_CP_RESTART_MARGIN_MV	110	/* min vbus-2*vbat to re-enable CP */
 #define SC8547_CP_RESTART_MARGIN_CEIL_MV 700	/* refuse re-enable into an over-volted bus (runaway) */
+#define SC8547_CELL_MIN_VALID_MV	2500	/* below this the gauge reading is used only as a fallback */
 
 /*
  * Dual-CP load-sharing engage/disengage thresholds (master's own half-bus, mA).
@@ -283,9 +300,14 @@ MODULE_PARM_DESC(adsp_fastchg_svooc_min,
  * 7300 mA bus, the Android SVOOC peak rung) so the auto path delivers full
  * ~88 W SuperVOOC at low SoC. Safe because the dual charge-pump shares the bus
  * ~50/50 (each pump ~3.65 A, under its proven solo capability, validated to
- * 5.9 A bus with pack temp flat), and delivery is bounded by the vbat 4500 mV CV
- * ceiling, the 8000 mA total-bus over-current abort, and the 45 C pack-temp
- * backstop. Auto delivery only ever descends the curve.
+ * 5.9 A bus with pack temp flat), and delivery is bounded by the CELL 4500 mV CV
+ * ceiling, the CP-side 4650 mV over-voltage guard, the 8000 mA total-bus
+ * over-current abort, and the 45 C pack-temp backstop. Auto delivery only ever
+ * descends the curve.
+ *
+ * NOTE (2026-09-28): "vbat" everywhere in this policy means the CELL voltage,
+ * i.e. the gauge reading — NOT the charge pump's own Vbat ADC, which is
+ * inflated by the delivery IR drop.  See the backstop comment above.
  */
 #define SC8547_AUTO_CODE_CEILING	0x49	/* full curve: code 73 = 7300 mA bus */
 #define SC8547_MAX_SOC_DEFAULT		80	/* stop fast-charge at this SoC % (longevity) */
@@ -294,7 +316,6 @@ MODULE_PARM_DESC(adsp_fastchg_svooc_min,
 #define SC8547_AUTO_TEMP_MIN_DDC	150	/* 15.0 C: below -> normal charge */
 #define SC8547_AUTO_TEMP_MAX_DDC	440	/* 44.0 C: above -> normal charge */
 #define SC8547_AUTO_TEMP_NL_NH_DDC	350	/* <350 -> normal_low col, else _high */
-#define SC8547_AUTO_VBAT_MAX_MV		4490	/* start auto only below this */
 #define SC8547_AUTO_STEP_DEBOUNCE	4	/* consecutive ticks (~1 s) to advance */
 #define SC8547_AUTO_STEP_I_HYST_MA	200	/* ibus below setpoint by this -> step */
 #define SC8547_AUTO_STEP_V_HYST_MV	10	/* vbat over target by this -> step */
@@ -1548,7 +1569,8 @@ static const struct sc8547_curve_row sc_curve_soc85_90_nh[] = {
  * auto policy needs the gauge's own SOC/temp (not the CP's Vbat ADC) to pick
  * the curve table. Returns -ENODEV if the gauge power-supply is not up yet.
  */
-static int sc8547_read_gauge(struct sc8547a_device *sc, int *soc, int *temp_ddc)
+static int sc8547_read_gauge(struct sc8547a_device *sc, int *soc, int *temp_ddc,
+			     int *vbat_mv)
 {
 	struct power_supply *psy = power_supply_get_by_name("bq27z561-0");
 	union power_supply_propval v;
@@ -1566,6 +1588,19 @@ static int sc8547_read_gauge(struct sc8547a_device *sc, int *soc, int *temp_ddc)
 	if (ret)
 		goto out;
 	*temp_ddc = v.intval;
+
+	/*
+	 * Cell (pack) voltage in mV. This is the DELIVERY REFERENCE: unlike the
+	 * CP's own Vbat ADC it does not carry the ~0.3 V IR drop of the
+	 * harness/pack path at 7-8 A (see the backstop comment below).
+	 */
+	if (vbat_mv) {
+		ret = power_supply_get_property(psy, POWER_SUPPLY_PROP_VOLTAGE_NOW,
+						&v);
+		if (ret)
+			goto out;
+		*vbat_mv = v.intval / 1000;	/* uV -> mV */
+	}
 out:
 	power_supply_put(psy);
 	return ret;
@@ -1883,7 +1918,7 @@ static bool sc8547_auto_identify_retry(struct sc8547a_device *sc)
 static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 {
 	const struct sc8547_curve_row *curve;
-	int soc, temp_ddc, vbat, len, idx, ret;
+	int soc, temp_ddc, vbat, cell_mv = -1, vref, len, idx, ret;
 
 	if (!sc->adapter_check_ok) {
 		if (time_before(jiffies, sc->auto_identify_deadline))
@@ -1899,7 +1934,7 @@ static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 		return;
 	}
 
-	ret = sc8547_read_gauge(sc, &soc, &temp_ddc);
+	ret = sc8547_read_gauge(sc, &soc, &temp_ddc, &cell_mv);
 	if (ret) {
 		sc8547_auto_decline(sc, "gauge not ready");
 		return;
@@ -1910,8 +1945,14 @@ static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 		return;
 	}
 
+	/*
+	 * Gate and index the curve on the CELL voltage (gauge). The CP's own
+	 * reading is inflated by the delivery IR drop and would make a half-full
+	 * pack look like it is already at CV.
+	 */
 	vbat = sc8547_get_vbat(sc);
-	if (vbat >= SC8547_AUTO_VBAT_MAX_MV) {
+	vref = (cell_mv > SC8547_CELL_MIN_VALID_MV) ? cell_mv : vbat;
+	if (vref >= SC8547_VBAT_CV_CEILING_MV) {
 		sc8547_auto_decline(sc, "vbat at CV already");
 		return;
 	}
@@ -1921,7 +1962,7 @@ static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 		return;
 	}
 
-	idx = sc8547_auto_init_idx(curve, len, vbat);
+	idx = sc8547_auto_init_idx(curve, len, vref);
 	if (curve[idx].exit) {
 		sc8547_auto_decline(sc, "already at curve exit");
 		return;
@@ -1943,8 +1984,8 @@ static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 	sc->auto_state = SC_AUTO_DELIVER;
 	sc->auto_deliver_since = jiffies;	/* for re-servo sustained-CC refill */
 	dev_info(sc->dev,
-		 "auto fast-charge: SVOOC identified (soc %d%% temp %d.%d C vbat %d mV) — deliver curve[%d] code %u\n",
-		 soc, temp_ddc / 10, temp_ddc % 10, vbat, idx,
+		 "auto fast-charge: SVOOC identified (soc %d%% temp %d.%d C cell %d mV cp %d mV) — deliver curve[%d] code %u\n",
+		 soc, temp_ddc / 10, temp_ddc % 10, vref, vbat, idx,
 		 sc->fastchg_curr_code);
 }
 
@@ -2092,15 +2133,28 @@ static void sc8547_attach_work(struct work_struct *work)
 	 * Latches fastchg_deliver off so a trip needs an explicit re-arm.
 	 */
 	if (sc->cp_enabled) {
-		int cvbat = sc8547_get_vbat(sc);
+		int cpbat = sc8547_get_vbat(sc);	/* cell + delivery IR drop */
 		int cibus = sc8547_get_ibus(sc);
+		int gsoc = -1, gtemp = 0, gvbat = -1;
+		int gret;
+		int cvbat;				/* the reference for CC/CV */
+
+		gret = sc8547_read_gauge(sc, &gsoc, &gtemp, &gvbat);
+		/*
+		 * CC/CV reference = the CELL voltage (gauge) while it is readable;
+		 * the CP's own reading only as the fallback.  See the backstop
+		 * comment above: on the loaded CP reading a half-full pack looks
+		 * like it is already at CV and every session dies in ~20 s.
+		 */
+		cvbat = (gret == 0 && gvbat > SC8547_CELL_MIN_VALID_MV) ? gvbat
+								       : cpbat;
 		/*
 		 * Under dual-CP the master REG_13 reads only its half of the bus
 		 * current; the CC taper compare and the over-current backstop both
 		 * need the TOTAL bus, so sum in the slave's half (0 if single-CP).
 		 */
 		int cibus_total = cibus + sc8547_slave_ibus();
-		int margin = vbus - 2 * cvbat;
+		int margin = vbus - 2 * cpbat;
 		u8 r6 = 0, r7 = 0;
 
 		/*
@@ -2126,9 +2180,6 @@ static void sc8547_attach_work(struct work_struct *work)
 		 * delivery).
 		 */
 		{
-			int gsoc = -1, gtemp = 0;
-			int gret = sc8547_read_gauge(sc, &gsoc, &gtemp);
-
 			if (!gret && gsoc >= sc->max_soc) {
 				sc8547_slave_cp_enable(sc, false);
 				sc8547_set_chg_enable(sc, false);
@@ -2156,6 +2207,7 @@ static void sc8547_attach_work(struct work_struct *work)
 		}
 
 		if (cvbat >= SC8547_VBAT_CV_CEILING_MV ||
+		    cpbat >= SC8547_CP_OVP_CEILING_MV ||
 		    cibus_total >= SC8547_IBUS_ABORT_MA) {
 			/* Hard backstop: over-voltage / over-current -> latch off. */
 			sc8547_slave_cp_enable(sc, false);
@@ -2163,8 +2215,8 @@ static void sc8547_attach_work(struct work_struct *work)
 			sc->cp_enabled = false;
 			sc->fastchg_deliver = false;
 			dev_warn(sc->dev,
-				 "fastchg backstop tripped (vbat %d mV ibus %d mA total, master %d) — CP off, deliver disarmed\n",
-				 cvbat, cibus_total, cibus);
+				 "fastchg backstop tripped (cell %d mV cp %d mV ibus %d mA total, master %d) — CP off, deliver disarmed\n",
+				 cvbat, cpbat, cibus_total, cibus);
 			if (sc->auto_state == SC_AUTO_DELIVER) {
 				sc8547_auto_finish(sc, "backstop (CV reached)");
 				goto reschedule;
