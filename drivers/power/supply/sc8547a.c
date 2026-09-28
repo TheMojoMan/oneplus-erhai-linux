@@ -77,6 +77,29 @@ module_param(adsp_fastchg_svooc_min, uint, 0644);
 MODULE_PARM_DESC(adsp_fastchg_svooc_min,
 		 "ADSP fast-charge type >= this counts as VOOC-family (default 2)");
 
+/*
+ * Battery gauge used as the CELL-voltage reference by the SVOOC CC/CV policy.
+ * Two erhai populations exist and BOTH must fast-charge:
+ *   - pack-gauge SKUs carry a TI bq27z561 on AP I2C -> psy "bq27z561-0";
+ *   - the QBG population runs the gauge inside the ADSP -> psy
+ *     "erhai-adsp-bat" (registered by erhai_otg_glink.c; on a board whose
+ *     bq27z561 ACKs but never reports status the OTG driver detaches the dead
+ *     pack gauge, so only the ADSP psy remains).
+ * The list is tried in order and the first gauge that ANSWERS is used, so a
+ * gauge-absent board no longer declines with "gauge not ready" (which would
+ * disable SVOOC entirely there).  Same convention as erhai_pps.c
+ * (pps_bat_psy()).  gauge_name is an explicit override for bring-up/debug.
+ */
+static char *gauge_name;
+module_param(gauge_name, charp, 0644);
+MODULE_PARM_DESC(gauge_name,
+		 "battery gauge power-supply name to use first (default: bq27z561-0 then erhai-adsp-bat)");
+
+static const char * const sc8547_gauge_names[] = {
+	"bq27z561-0",		/* pack-gauge SKUs: TI bq27z561 (AP I2C) */
+	"erhai-adsp-bat",	/* QBG SKUs: gauge lives in the ADSP */
+};
+
 #include "erhai_otg_glink.h"
 #include "sc8547a.h"
 
@@ -264,10 +287,12 @@ MODULE_PARM_DESC(adsp_fastchg_svooc_min,
  * harness/pack path (~0.3 V at the 7-8 A this pad pulls: measured 2026-09-28,
  * 4.49 V on the CP vs 4.20 V on the gauge, while at rest both read 3920 mV).
  * Judging the CC/CV curve (and the CV end) on that loaded reading aborted every
- * SVOOC session 15-30 s in, at ~50% SoC.  The bq27z561 gauge reports the CELL
- * voltage, so it is the reference for the curve steps, the start gate and the
- * CV ceiling; the CP reading is kept only as an over-voltage guard, set well
- * above any legitimate loaded reading (the highest seen is ~4.49 V).
+ * SVOOC session 15-30 s in, at ~50% SoC.  The battery gauge reports the CELL
+ * voltage — "bq27z561-0" on the pack-gauge SKUs, "erhai-adsp-bat" on the QBG
+ * population (see sc8547_gauge_names[]) — so it is the reference for the curve
+ * steps, the start gate and the CV ceiling; the CP reading is kept only as an
+ * over-voltage guard, set well above any legitimate loaded reading (the highest
+ * seen is ~4.49 V).
  */
 #define SC8547_VBAT_CV_CEILING_MV	4500	/* cell (gauge) CV end */
 #define SC8547_CP_OVP_CEILING_MV	4800	/* CP-side hard guard: cell CV (4.5 V)
@@ -1565,14 +1590,13 @@ static const struct sc8547_curve_row sc_curve_soc85_90_nh[] = {
 #define SC_CURVE(arr)	(arr), ARRAY_SIZE(arr)
 
 /*
- * Read pack SOC (%) and temperature (0.1 C) from the bq27z561 fuel gauge. The
- * auto policy needs the gauge's own SOC/temp (not the CP's Vbat ADC) to pick
- * the curve table. Returns -ENODEV if the gauge power-supply is not up yet.
+ * Read pack SOC (%), temperature (0.1 C) and cell voltage (mV) from ONE named
+ * gauge power-supply.  Returns -ENODEV when that psy is not registered yet.
  */
-static int sc8547_read_gauge(struct sc8547a_device *sc, int *soc, int *temp_ddc,
-			     int *vbat_mv)
+static int sc8547_read_gauge_name(const char *name, int *soc, int *temp_ddc,
+				  int *vbat_mv)
 {
-	struct power_supply *psy = power_supply_get_by_name("bq27z561-0");
+	struct power_supply *psy = power_supply_get_by_name(name);
 	union power_supply_propval v;
 	int ret;
 
@@ -1604,6 +1628,49 @@ static int sc8547_read_gauge(struct sc8547a_device *sc, int *soc, int *temp_ddc,
 out:
 	power_supply_put(psy);
 	return ret;
+}
+
+/*
+ * Read pack SOC (%) and temperature (0.1 C) from the battery gauge. The auto
+ * policy needs the gauge's own SOC/temp (not the CP's Vbat ADC) to pick the
+ * curve table, and its cell voltage (mV) as the CC/CV reference.
+ *
+ * WHICH gauge: every candidate in sc8547_gauge_names is tried in order and the
+ * first one that answers is used (gauge_name, when set, is tried first) —
+ * pack-gauge SKUs answer on "bq27z561-0", the QBG population on
+ * "erhai-adsp-bat".  Returns the last error (e.g. -ENODEV when no gauge is up
+ * yet), which the caller reports as "gauge not ready".
+ */
+static int sc8547_read_gauge(struct sc8547a_device *sc, int *soc, int *temp_ddc,
+			     int *vbat_mv)
+{
+	int last = -ENODEV;
+	size_t i;
+
+	if (gauge_name) {
+		last = sc8547_read_gauge_name(gauge_name, soc, temp_ddc, vbat_mv);
+		if (!last)
+			return 0;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(sc8547_gauge_names); i++) {
+		last = sc8547_read_gauge_name(sc8547_gauge_names[i], soc, temp_ddc,
+					      vbat_mv);
+		if (!last) {
+			/*
+			 * Evidence line for a board whose primary pack gauge is
+			 * absent or dead: name the fallback actually in use.
+			 */
+			if (gauge_name || i)
+				dev_info_once(sc->dev,
+					      "gauge: %s in use for the SVOOC CC/CV reference\n",
+					      gauge_name ? gauge_name
+							 : sc8547_gauge_names[i]);
+			return 0;
+		}
+	}
+
+	return last;
 }
 
 /*
