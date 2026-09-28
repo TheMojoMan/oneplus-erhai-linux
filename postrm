@@ -9,16 +9,43 @@ set -e
 # 1. Only on real removal, not on the remove step of an upgrade.
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 
-    # 2. Kernel version. dpkg passes the version as $2 on remove; fall back to
-    #    the running kernel if it did not. Strip the "+b<N>" Debian revision
-    #    that build-kernel.sh appends to the .deb Version (not part of the
-    #    kernelrelease; same derivation as postinst).
-    FULLVER="${2}"
-    KVER="${FULLVER%%+b*}"
-    if [ -z "$KVER" ]; then
-        KVER=$(uname -r)
-        FULLVER="$KVER"
+    # 2. Kernel version of the package being removed. Strip the "+b<N>" Debian
+    #    revision that build-kernel.sh appends to the .deb Version (not part of
+    #    the kernelrelease; same derivation as postinst).
+    #
+    #    dpkg passes a version argument ONLY on the upgrade transitions
+    #    (`postrm upgrade <old-version>` etc.) -- `postrm remove` and
+    #    `postrm purge` get NO $2 at all (verified 2026-09-28:
+    #    `dpkg --remove <pkg>` runs the script with args "remove"). Falling back
+    #    to `uname -r` there was the bug: the RUNNING kernelrelease carries no
+    #    "+b<N>", so this script looked for "<release>-<root partlabel>.efi"
+    #    and left the real "<release>-b<N>.efi" on the ESP.
+    #
+    #    Sources, in order:
+    #      1. $2                -- the other version on upgrade/abort-upgrade
+    #                              (defensive: the block below is skipped for
+    #                              that transition anyway);
+    #      2. dpkg-query        -- still answers while the package is in
+    #                              config-files state, i.e. for remove/purge;
+    #                              this is the version whose UKI postinst wrote.
+    #    There is deliberately NO `uname -r` fallback: the RUNNING
+    #    kernelrelease is not the removed package's, and using it made this
+    #    script look for "<running release>-<root partlabel>.efi" AND rm -f the
+    #    depmod leftovers out of the RUNNING /lib/modules/<release>/ (the live
+    #    modules tree). Without a version, do nothing at all -- a stray .efi on
+    #    the ESP is harmless, a wrong delete is not.
+    FULLVER="${2:-}"
+    if [ -z "$FULLVER" ] && [ -n "${DPKG_MAINTSCRIPT_PACKAGE:-}" ]; then
+        FULLVER=$(dpkg-query --show --showformat='${Version}' \
+                      "$DPKG_MAINTSCRIPT_PACKAGE" 2>/dev/null || true)
     fi
+    if [ -z "$FULLVER" ]; then
+        echo "Post-remove: cannot determine the version of" \
+             "${DPKG_MAINTSCRIPT_PACKAGE:-the removed package}" \
+             "(no \$2 and dpkg-query gave nothing); leaving ESP and /lib/modules alone."
+        exit 0
+    fi
+    KVER="${FULLVER%%+b*}"
 
     # 3. Root partition label, same derivation as postinst.
     ROOT_LABEL=$(lsblk -no PARTLABEL "$(findmnt -no SOURCE /)" 2>/dev/null)
@@ -43,50 +70,80 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
         TARGET_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
     fi
 
-    # 5. Mount the ESP.
-    ESP_PART="/dev/disk/by-partlabel/esp"
-    MNT_TMP=$(mktemp -d)
-    DEST_FILE="$MNT_TMP/EFI/ubuntu/$TARGET_EFI"
-    MOUNT_SUCCESS=false
+    # 5. Find the ESP. ERHAI_ESP_PART is a test seam (tmp/postrm-test/ points it
+    #    at a loop image); production uses the by-partlabel link.
+    #
+    #    If the ESP is ALREADY mounted somewhere (e.g. someone is inspecting
+    #    /boot/efi), reuse that mount instead of mounting it a second time: a
+    #    block device has ONE superblock, so a second mount either fails or comes
+    #    up read-only and the delete would be skipped without a trace.
+    ESP_PART="${ERHAI_ESP_PART:-/dev/disk/by-partlabel/esp}"
+    ESP_REAL="$(readlink -f "$ESP_PART" 2>/dev/null || true)"
+    ESP_TARGET=""
+    for src in "$ESP_REAL" "$ESP_PART"; do
+        [ -n "$src" ] || continue
+        ESP_TARGET="$(findmnt -n -o TARGET --source "$src" 2>/dev/null | head -n1 || true)"
+        [ -n "$ESP_TARGET" ] && break
+    done
 
-    if [ -b "$ESP_PART" ]; then
+    MNT_TMP=""
+    MOUNTED_BY_US=false
+    if [ -z "$ESP_TARGET" ] && [ -b "$ESP_PART" ]; then
+        MNT_TMP="$(mktemp -d)"
         for i in 1 2 3; do
             if mount "$ESP_PART" "$MNT_TMP" 2>/dev/null; then
-                MOUNT_SUCCESS=true
+                ESP_TARGET="$MNT_TMP"
+                MOUNTED_BY_US=true
                 break
             fi
             sleep 1
         done
+        if [ "$MOUNTED_BY_US" != true ]; then
+            rmdir "$MNT_TMP" 2>/dev/null || true
+            MNT_TMP=""
+        fi
     fi
 
     # 6. Delete the .efi if it is there.
-    if [ "$MOUNT_SUCCESS" = true ]; then
-        if [ -f "$DEST_FILE" ]; then
-            echo "Post-remove: Deleting $TARGET_EFI from ESP..."
-            rm -f "$DEST_FILE"
-            sync
-        else
-            echo "Post-remove: $TARGET_EFI not found on ESP, nothing to do."
-        fi
-        umount "$MNT_TMP"
+    if [ -z "$ESP_TARGET" ]; then
+        echo "Post-remove: ESP not available. Could not delete $TARGET_EFI (ignored)."
     else
-        echo "Post-remove: ESP not available. Could not delete EFI file (ignored)."
+        DEST_FILE="$ESP_TARGET/EFI/ubuntu/$TARGET_EFI"
+        if [ ! -f "$DEST_FILE" ]; then
+            echo "Post-remove: $TARGET_EFI not found on ESP, nothing to do."
+        elif [ "${ERHAI_POSTRM_DRY_RUN:-0}" = "1" ]; then
+            echo "Post-remove: DRY RUN -- would delete $DEST_FILE"
+        else
+            echo "Post-remove: Deleting $TARGET_EFI from ESP ($ESP_TARGET)..."
+            if rm -f "$DEST_FILE" 2>/dev/null; then
+                sync
+            else
+                echo "Post-remove: could NOT delete $DEST_FILE (ESP mounted read-only?)" >&2
+            fi
+        fi
+        if [ "$MOUNTED_BY_US" = true ]; then
+            umount "$ESP_TARGET"
+        fi
     fi
 
-    rm -rf "$MNT_TMP"
+    [ -n "$MNT_TMP" ] && rmdir "$MNT_TMP" 2>/dev/null || true
 
     # 7. Leftovers from depmod, which postinst ran.
-    rm -f "/lib/modules/$KVER/modules.dep" \
-        "/lib/modules/$KVER/modules.dep.bin" \
-        "/lib/modules/$KVER/modules.alias" \
-        "/lib/modules/$KVER/modules.alias.bin" \
-        "/lib/modules/$KVER/modules.symbols" \
-        "/lib/modules/$KVER/modules.symbols.bin" \
-        "/lib/modules/$KVER/modules.devname" \
-        "/lib/modules/$KVER/modules.softdep" \
-        "/lib/modules/$KVER/modules.builtin.alias.bin" \
-        "/lib/modules/$KVER/modules.builtin.bin"
-    rmdir "/lib/modules/$KVER" 2>/dev/null || true
+    if [ "${ERHAI_POSTRM_DRY_RUN:-0}" = "1" ]; then
+        echo "Post-remove: DRY RUN -- leaving /lib/modules/$KVER depmod leftovers alone."
+    else
+        rm -f "/lib/modules/$KVER/modules.dep" \
+            "/lib/modules/$KVER/modules.dep.bin" \
+            "/lib/modules/$KVER/modules.alias" \
+            "/lib/modules/$KVER/modules.alias.bin" \
+            "/lib/modules/$KVER/modules.symbols" \
+            "/lib/modules/$KVER/modules.symbols.bin" \
+            "/lib/modules/$KVER/modules.devname" \
+            "/lib/modules/$KVER/modules.softdep" \
+            "/lib/modules/$KVER/modules.builtin.alias.bin" \
+            "/lib/modules/$KVER/modules.builtin.bin"
+        rmdir "/lib/modules/$KVER" 2>/dev/null || true
+    fi
 fi
 
 exit 0
