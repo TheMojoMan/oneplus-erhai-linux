@@ -1375,8 +1375,6 @@ static int erhai_otg_probe(struct auxiliary_device *adev,
 	INIT_DELAYED_WORK(&otg->rearm_work, erhai_otg_rearm_work);
 	INIT_DELAYED_WORK(&otg->chglim_work, erhai_otg_chglim_work);
 	otg->chglim_state = -1;
-	/* Start the charge-limit poller after a settle delay (ADSP PDR + gauge). */
-	schedule_delayed_work(&otg->chglim_work, msecs_to_jiffies(15000));
 
 	otg->debugfs = debugfs_create_dir("erhai_otg", NULL);
 	debugfs_create_file("cmd", 0200, otg->debugfs, otg, &erhai_otg_cmd_fops);
@@ -1386,6 +1384,16 @@ static int erhai_otg_probe(struct auxiliary_device *adev,
 						   erhai_otg_pdr_notify,
 						   otg);
 	if (IS_ERR(otg->client)) {
+		/*
+		 * erhai: probe is about to fail, so devres will release this
+		 * structure -- make sure no work is queued against it (the driver
+		 * core runs devres_release_all() for a failed probe).
+		 */
+		cancel_work_sync(&otg->arm_work);
+		cancel_work_sync(&otg->vbus_work);
+		cancel_delayed_work_sync(&otg->vbus_off_work);
+		cancel_delayed_work_sync(&otg->rearm_work);
+		cancel_delayed_work_sync(&otg->chglim_work);
 		debugfs_remove_recursive(otg->debugfs);
 		return PTR_ERR(otg->client);
 	}
@@ -1394,6 +1402,13 @@ static int erhai_otg_probe(struct auxiliary_device *adev,
 
 	/* May immediately call back erhai_otg_pdr_notify() if PD is already up. */
 	pmic_glink_client_register(otg->client);
+
+	/*
+	 * erhai: start the charge-limit poller only now that probe has fully
+	 * succeeded (settle delay for ADSP PDR + gauge).  Scheduled earlier, a
+	 * probe failure left it queued while devres freed this structure.
+	 */
+	schedule_delayed_work(&otg->chglim_work, msecs_to_jiffies(15000));
 
 	return 0;
 }
