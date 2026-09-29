@@ -533,6 +533,14 @@ static void pmic_glink_ucsi_remove(struct auxiliary_device *adev)
 
 	/* Unregister first to stop having read & writes */
 	cancel_delayed_work_sync(&ucsi->poll_work);
+	/*
+	 * erhai: the glink callbacks (and the rescan kick above) queue
+	 * register_work/notify_work.  Both must be drained before the UCSI
+	 * instance is unregistered, or register_work can still run
+	 * ucsi_register() against it.
+	 */
+	cancel_work_sync(&ucsi->register_work);
+	cancel_work_sync(&ucsi->notify_work);
 	ucsi_unregister(ucsi->ucsi);
 }
 
