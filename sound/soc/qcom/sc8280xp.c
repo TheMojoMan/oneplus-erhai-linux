@@ -84,6 +84,8 @@ struct sc8280xp_snd_data {
 	struct snd_soc_jack dp_jack[8];
 	const struct qcom_snd_soc_common *priv;
 	bool jack_setup;
+	/* erhai: lifetime vote on the SEC TDM bit clock (audit F07) */
+	struct clk *sec_tdm_clk;
 };
 
 static inline int sc8280xp_get_mclk_freq(struct snd_pcm_hw_params *params)
@@ -183,12 +185,33 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
  */
 #define SEC_TDM_IBIT_RATE	12288000
 
-static void sc8280xp_vote_sec_tdm_bclk(struct device *dev)
+/*
+ * erhai (audit F07): the SEC TDM bit clock has to stay alive for the card's
+ * lifetime, but the reference taken here used to leak on every call --
+ * of_clk_get_from_provider() takes a clk reference and clk_prepare_enable()
+ * an enable count, and neither was ever dropped (no clk_put in this file).
+ * Take the vote exactly once and hand the release to devres, which runs it
+ * when the card device is torn down.
+ */
+static void sc8280xp_sec_tdm_clk_release(void *arg)
 {
+	struct clk *clk = arg;
+
+	clk_disable_unprepare(clk);
+	clk_put(clk);
+}
+
+static void sc8280xp_vote_sec_tdm_bclk(struct snd_soc_card *card)
+{
+	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
+	struct device *dev = card->dev;
 	struct of_phandle_args clkspec;
 	struct device_node *np;
 	struct clk *clk;
 	int ret;
+
+	if (data && data->sec_tdm_clk)
+		return;			/* vote already taken */
 
 	np = of_find_compatible_node(NULL, NULL, "qcom,q6prm-lpass-clocks");
 	if (!np) {
@@ -208,14 +231,28 @@ static void sc8280xp_vote_sec_tdm_bclk(struct device *dev)
 	}
 
 	ret = clk_set_rate(clk, SEC_TDM_IBIT_RATE);
-	if (ret)
+	if (ret) {
 		dev_err(dev, "failed to set SEC_TDM_IBIT rate: %d\n", ret);
+		clk_put(clk);
+		return;
+	}
+
+	ret = devm_add_action(dev, sc8280xp_sec_tdm_clk_release, clk);
+	if (ret) {
+		dev_err(dev, "failed to register SEC_TDM_IBIT cleanup: %d\n",
+			ret);
+		clk_put(clk);
+		return;
+	}
 
 	ret = clk_prepare_enable(clk);
-	if (ret)
+	if (ret) {
 		dev_err(dev, "failed to enable SEC_TDM_IBIT: %d\n", ret);
+		return;		/* devres still drops the reference */
+	}
 
-
+	if (data)
+		data->sec_tdm_clk = clk;
 }
 
 static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
@@ -231,7 +268,7 @@ static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
 	case QUINARY_MI2S_RX...QUINARY_MI2S_TX:
 		snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
 		if (cpu_dai->id == SECONDARY_MI2S_RX)
-			sc8280xp_vote_sec_tdm_bclk(card->dev);
+			sc8280xp_vote_sec_tdm_bclk(card);
 		break;
 
 
