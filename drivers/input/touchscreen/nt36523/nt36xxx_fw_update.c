@@ -189,7 +189,7 @@ static int32_t nvt_bin_header_parser(const u8 *fwdata, size_t fwsize)
 			if (ts->hw_crc)
 				bin_map[list].crc = byte_to_word(&fwdata[0x18 + list*4]);
 			else { //ts->hw_crc
-				if ((bin_map[list].BIN_addr + bin_map[list].size) < fwsize)
+				if ((u64)bin_map[list].BIN_addr + bin_map[list].size < (u64)fwsize)
 					bin_map[list].crc = CheckSum(&fwdata[bin_map[list].BIN_addr], bin_map[list].size);
 				else {
 					NVT_ERR("access range (0x%08X to 0x%08X) is larger than bin size!\n",
@@ -222,7 +222,7 @@ static int32_t nvt_bin_header_parser(const u8 *fwdata, size_t fwsize)
 			if (ts->hw_crc)
 				bin_map[list].crc = byte_to_word(&fwdata[pos+12]);
 			else { //ts->hw_crc
-				if ((bin_map[list].BIN_addr + bin_map[list].size) < fwsize)
+				if ((u64)bin_map[list].BIN_addr + bin_map[list].size < (u64)fwsize)
 					bin_map[list].crc = CheckSum(&fwdata[bin_map[list].BIN_addr], bin_map[list].size);
 				else {
 					NVT_ERR("access range (0x%08X to 0x%08X) is larger than bin size!\n",
@@ -253,7 +253,7 @@ static int32_t nvt_bin_header_parser(const u8 *fwdata, size_t fwsize)
 			if (ts->hw_crc)
 				bin_map[list].crc = byte_to_word(&fwdata[pos+12]);
 			else { //ts->hw_crc
-				if ((bin_map[list].BIN_addr + bin_map[list].size) < fwsize)
+				if ((u64)bin_map[list].BIN_addr + bin_map[list].size < (u64)fwsize)
 					bin_map[list].crc = CheckSum(&fwdata[bin_map[list].BIN_addr], bin_map[list].size);
 				else {
 					NVT_ERR("access range (0x%08X to 0x%08X) is larger than bin size!\n",
@@ -265,7 +265,7 @@ static int32_t nvt_bin_header_parser(const u8 *fwdata, size_t fwsize)
 		}
 
 		/* BIN size error detect */
-		if ((bin_map[list].BIN_addr + bin_map[list].size) > fwsize) {
+		if ((u64)bin_map[list].BIN_addr + bin_map[list].size > (u64)fwsize) {
 			NVT_ERR("access range (0x%08X to 0x%08X) is larger than bin size!\n",
 					bin_map[list].BIN_addr, bin_map[list].BIN_addr + bin_map[list].size);
 			return -EINVAL;
@@ -437,7 +437,7 @@ static int32_t nvt_write_firmware(const u8 *fwdata, size_t fwsize)
 //				list, name, SRAM_addr, size, BIN_addr);
 
 		/* Check data size */
-		if ((BIN_addr + size) > fwsize) {
+		if ((u64)BIN_addr + size > (u64)fwsize) {
 			NVT_ERR("access range (0x%08X to 0x%08X) is larger than bin size!\n",
 					BIN_addr, BIN_addr + size);
 			ret = -EINVAL;
@@ -864,4 +864,31 @@ request_firmware_fail:
 
 	return ret;
 }
+
+/*
+ * erhai (audit F06): release the one-shot touch-firmware download buffer and the
+ * parse state.  Nothing used to free fwbuf (63 KiB); the driver is built-in so it
+ * was never observable, but a rebind cycle would leak it, and the ownership is
+ * clearer this way.  nvt_download_init() re-allocates on demand, so this may run
+ * between updates.  Also drops any firmware handle a failed update left behind.
+ *
+ * The range checks above are u64 now: BIN_addr/size come from the image header,
+ * so a crafted (or corrupted) .bin could wrap the uint32_t sum and defeat the
+ * bound before CheckSum()/nvt_write_firmware() walked past the buffer.
+ */
+void nvt_download_deinit(void)
+{
+	update_firmware_release();
+
+	if (!IS_ERR_OR_NULL(bin_map)) {
+		kfree(bin_map);
+		bin_map = NULL;
+	}
+	if (fwbuf) {
+		kfree(fwbuf);
+		fwbuf = NULL;
+	}
+	fw_need_write_size = 0;
+}
+
 #endif /* BOOT_UPDATE_FIRMWARE */

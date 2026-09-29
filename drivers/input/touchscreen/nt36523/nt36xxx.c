@@ -2144,6 +2144,8 @@ static void nvt_ts_remove(struct spi_device *client)
 
 #if BOOT_UPDATE_FIRMWARE
 	cancel_delayed_work_sync(&ts->nvt_fwu_work);
+	/* erhai: the download buffer (63 KiB) is ours to release (audit F06) */
+	nvt_download_deinit();
 #endif
 
 	/*
