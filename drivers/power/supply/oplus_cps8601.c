@@ -2166,12 +2166,14 @@ static int cps_wls_chrg_probe(struct i2c_client *client)
 	chip->regmap = devm_regmap_init_i2c(client, &cps8601_regmap_config);
 	if (IS_ERR(chip->regmap)) {
 		ret = PTR_ERR(chip->regmap);
+		dev_err(&client->dev, "regmap init failed: %d\n", ret);
 		goto free_source;
 	}
 
 	chip->regmap32 = devm_regmap_init_i2c(client, &cps8601_regmap32_config);
 	if (IS_ERR(chip->regmap32)) {
 		ret = PTR_ERR(chip->regmap32);
+		dev_err(&client->dev, "regmap32 init failed: %d\n", ret);
 		goto free_source;
 	}
 
