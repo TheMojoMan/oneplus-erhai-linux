@@ -3447,3 +3447,50 @@ pinctrl-names = "wls_charge_int_active", "wls_charge_int_sleep",
 		};
 	};
 };
+
+/*
+ * ---------------------------------------------------------------------------
+ * PMK8550 PMIC RTC (driver rtc-pm8xxx -> /dev/rtc1 / rtc0)
+ * ---------------------------------------------------------------------------
+ * The hardware is a 1 Hz FREE-RUNNING 32-bit counter in the PMIC's
+ * always-on (battery-backed) domain -- it keeps counting while Android or
+ * Linux are off, but it carries no wall-clock epoch, so the driver has to
+ * combine it with a stored offset:
+ *
+ *      read_time = counter + offset            offset = wall - counter
+ *
+ * Measured 2026-09-29 on this pad with no offset source declared: the counter
+ * read 1735xxx s (= 1970-01-21, i.e. "time since the RTC block last reset"),
+ * RTC_SET_TIME returned -ENODEV (nowhere to store anything) and the EFI "RTC"
+ * that otherwise owns the rtc0/hctosys slot is broken on this firmware, so the
+ * kernel clock stayed at the epoch until NTP.  OxygenOS's DTB declares no
+ * offset source either -- its userspace (time_daemon) keeps the very same
+ * number in the persist partition (/mnt/vendor/persist/time/ats_1, 8-byte LE
+ * milliseconds) and adds it to the counter at boot.
+ *
+ * Storage: the PMIC's SDAM at 0x7100 (our nvram@7100 node, vendor's
+ * sdam@7100).  The vendor DTB declares only restart_reason@48,
+ * wr_thermal-flag@58, alarm-log@76 and fmd-*@9a/9c/9f/a2 there, and
+ * 0x50..0x57 is measured all-zero, so the 4-byte cell below uses the least
+ * contested free slot.  It stays readable/writable from userspace through
+ * /sys/bus/nvmem/devices/spmi_sdam0/nvmem (offsets >= 0x40), which is how
+ * tmp/rtc-offset-probe.py seeds and audits it:
+ *
+ *      python3 tmp/rtc-offset-probe.py status
+ *      sudo python3 tmp/rtc-offset-probe.py seed --from-clock --write
+ *
+ * userspace side (oneplus-erhai-desktop): erhai-rtc-sync.py writes the system
+ * clock back (RTC_SET_TIME -> stores system_time - counter) at boot and
+ * hourly, so the next boot is right from second zero.
+ */
+&pmk8550_sdam_2 {
+	rtc_offset: rtc-offset@50 {
+		reg = <0x50 0x4>;
+	};
+};
+
+&pmk8550_rtc {
+	nvmem-cells = <&rtc_offset>;
+	nvmem-cell-names = "offset";
+};
+
