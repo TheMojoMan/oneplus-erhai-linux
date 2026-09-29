@@ -260,6 +260,7 @@ void nvt_stop_crc_reboot(void);
 void nvt_set_dbgfw_status(bool enable);
 void nvt_match_fw(void);
 int32_t nvt_update_firmware(const char *firmware_name);
+void nvt_download_deinit(void);	/* erhai: release fwbuf/parse state (audit F06) */
 int32_t nvt_check_fw_reset_state(RST_COMPLETE_STATE check_reset_state);
 int32_t nvt_get_fw_info(void);
 int32_t nvt_clear_fw_status(void);
