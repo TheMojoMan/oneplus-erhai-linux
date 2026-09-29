@@ -186,15 +186,46 @@ static const struct rtc_class_ops efi_rtc_ops = {
 	.proc		= efi_procfs,
 };
 
+/*
+ * erhai (OnePlus Pad 3, 2026-09-29): this firmware advertises
+ * EFI_RT_SUPPORTED_TIME_SERVICES and answers GetTime() with EFI_SUCCESS, but
+ * the returned date is empty (year/month/day 0), which convert_from_efi_time()
+ * rejects.  Registering that RTC takes the CONFIG_RTC_HCTOSYS_DEVICE ("rtc0")
+ * slot away from a perfectly good board RTC -- here the PMK8550 PMIC RTC
+ * (rtc-pm8xxx) -- and then every read fails with -EIO:
+ *
+ *      rtc-efi rtc-efi.0: registered as rtc0
+ *      rtc-efi rtc-efi.0: hctosys: unable to read the hardware clock
+ *      rtc-pm8xxx c400000.spmi:pmic@0:rtc@6100: registered as rtc1
+ *
+ * so the kernel never sets its clock from hardware at boot (and hwclock /
+ * timedatectl report an I/O error on /dev/rtc0).  Refusing to register a time
+ * that cannot be converted leaves rtc0 to the usable RTC.
+ * rtc_efi.erhai_require_valid_time=0 on the cmdline restores the upstream
+ * behaviour (built-in module -> /sys/module/rtc_efi/parameters/).
+ */
+static bool erhai_require_valid_time = true;
+module_param_named(erhai_require_valid_time, erhai_require_valid_time, bool,
+		   0444);
+MODULE_PARM_DESC(erhai_require_valid_time,
+		 "do not register the EFI RTC when GetTime() returns an invalid date");
+
 static int __init efi_rtc_probe(struct platform_device *dev)
 {
 	struct rtc_device *rtc;
+	struct rtc_time wtime;
 	efi_time_t eft;
 	efi_time_cap_t cap;
 
 	/* First check if the RTC is usable */
 	if (efi.get_time(&eft, &cap) != EFI_SUCCESS)
 		return -ENODEV;
+
+	if (erhai_require_valid_time && !convert_from_efi_time(&eft, &wtime)) {
+		dev_warn(&dev->dev,
+			 "firmware reports an invalid time, not registering the EFI RTC\n");
+		return -ENODEV;
+	}
 
 	rtc = devm_rtc_allocate_device(&dev->dev);
 	if (IS_ERR(rtc))
