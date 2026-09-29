@@ -116,6 +116,25 @@ fi
 #    Do NOT add fw_devlink=permissive here. It lets DSI probe ahead of its
 #    regulators, which turns into a racy PLL-lock failure and a boot that wedges
 #    before the rootfs.
+#
+#    clk_ignore_unused / pd_ignore_unused are load-bearing as well (measured
+#    2026-09-29): 544 clocks are in the tree, 231 have their hardware enable bit
+#    set and 134 of those have NO driver holding them -- the whole DSI1 PLL
+#    chain, the USB3 + UFS PHY clocks, rf_clk1..3 (WiFi/BT/modem), the cam/video/
+#    disp PLLs and 79 LPASS audio clocks; on the power-domain side NCC0_0 and
+#    NCC1_1 are ON with no device attached at all. Drop either flag and
+#    clk_disable_unused() / genpd_power_off_unused() act at ~0.65 s, before the
+#    display, audio and USB stacks have taken over -- the silent-POR class.
+#
+#    log_buf_len=8M: the default ring is 128 KiB (CONFIG_LOG_BUF_SHIFT 17, not
+#    overridden in erhai_defconfig) which wraps in minutes; the silent-POR class
+#    is only diagnosable from the last kernel lines before the reset.
+#
+#    earlycon=efifb was DROPPED 2026-09-29: 'console=tty0' registers the dmesg
+#    dummy console at 0.000116 s and printk then unregisters every boot console
+#    (0.000118 s), so the efifb bootconsole never printed anything tty0 did not
+#    already own. consoleblank=0 was dropped too -- it already defaults to 0 in
+#    this kernel (drivers/tty/vt/vt.c), so the token was a no-op.
 if [ "$ROOT_LABEL" = "linux1" ]; then
     ROOT_TAG="-l1"
 else
@@ -128,8 +147,8 @@ else
     OUTPUT_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
 fi
 CMDLINE="root=PARTLABEL=$ROOT_LABEL rootwait rw rootfstype=ext4 fw_devlink=off \
-earlycon=efifb console=tty0 loglevel=4 clk_ignore_unused pd_ignore_unused \
-panic=30 consoleblank=0 usbcore.autosuspend=-1 log_buf_len=8M"
+console=tty0 loglevel=4 clk_ignore_unused pd_ignore_unused \
+panic=30 usbcore.autosuspend=-1 log_buf_len=8M"
 
 BOOT_DIR="/boot"
 KERNEL_IMG="$BOOT_DIR/vmlinuz-$KVER"
