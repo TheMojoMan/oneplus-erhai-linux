@@ -2146,6 +2146,21 @@ static void nvt_ts_remove(struct spi_device *client)
 	cancel_delayed_work_sync(&ts->nvt_fwu_work);
 #endif
 
+	/*
+	 * erhai: the panel-power path queues resume_work/suspend_work on
+	 * ts->event_wq, which was only ever destroyed in nvt_ts_shutdown().
+	 * Cancel them (they take ts->lock) and destroy the queue BEFORE the
+	 * mutexes and ts itself go away, or a queued work runs on freed memory
+	 * and the workqueue leaks.
+	 */
+	if (ts->event_wq) {
+		cancel_work_sync(&ts->resume_work);
+		cancel_work_sync(&ts->suspend_work);
+		flush_workqueue(ts->event_wq);
+		destroy_workqueue(ts->event_wq);
+		ts->event_wq = NULL;
+	}
+
 	mutex_destroy(&ts->xbuf_lock);
 	mutex_destroy(&ts->lock);
 
@@ -2182,7 +2197,10 @@ static void nvt_ts_shutdown(struct spi_device *client)
 		NVT_ERR("Error occurred while unregistering drm_notifier.\n");
 #endif
 
-	destroy_workqueue(ts->event_wq);
+	if (ts->event_wq) {
+		destroy_workqueue(ts->event_wq);
+		ts->event_wq = NULL;
+	}
 
 #if NVT_TOUCH_ESD_PROTECT
 	if (nvt_esd_check_wq) {
