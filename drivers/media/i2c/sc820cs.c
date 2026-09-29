@@ -1,4 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
+// The streaming register sequences below are ported to Linux from the
+// OnePlus Android camera stack
+//   vendor/qcom/opensource/camera-kernel + the erhai camera devicetree
+// in
+//   github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750
+//   commit e888579 (OnePlus OPD2415_15.0.1.701(EX01))
+// which has license GPL-2.0-only
+//   (Copyright (c) Qualcomm Innovation Center, Inc. All rights reserved.);
+//   the vendor sensor library itself is not published.
+//
 /*
  * SmartSens SC820CS 8MP camera sensor — OnePlus Pad 3 (erhai) front (selfie).
  *

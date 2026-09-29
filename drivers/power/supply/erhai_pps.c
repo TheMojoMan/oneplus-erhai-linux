@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// PPS negotiation/limit logic ported to Linux from the Android charger_pd
+// PPS handling in vendor/oplus/kernel/charger/,
+// in
+//   github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750
+//   commit e888579 (OnePlus OPD2415_15.0.1.701(EX01))
+// which has license GPL-2.0-only
+//   (Copyright (C) 2020-2022 Oplus. All rights reserved.)
+//
 /*
  * erhai_pps.c — ADSP PPS fast-charge host engine (PD/PPS-only bricks).
  *

@@ -1,4 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// Ported to Linux from the OnePlus Android pogo-keyboard driver and its
+// devicetree
+//   kernel_platform/qcom/opensource/devicetree/oplus/oplus_pogo_kb/
+//   erhai-oplus-pogopin-kb-*.dtsi
+// in
+//   github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750
+//   commit e888579 (OnePlus OPD2415_15.0.1.701(EX01))
+// which has license GPL-2.0-only (OPLUS modules carry no per-file SPDX;
+//   that release has GPL-2.0 WITH Linux-syscall-note in COPYING)
+//
 /*
  * OnePlus Pad 3 (erhai) magnetic pogo keyboard driver.
  *
