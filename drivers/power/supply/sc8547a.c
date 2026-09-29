@@ -1,4 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
+// Ported to Linux from the OnePlus Android kernel driver
+//   vendor/oplus/kernel/charger/v2/voocphy/phy/oplus_sc8547a.c
+// in
+//   github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750
+//   commit e888579 (OnePlus OPD2415_15.0.1.701(EX01))
+// which has license GPL-2.0-only
+//   (Copyright (C) 2020-2022 Oplus. All rights reserved.)
+//
 /*
  * Southchip SC8547A divide-by-2 charge pump + VOOC/SVOOC PHY driver.
  *

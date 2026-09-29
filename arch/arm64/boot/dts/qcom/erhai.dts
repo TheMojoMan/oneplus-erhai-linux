@@ -1,4 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
+// Contains register/DT values ported to Linux from the OnePlus Android
+// devicetree:
+//   arch/arm64/boot/dts/qcom/* in
+//   github.com/OnePlusOSS/android_kernel_oneplus_sm8750
+//   (branch oneplus/sm8750_v_15.0.1_pad_3)
+//   plus the OPLUS overlay DTSIs under kernel_platform/qcom/opensource/
+//   devicetree/oplus/** (OPLUS chg/pogo/tp/sensor/display overlays)
+// in
+//   github.com/OnePlusOSS/android_kernel_modules_and_devicetree_oneplus_sm8750
+//   commit e888579 (OnePlus OPD2415_15.0.1.701(EX01)).
+// Those sources have license BSD-3-Clause (Qualcomm device trees) and
+// GPL-2.0-only (OPLUS overlays; that release carries GPL-2.0 WITH
+// Linux-syscall-note in COPYING).
+//
 /*
  * Copyright (c) 2026 TheMojoMan
  */
