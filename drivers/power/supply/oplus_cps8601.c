@@ -430,6 +430,7 @@ struct cps_wls_chip {
 
 	bool i2c_ready;
 	bool init_done;
+	bool removed;		/* remove() ran: async paths must bail out */
 	bool charging;
 	bool led_on;
 	bool fw_update_warned;
@@ -812,16 +813,36 @@ static int cps_pin_state_lookup(struct cps_wls_chip *chip, const char *prefix,
 		return -EINVAL;
 	snprintf(name, sizeof(name), "%s_active", prefix);
 	*active = pinctrl_lookup_state(chip->cps_pinctrl, name);
-	if (IS_ERR(*active) || !*active)
+	if (IS_ERR_OR_NULL(*active)) {
+		/*
+		 * erhai: never leave an ERR_PTR in the caller's pointer.  The
+		 * callers test these for non-NULL and hand them to
+		 * pinctrl_select_state(), which has no IS_ERR() guard -- an
+		 * ERR_PTR there is dereferenced inside pinctrl_commit_state().
+		 * A missing state means this kernel runs with a device tree
+		 * that predates the wls_* pinctrl definitions.
+		 */
+		*active = NULL;
+		dev_warn_once(chip->dev,
+			      "pinctrl state '%s' missing (DT mismatch)\n", name);
 		return -EINVAL;
+	}
 	snprintf(name, sizeof(name), "%s_sleep", prefix);
 	*sleep = pinctrl_lookup_state(chip->cps_pinctrl, name);
-	if (IS_ERR(*sleep) || !*sleep)
+	if (IS_ERR_OR_NULL(*sleep)) {
+		*sleep = NULL;
+		dev_warn_once(chip->dev,
+			      "pinctrl state '%s' missing (DT mismatch)\n", name);
 		return -EINVAL;
+	}
 	snprintf(name, sizeof(name), "%s_default", prefix);
 	*def = pinctrl_lookup_state(chip->cps_pinctrl, name);
-	if (IS_ERR(*def) || !*def)
+	if (IS_ERR_OR_NULL(*def)) {
+		*def = NULL;
+		dev_warn_once(chip->dev,
+			      "pinctrl state '%s' missing (DT mismatch)\n", name);
 		return -EINVAL;
+	}
 	return 0;
 }
 
@@ -1065,6 +1086,17 @@ struct cps_glink_aux {
 	struct cps_wls_chip *chip;
 };
 
+/*
+ * erhai: the auxiliary device needs a release callback -- auxiliary_device_init()
+ * does not provide one (only auxiliary_device_create() does), so without this the
+ * device core warns "does not have a release() function" and the container could
+ * only be freed by hand, after uninit, while the core may still reference it.
+ */
+static void cps_glink_aux_release(struct device *dev)
+{
+	kfree(container_of(to_auxiliary_dev(dev), struct cps_glink_aux, adev));
+}
+
 static int cps_glink_aux_probe(struct auxiliary_device *adev,
 			       const struct auxiliary_device_id *id)
 {
@@ -1154,7 +1186,9 @@ static int cps_glink_device_create(struct cps_wls_chip *chip)
 	ga->chip = chip;
 	ga->adev.name = "cps8601-wls";
 	ga->adev.dev.parent = &pg_pdev->dev;
+	ga->adev.dev.release = cps_glink_aux_release;
 
+	/* init failure: the release callback is NOT wired yet -> manual free */
 	ret = auxiliary_device_init(&ga->adev);
 	if (ret)
 		goto fail_free;
@@ -1163,8 +1197,13 @@ static int cps_glink_device_create(struct cps_wls_chip *chip)
 	 * "pmic_glink.cps8601-wls" id_table entry. */
 	ret = __auxiliary_device_add(&ga->adev, "pmic_glink");
 	if (ret) {
+		/*
+		 * auxiliary_device_uninit() ends in our release callback, which
+		 * frees the container -- do not kfree() it a second time here.
+		 */
 		auxiliary_device_uninit(&ga->adev);
-		goto fail_free;
+		put_device(&pg_pdev->dev);
+		return ret;
 	}
 
 	chip->glk_aux = ga;
@@ -1186,8 +1225,8 @@ static void cps_glink_destroy(struct cps_wls_chip *chip)
 		return;
 	chip->glk_aux = NULL;
 	auxiliary_device_delete(&ga->adev);
+	/* uninit -> device_put -> release callback frees the container */
 	auxiliary_device_uninit(&ga->adev);
-	kfree(ga);
 }
 
 static void cps_glink_retry_work_func(struct work_struct *work)
@@ -1196,7 +1235,7 @@ static void cps_glink_retry_work_func(struct work_struct *work)
 		container_of(work, struct cps_wls_chip, glk_retry_work.work);
 	int ret;
 
-	if (!chip || chip->glk_aux)
+	if (!chip || chip->removed || chip->glk_aux)
 		return;
 	if (!cps_hboost_glink) {
 		cps_err("hboost: rail disabled by erhai_hboost_glink=0\n");
@@ -1443,7 +1482,7 @@ static void cps_restate_work_func(struct work_struct *work)
 	struct cps_wls_chip *chip =
 		container_of(work, struct cps_wls_chip, restate_work);
 
-	if (!chip || !chip->init_done)
+	if (!chip || chip->removed || !chip->init_done)
 		return;
 
 	if (!cps_enabled) {
@@ -1470,7 +1509,7 @@ static void cps_expire_work_func(struct work_struct *work)
 	struct cps_wls_chip *chip =
 		container_of(work, struct cps_wls_chip, expire_work.work);
 
-	if (!chip)
+	if (!chip || chip->removed)
 		return;
 	if (chip->charging || chip->pen_present) {
 		cps_err("power expired (%ds) - stopping charge\n",
@@ -1560,7 +1599,7 @@ static irqreturn_t cps_wls_irq_handler(int irq, void *dev_id)
 	struct cps_wls_chip *chip = (struct cps_wls_chip *)dev_id;
 	int irq_flag;
 
-	if (!chip)
+	if (!chip || chip->removed)
 		return IRQ_HANDLED;
 	mutex_lock(&chip->irq_lock);
 	cps_wls_set_int_enable(chip);
@@ -1849,7 +1888,7 @@ static void cps_init_work_func(struct work_struct *work)
 		container_of(work, struct cps_wls_chip, init_work);
 	int ret;
 
-	if (!chip)
+	if (!chip || chip->removed)
 		return;
 
 	/* Vendor bring-up order (mirrors its init_work_func):
@@ -2169,9 +2208,22 @@ static void cps_wls_chrg_remove(struct i2c_client *client)
 
 	if (!chip)
 		return;
+	/*
+	 * erhai: tear the asynchronous side down SYNCHRONOUSLY before this
+	 * structure is freed.  Previously init_work and restate_work were
+	 * never cancelled, expire_work used the non-sync form and the threaded
+	 * IRQ (devm_request_threaded_irq, released only by devres AFTER this
+	 * callback) could still fire -- four ways to touch freed memory.  Set
+	 * the flag first so nothing re-arms while we wait.
+	 */
+	chip->removed = true;
 	cps_set_hw_idle(chip);
-	cancel_delayed_work(&chip->expire_work);
+	cancel_work_sync(&chip->init_work);
+	cancel_work_sync(&chip->restate_work);
+	cancel_delayed_work_sync(&chip->expire_work);
 	cancel_delayed_work_sync(&chip->glk_retry_work);
+	if (chip->cps_wls_irq > 0 && chip->init_done)
+		devm_free_irq(chip->dev, chip->cps_wls_irq, chip);
 	cps_glink_destroy(chip);
 	free_named_gpio(chip);
 	debugfs_remove_recursive(chip->debug_root);
