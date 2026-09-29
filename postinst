@@ -32,16 +32,82 @@ if [ "$DEB_REV" = "$FULLVER" ]; then
     DEB_REV=""
 fi
 
-# 2. Root partition label, so the cmdline follows whichever partition we booted
-#    from instead of a hard-coded /dev/sdaN (UFS enumeration order is not fixed).
-ROOT_LABEL=$(lsblk -no PARTLABEL "$(findmnt -no SOURCE /)")
-
-if [ -z "$ROOT_LABEL" ]; then
-    echo "Warning: Could not find PARTLABEL for /. Using 'linux' as fallback."
-    ROOT_LABEL="linux"
+# 2. Are we running inside a build CHROOT (build-root.sh's image build) instead
+#    of on a live system?
+#
+#    Inside a chroot NOTHING describes this machine: mountinfo and /proc/cmdline
+#    are the HOST's (findmnt -no SOURCE / answers /dev/sda18, or nothing at all
+#    when /sys is not bound), while the real ESP IS still reachable through the
+#    bind-mounted /dev.  A chrooted install could therefore write a UKI with the
+#    WRONG root= (or the `linux` fallback) onto the developer's own ESP and
+#    clobber the correct boot entry -- that is exactly what happened to
+#    7.3.0-rc5-b6.efi on 2026-09-29 (a `linux1` machine got a `linux` UKI and the
+#    owner had to patch it).
+#
+#    Detect it by comparing OUR root filesystem with the root of the namespace's
+#    PID 1: on a live system they are the same (measured: / and -L /proc/1/root
+#    both 66307:2), in a chroot they differ (66308:9975279 vs 66307:2).  An
+#    unreadable/absent /proc/1/root is treated as a chroot -- the safe direction,
+#    because that path never mounts or writes the ESP.
+IN_CHROOT=false
+ROOT_IDS="$(stat -c '%d:%i' / 2>/dev/null || true)"
+PID1_IDS="$(stat -L -c '%d:%i' /proc/1/root 2>/dev/null || true)"
+if [ "${ERHAI_FORCE_CHROOT:-0}" = 1 ]; then
+    IN_CHROOT=true
+elif [ -z "$ROOT_IDS" ] || [ -z "$PID1_IDS" ]; then
+    IN_CHROOT=true
+elif [ "$ROOT_IDS" != "$PID1_IDS" ]; then
+    IN_CHROOT=true
 fi
 
-# 3. EFI filename and kernel command line.
+# 3. Root partition label, so the cmdline follows whichever partition this kernel
+#    is installed for instead of a hard-coded /dev/sdaN (UFS enumeration order is
+#    not fixed).  Sources, in order: an explicit ERHAI_ROOT_LABEL (test/seam), the
+#    cmdline we were booted with, then the partition backing /.
+#
+#    On a LIVE system the label MUST resolve: `linux1` while installed on the
+#    development partition, `linux` on the shipped one.  Guessing is not allowed
+#    -- a wrong root= makes the boot entry unbootable, which is worse than an
+#    install that does not offer an entry at all.
+if [ "$IN_CHROOT" = true ]; then
+    ROOT_LABEL="${ERHAI_ROOT_LABEL:-}"
+else
+    ROOT_LABEL="${ERHAI_ROOT_LABEL:-$(tr ' ' '\n' < /proc/cmdline 2>/dev/null \
+                     | sed -n 's/^root=PARTLABEL=//p' | head -n1)}"
+    if [ -z "$ROOT_LABEL" ]; then
+        ROOT_LABEL="$(lsblk -no PARTLABEL "$(findmnt -no SOURCE /)" 2>/dev/null | head -n1)"
+    fi
+fi
+
+if [ "$IN_CHROOT" = true ]; then
+    # Build chroot: the image is built for build-root.sh's own root partition,
+    # PARTLABEL=linux.  Only /boot is written below (step 7) -- never the ESP.
+    [ -n "$ROOT_LABEL" ] || ROOT_LABEL="linux"
+    echo "Notice: build chroot detected (the ESP belongs to the machine running"
+    echo "        the build) -- the UKI is written to /boot only, root=$ROOT_LABEL."
+elif [ -z "$ROOT_LABEL" ]; then
+    echo "Error: cannot determine the root partition label of this system" >&2
+    echo "       (neither the cmdline nor findmnt/lsblk answered). Not guessing:" >&2
+    echo "       no UKI written, ESP untouched." >&2
+    exit 0
+elif [ ! -e "/dev/disk/by-partlabel/$ROOT_LABEL" ]; then
+    echo "Error: root label '$ROOT_LABEL' has no /dev/disk/by-partlabel entry," >&2
+    echo "       so a UKI built here could not find its root at boot." >&2
+    echo "       No UKI written, ESP untouched." >&2
+    exit 0
+fi
+
+# 4. EFI filename and kernel command line.
+#
+#    The name carries the root partition as well as the build revision, so the
+#    rEFInd menu is unambiguous when several kernels sit on one ESP:
+#
+#      installed from the linux1 partition (development)  -> <kver>-l1-b<N>.efi
+#      installed from the linux  partition (shipped image) -> <kver>-b<N>.efi
+#      no +b<N> revision (base image build)                -> <kver>-<root label>.efi
+#
+#    The postrm rebuilds this EXACTLY (it must, or removal cannot find the file),
+#    so any change here has to be mirrored there.
 #
 #    usbcore.autosuspend=-1 is load-bearing, not tuning: with autosuspend on,
 #    USB-OTG HID devices enumerate, work for a few seconds and then die in an
@@ -50,8 +116,14 @@ fi
 #    Do NOT add fw_devlink=permissive here. It lets DSI probe ahead of its
 #    regulators, which turns into a racy PLL-lock failure and a boot that wedges
 #    before the rootfs.
+if [ "$ROOT_LABEL" = "linux1" ]; then
+    ROOT_TAG="-l1"
+else
+    ROOT_TAG=""
+fi
+
 if [ -n "$DEB_REV" ]; then
-    OUTPUT_EFI="${CLEAN_KVER}-b${DEB_REV}.efi"
+    OUTPUT_EFI="${CLEAN_KVER}${ROOT_TAG}-b${DEB_REV}.efi"
 else
     OUTPUT_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
 fi
@@ -65,19 +137,19 @@ DTB_FILE="$BOOT_DIR/dtb-$KVER"
 
 UKIFY_BIN=$(which ukify)
 
-# 4. Module dependencies for the new kernel.
+# 5. Module dependencies for the new kernel.
 if [ -d "/lib/modules/$KVER" ] && command -v depmod > /dev/null; then
     depmod -a "$KVER" || true
 fi
 
-# 5. Print full details in the requested format
+# 6. Print full details in the requested format
 echo "Post-install: Generating UKI..."
 echo " - Kernel:  $KERNEL_IMG"
 echo " - DTB:     $DTB_FILE"
 echo " - Output:  $OUTPUT_EFI"
 echo " - Cmdline: $CMDLINE"
 
-# 6. Build the UKI. The DTB is always embedded: Mu-erhai hands us no device
+# 7. Build the UKI. The DTB is always embedded: Mu-erhai hands us no device
 #    tree, so a kernel without one gets nowhere.
 if [ -f "$KERNEL_IMG" ] && [ -x "$UKIFY_BIN" ]; then
     "$UKIFY_BIN" build \
@@ -91,38 +163,79 @@ else
     exit 0
 fi
 
-# 7. Install it on the ESP. /boot/efi is normally NOT mounted (that fstab entry
-#    is commented out), so mount the ESP by partlabel here.
-ESP_PART="/dev/disk/by-partlabel/esp"
-MNT_TMP=$(mktemp -d)
-DEST_DIR="$MNT_TMP/EFI/ubuntu"
-MOUNT_SUCCESS=false
-
-if [ -b "$ESP_PART" ]; then
-    for i in 1 2 3; do
-        echo "Attempt $i: Mounting ESP ($ESP_PART)..."
-        if mount "$ESP_PART" "$MNT_TMP" 2>/dev/null; then
-            MOUNT_SUCCESS=true
-            break
-        fi
-        sleep 1
-    done
-fi
-
-if [ "$MOUNT_SUCCESS" = true ]; then
-    mkdir -p "$DEST_DIR"
-    cp "$OUTPUT_EFI" "$DEST_DIR/"
-    sync
-    echo "Success: $OUTPUT_EFI copied to ESP (EFI/ubuntu)."
-    echo "Pick it in the rEFInd menu on the next boot."
-    umount "$MNT_TMP"
-else
-    echo "Notice: ESP not available or mount failed. Copied .efi file to /boot/"
+# 8. Publish the UKI.
+#
+#    LIVE system: put it on the ESP, where rEFInd finds it. /boot/efi is normally
+#    NOT mounted (that fstab entry is commented out), so mount the ESP by
+#    partlabel here.  ERHAI_ESP_PART is a test seam (tmp/postrm-test/ points it
+#    at a loop image), production uses the by-partlabel link.
+#
+#    CHROOT: the ESP is NEVER touched.  The entries there belong to the machine
+#    that is running the build, and the image being built gets its boot entry
+#    from the installer's own ESP tree -- so the UKI stays in /boot/.
+#
+#    THIS SCRIPT MUST NEVER DELETE AN .efi.  An install only adds its own entry;
+#    every older revision stays on the ESP as a rollback entry (rEFInd lists
+#    them all).  Removing a boot entry is the postrm's job, and only for the
+#    package version being removed.
+if [ "$IN_CHROOT" = true ]; then
+    # Build chroot: /boot only, the ESP is never touched (see step 2).
     cp "$OUTPUT_EFI" /boot/
+    sync
+    echo "Notice: build chroot -- $OUTPUT_EFI copied to /boot/ (ESP untouched)."
+else
+    ESP_PART="${ERHAI_ESP_PART:-/dev/disk/by-partlabel/esp}"
+    ESP_REAL="$(readlink -f "$ESP_PART" 2>/dev/null || true)"
+
+    # Reuse an ESP that is ALREADY mounted somewhere (e.g. /boot/efi): a block
+    # device has ONE superblock, so mounting it a second time either fails or
+    # comes up READ-ONLY and the copy would be skipped without a trace.
+    ESP_TARGET=""
+    for src in "$ESP_REAL" "$ESP_PART"; do
+        [ -n "$src" ] || continue
+        ESP_TARGET="$(findmnt -n -o TARGET --source "$src" 2>/dev/null | head -n1 || true)"
+        [ -n "$ESP_TARGET" ] && break
+    done
+
+    MNT_TMP=""
+    if [ -z "$ESP_TARGET" ] && [ -b "$ESP_PART" ]; then
+        MNT_TMP="$(mktemp -d)"
+        for i in 1 2 3; do
+            echo "Attempt $i: Mounting ESP ($ESP_PART)..."
+            if mount "$ESP_PART" "$MNT_TMP" 2>/dev/null; then
+                ESP_TARGET="$MNT_TMP"
+                break
+            fi
+            sleep 1
+        done
+        if [ -z "$ESP_TARGET" ]; then
+            rmdir "$MNT_TMP" 2>/dev/null || true
+            MNT_TMP=""
+        fi
+    fi
+
+    if [ -n "$ESP_TARGET" ]; then
+        DEST_DIR="$ESP_TARGET/EFI/ubuntu"
+        mkdir -p "$DEST_DIR"
+        if cp "$OUTPUT_EFI" "$DEST_DIR/"; then
+            sync
+            echo "Success: $OUTPUT_EFI copied to ESP ($ESP_TARGET/EFI/ubuntu)."
+            echo "Pick it in the rEFInd menu on the next boot."
+        else
+            echo "Error: could not write to the ESP ($ESP_TARGET is read-only?)." >&2
+            cp "$OUTPUT_EFI" /boot/
+        fi
+        if [ "$ESP_TARGET" = "$MNT_TMP" ] && [ -n "$MNT_TMP" ]; then
+            umount "$MNT_TMP"
+        fi
+        [ -n "$MNT_TMP" ] && rmdir "$MNT_TMP" 2>/dev/null || true
+    else
+        echo "Notice: ESP not available or mount failed. Copied .efi file to /boot/"
+        cp "$OUTPUT_EFI" /boot/
+    fi
 fi
 
-# 8. Cleanup
-rm -rf "$MNT_TMP"
+# 9. Cleanup: the UKI is not kept in the CWD (it lives on the ESP or in /boot).
 rm -f "$OUTPUT_EFI"
 
 exit 0
