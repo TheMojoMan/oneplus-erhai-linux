@@ -325,6 +325,28 @@ static const char * const sc8547_gauge_names[] = {
 #define SC8547_SLAVE_DISENGAGE_IBUS_MA	1200	/* total bus below this -> drop slave */
 
 /*
+ * Settle grace + drop debounce (2026-10-01, bench-measured on Marcos' pad).
+ * The adapter's output is shared the instant the slave closes, so the master's
+ * own half falls to the slave's share BEFORE the slave ramps off its own
+ * soft-start; the slave's ADC can also still read its idle value (~20 mA) on
+ * the first tick after the enable.  A one-tick "total low" test therefore
+ * drops a slave that was about to share: measured 22:36 — engage at master
+ * 1781 mA, drop one tick later at "total 1044 mA", pack stuck at 58 %; and
+ * 22:55 after a re-plug, the same pad held master 1061 + slave 1008 mA = 2.4 A
+ * and charged (63->64 %).  So never judge the drop inside slave_settle_ms of
+ * the engage, and require slave_drop_ticks consecutive low totals after that.
+ */
+static unsigned int slave_settle_ms = 4000;
+module_param(slave_settle_ms, uint, 0644);
+MODULE_PARM_DESC(slave_settle_ms,
+		 "dual-CP: never judge the slave drop inside this window after the engage (ms, default 4000, 0 = old behaviour)");
+
+static unsigned int slave_drop_ticks = 3;
+module_param(slave_drop_ticks, uint, 0644);
+MODULE_PARM_DESC(slave_drop_ticks,
+		 "dual-CP: consecutive low total-bus ticks before dropping the slave (default 3, 1 = old behaviour)");
+
+/*
  * Auto charge-manager (fastchg_auto) policy bounds. On charger attach the auto
  * path arms the PHY in observation, waits for the adapter to identify as a
  * genuine (S)VOOC adapter, checks battery preconditions, then steps the CC
@@ -473,6 +495,9 @@ struct sc8547a_device {
 	int			auto_ident_retries;	/* identify re-arms on this plug */
 	bool			vooc_saw_any;	/* any decodable VOOC frame this attempt */
 	unsigned long		auto_deliver_since;	/* jiffies of last (re)escalation */
+	/* --- dual-CP slave load-sharing state --- */
+	unsigned long		slave_on_since;	/* jiffies the slave last engaged (0 = n/a) */
+	unsigned int		slave_low_cnt;	/* consecutive low-total ticks since then */
 };
 
 /*
@@ -2154,6 +2179,8 @@ static void sc8547_attach_work(struct work_struct *work)
 		/* attach edge: start settle timer, arm once it expires */
 		sc->arm_at = jiffies + msecs_to_jiffies(SC8547_ATTACH_SETTLE_MS);
 		sc->auto_armed = false;
+		sc->slave_low_cnt = 0;
+		sc->slave_on_since = jiffies;	/* fresh plug: full settle grace */
 		/* Hands-free: re-arm the auto charge-manager on every fresh attach. */
 		sc->fastchg_auto = true;
 		if (sc->fastchg_auto) {
@@ -2351,16 +2378,39 @@ static void sc8547_attach_work(struct work_struct *work)
 			if (!slave_on && sc->vooc_vbus_status == SC_VBUS_NORMAL &&
 			    cibus >= SC8547_SLAVE_ENGAGE_IBUS_MA) {
 				sc8547_slave_cp_enable(sc, true);
+				sc->slave_on_since = jiffies;
+				sc->slave_low_cnt = 0;
 				dev_info(sc->dev,
 					 "dual-CP: engaging slave under load (master %d mA vbus %d mV vbat %d mV)\n",
 					 cibus, vbus, cvbat);
+			} else if (slave_on && slave_settle_ms &&
+				   jiffies - sc->slave_on_since <
+					   msecs_to_jiffies(slave_settle_ms)) {
+				/*
+				 * Settling: the adapter's output is already
+				 * split, but the slave has not ramped yet (its
+				 * ADC may still read its idle ~20 mA).  Feed
+				 * it; never judge the drop inside this window.
+				 */
+				sc8547_slave_feed_wd();
+				dev_dbg(sc->dev,
+					"dual-CP: slave settling (%u ms on, total %d mA)\n",
+					jiffies_to_msecs(jiffies - sc->slave_on_since),
+					cibus_total);
 			} else if (slave_on &&
 				   cibus_total < SC8547_SLAVE_DISENGAGE_IBUS_MA) {
-				sc8547_slave_cp_enable(sc, false);
-				dev_info(sc->dev,
-					 "dual-CP: dropping slave (total %d mA low)\n",
-					 cibus_total);
+				if (++sc->slave_low_cnt < slave_drop_ticks) {
+					sc8547_slave_feed_wd();
+				} else {
+					sc8547_slave_cp_enable(sc, false);
+					sc->slave_low_cnt = 0;
+					dev_info(sc->dev,
+						 "dual-CP: dropping slave (total %d mA low for %u ticks, %u ms on)\n",
+						 cibus_total, slave_drop_ticks,
+						 jiffies_to_msecs(jiffies - sc->slave_on_since));
+				}
 			} else if (slave_on) {
+				sc->slave_low_cnt = 0;
 				sc8547_slave_feed_wd();			/* keep the slave alive */
 			}
 
