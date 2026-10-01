@@ -403,11 +403,15 @@ static int erhai_otg_gauge_soc(void)
  * request layout as a SET — see erhai_otg_set_msg). The reply echoes the
  * property and carries its value plus a ret_code, decoded by the callback
  * into otg->error / otg->resp_property / otg->resp_value. Used by the
- * ADSP-gauge battery reads on gauge-absent SKUs. Returns the raw value, or
- * a negative errno. Serialized by otg->lock like every other ADSP
- * round-trip (the firmware stops responding to concurrency).
+ * ADSP-gauge battery reads on gauge-absent SKUs. Serialized by otg->lock like
+ * every other ADSP round-trip (the firmware stops responding to concurrency).
+ *
+ * The value is handed back through *out as a SIGNED 32-bit number and the real
+ * error through the return code, so a caller can accept a negative reading
+ * (the pack current is signed) without confusing it with an errno.
  */
-static int erhai_otg_get_op(struct erhai_otg *otg, u32 opcode, u32 property)
+static int erhai_otg_get_op_s32(struct erhai_otg *otg, u32 opcode, u32 property,
+				int *out)
 {
 	struct erhai_otg_set_msg msg = {
 		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
@@ -448,15 +452,31 @@ static int erhai_otg_get_op(struct erhai_otg *otg, u32 opcode, u32 property)
 		return -ETIMEDOUT;
 	}
 
-	if (otg->error)
+	if (otg->error) {
 		ret = otg->error;
-	else if (otg->resp_property == property)
-		ret = (int)otg->resp_value;
-	else
+	} else if (otg->resp_property == property) {
+		*out = (int)otg->resp_value;
+		ret = 0;
+	} else {
 		ret = -ENODATA;
+	}
 
 	mutex_unlock(&otg->lock);
 	return ret;
+}
+
+/*
+ * Convenience wrapper for callers whose property is an unsigned magnitude
+ * (SoC, voltage, temperature, status): returns the raw value, or a negative
+ * errno. Do NOT use it for a signed property such as the pack current — a
+ * negative reading would be mistaken for an error.
+ */
+static int erhai_otg_get_op(struct erhai_otg *otg, u32 opcode, u32 property)
+{
+	int v = 0;
+	int ret = erhai_otg_get_op_s32(otg, opcode, property, &v);
+
+	return ret ? ret : v;
 }
 
 /* SoC percent (raw) from the ADSP gauge (battmgr BATT_CAPACITY GET). */
@@ -1111,12 +1131,15 @@ static int erhai_otg_bat_get_property(struct power_supply *psy,
 		val->intval = ret;	/* µV assumed (sm8350 family) */
 		return 0;
 	case POWER_SUPPLY_PROP_CURRENT_NOW:
-		ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET,
-				       BC_BATT_CURR_NOW);
-		if (ret < 0)
-			return ret;
-		val->intval = ret;	/* µA assumed (sm8350 family) */
-		return 0;
+		/*
+		 * The ADSP gauge reports this as a SIGNED current (µA; charge
+		 * positive, discharge negative), so a negative value is a valid
+		 * reading.  Read it through the signed getter: the plain getter
+		 * would return the negative value as an errno and the read would
+		 * fail whenever the net pack current was <= 0 (BUG-009).
+		 */
+		return erhai_otg_get_op_s32(otg, BC_BATTERY_PROPERTY_GET,
+					    BC_BATT_CURR_NOW, &val->intval);
 	case POWER_SUPPLY_PROP_TEMP:
 		ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET,
 				       BC_BATT_TEMP);
