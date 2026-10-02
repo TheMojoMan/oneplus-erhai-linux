@@ -2005,7 +2005,7 @@ static void cps_init_work_func(struct work_struct *work)
 	}
 
 	chip->init_done = true;
-	cps_log("CPS8601 wireless pen charger up (chipid 0x%x fw %u.%u)\n",
+	cps_log("CPS8601 wireless pen charger up (chipid 0x%x fw %u.%02x)\n",
 		chip->chip_id, chip->fw_version >> 8, chip->fw_version & 0xff);
 
 	if (chip->is_supply_by_hboost) {
