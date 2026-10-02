@@ -156,6 +156,14 @@
 #define GP_OFF			3
 
 #define TX_WAKEUP_WAIT_MS	2500
+/* erhai: assert the wake (sleep) line BEFORE sw_en -- the chip latches its
+ * wake state on the sw_en rising edge (measured 2026-10-02: wake-then-power
+ * = 20/20 i2c ACKs, power-then-wake(-200 ms) = flaky, and a single access at
+ * the wake edge never answered).  The first chip access is also retried with
+ * a sw_en power cycle, the way the vendor retries its fw flow 5 times. */
+#define CPS_WAKE_LEAD_MS	20
+#define CPS_BRINGUP_RETRY	5
+#define CPS_BRINGUP_CYCLE_MS	50
 
 /* cps8601 MCU boot-firmware protocol (32-bit window, regmap32) */
 #define CPS_SRAM_SENDSZ		32
@@ -1896,7 +1904,7 @@ static void cps_init_work_func(struct work_struct *work)
 {
 	struct cps_wls_chip *chip =
 		container_of(work, struct cps_wls_chip, init_work);
-	int ret;
+	int ret, bringup_try;
 
 	if (!chip || chip->removed)
 		return;
@@ -1932,14 +1940,35 @@ static void cps_init_work_func(struct work_struct *work)
 		}
 	}
 
-	/* WPT subsystem on; the MCU ROM bootloader listens on the 32-bit
-	 * window as soon as the supply settles. */
+	/* Wake FIRST, then power -- the chip latches its wake state on the
+	 * sw_en rising edge, so a wake line raised after power (this driver
+	 * used to do it 200 ms later) leaves its i2c/bootloader window shut
+	 * and every access NACKs.  Measured on erhai 2026-10-02 by driving
+	 * the same five lines from userspace (tmp/pen-live-probe.c): wake
+	 * high + sw_en 20 ms later = 20/20 i2c ACKs from +50 ms on, while
+	 * sw_en first with wake 200 ms later = flaky (14/20, the first
+	 * accesses always NACKed).  The vendor asserts a wake pulse and
+	 * waits up to TX_WAKEUP_WAIT_MS before its first access, and retries
+	 * its whole fw flow up to MAX_RETRY times. */
+	cps_gpio_set_value(chip, GP_SLEEP, 1);
+	msleep(CPS_WAKE_LEAD_MS);
 	cps_gpio_set_value(chip, GP_SW_EN, 1);
 	msleep(200);
-	cps_gpio_set_value(chip, GP_SLEEP, 1);
 
-	/* Boot the chip's firmware (bootloader + possibly the MTP app). */
-	ret = cps_wls_fw_bring_up(chip);
+	/* Boot the chip's firmware (bootloader + possibly the MTP app).  The
+	 * window can still need a moment, so retry with a sw_en power cycle
+	 * (wake stays high throughout) before giving up. */
+	for (bringup_try = 0; bringup_try < CPS_BRINGUP_RETRY; bringup_try++) {
+		ret = cps_wls_fw_bring_up(chip);
+		if (ret == CPS_WLS_SUCCESS)
+			break;
+		cps_err("chip firmware bring-up failed (%d), retry %d/%d\n",
+			ret, bringup_try + 1, CPS_BRINGUP_RETRY);
+		cps_gpio_set_value(chip, GP_SW_EN, 0);
+		msleep(CPS_BRINGUP_CYCLE_MS);
+		cps_gpio_set_value(chip, GP_SW_EN, 1);
+		msleep(200);
+	}
 	if (ret != CPS_WLS_SUCCESS) {
 		cps_err("chip firmware bring-up failed (%d)\n", ret);
 		goto init_fail;
