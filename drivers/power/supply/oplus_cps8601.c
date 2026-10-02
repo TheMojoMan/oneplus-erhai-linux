@@ -1592,10 +1592,18 @@ static void cps_wls_tx_irq_handler(struct cps_wls_chip *chip, int irq_flag)
 		chip->charging = false;
 		chip->charge_allow = 0;
 		cancel_delayed_work(&chip->expire_work);
-		cps_set_hw_idle(chip);
 		cps_send_pencil_uevent(chip, false);
 		cps_reset_chip_status(chip);
 		cps_set_boost_and_allow(chip, false);
+		/* Re-arm for the next pen instead of powering the chip down.
+		 * The vendor's RX_REMOVED path keeps sw_en asserted and re-allows
+		 * charging (cps_set_charge_allow(chip, true) -> off_state = 0);
+		 * the old cps_set_hw_idle() here drove sw_en low, which removed
+		 * the WPT supply and left the coil dead for the rest of the
+		 * session.  Measured on +b12: the boot-time RX_REMOVED left GPIO
+		 * 105/56/107 stuck low and every later pen placement was missed. */
+		cps_set_hw_state(chip, false);
+		chip->charge_allow = 1;
 		cps_log("pen removed\n");
 	}
 
@@ -1989,9 +1997,17 @@ static void cps_init_work_func(struct work_struct *work)
 		goto init_fail;
 	}
 
-	cps_set_hw_state(chip, false);
+	/* Arm TX mode and the interrupt source while the WAKE line is still
+	 * asserted -- it is dropped at the very end of this function (vendor
+	 * order: GP_0 high through tx-mode/int-enable, released only after the
+	 * hardware reset).  Releasing it first shuts the chip's i2c window and
+	 * both calls NACK: the +b12 boot log shows "i2c read reg 0xb error -6"
+	 * (CMD) and "i2c write reg 0x5 error -6" (INT_EN) right after
+	 * cps_set_hw_state() pulled GP_SLEEP low, so TX mode and the interrupt
+	 * source were never actually enabled. */
 	cps_wls_enable_tx_mode(chip);
 	cps_wls_set_int_enable(chip);
+	cps_set_hw_state(chip, false);
 
 	if (chip->cps_wls_irq) {
 		ret = devm_request_threaded_irq(chip->dev, chip->cps_wls_irq, NULL,
