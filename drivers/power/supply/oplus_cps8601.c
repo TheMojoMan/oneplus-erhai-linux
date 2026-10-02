@@ -957,18 +957,35 @@ static void cps_gpio_set_value(struct cps_wls_chip *chip, int gp_num, int value)
 		pinctrl_select_state(chip->cps_pinctrl, st);
 }
 
+/* Charge-allow / off-state line (vendor cps_set_charge_allow()): LOW means
+ * charging is permitted, HIGH means disabled.  The vendor leaves it ALLOWED
+ * (0) both while charging and while idly scanning for a pen -- only a real
+ * disable (OCP / EPT / timeout) asserts it.  Measured on the +b13 capture
+ * (2026-10-02): our old mapping drove it HIGH whenever we were not actively
+ * charging, so the chip idled with off_state = 1 ("not allowed"), never
+ * engaged the coil (no RX_ATTACH) and raised RX_REMOVED continuously at
+ * ~133/s.  Android's idle capture on this pad is
+ * gp0=0 gp1=1 gp2=1 gp3=0 (sleep / scan / sw_en / off). */
+static void cps_set_charge_allow(struct cps_wls_chip *chip, bool allow)
+{
+	if (gpio_is_valid(chip->wls_off_state_gpio))
+		gpio_direction_output(chip->wls_off_state_gpio, allow ? 0 : 1);
+	chip->charge_allow = allow ? 1 : 0;
+}
+
 static void cps_set_hw_state(struct cps_wls_chip *chip, bool charging)
 {
-	/* sw_en powers the WPT subsystem; scan tells the chip to ping; the
-	 * off-state line marks "not charging" and the sleep line stays low. */
+	/* sw_en powers the WPT subsystem; scan tells the chip whether to ping;
+	 * the sleep line stays low.  charge-allow (off_state) is left PERMITTED
+	 * here -- see cps_set_charge_allow(); the vendor does the same at the
+	 * end of its bring-up and after RX_REMOVED. */
 	if (gpio_is_valid(chip->wls_sw_en_gpio))
 		gpio_direction_output(chip->wls_sw_en_gpio, 1);
 	if (gpio_is_valid(chip->wls_scan_gpio))
 		gpio_direction_output(chip->wls_scan_gpio, charging ? 0 : 1);
-	if (gpio_is_valid(chip->wls_off_state_gpio))
-		gpio_direction_output(chip->wls_off_state_gpio, charging ? 0 : 1);
 	if (gpio_is_valid(chip->wls_sleep_gpio))
 		gpio_direction_output(chip->wls_sleep_gpio, 0);
+	cps_set_charge_allow(chip, true);
 }
 
 static void cps_set_hw_idle(struct cps_wls_chip *chip)
@@ -1485,12 +1502,11 @@ static int cps_set_boost_and_allow(struct cps_wls_chip *chip, bool attach)
 static void cps_disable_charge(struct cps_wls_chip *chip, int reason)
 {
 	chip->charging = false;
-	chip->charge_allow = 0;
 	chip->power_disable_reason = reason;
 	if (gpio_is_valid(chip->wls_scan_gpio))
 		gpio_direction_output(chip->wls_scan_gpio, 1);
-	if (gpio_is_valid(chip->wls_off_state_gpio))
-		gpio_direction_output(chip->wls_off_state_gpio, 1);
+	/* a real disable asserts charge-allow (off_state = 1) */
+	cps_set_charge_allow(chip, false);
 	cps_wls_disable_tx_mode(chip);
 	cps_set_boost_and_allow(chip, false);
 }
@@ -1590,7 +1606,6 @@ static void cps_wls_tx_irq_handler(struct cps_wls_chip *chip, int irq_flag)
 		chip->pen_present = 0;
 		chip->pen_status = PEN_STATUS_FAR;
 		chip->charging = false;
-		chip->charge_allow = 0;
 		cancel_delayed_work(&chip->expire_work);
 		cps_send_pencil_uevent(chip, false);
 		cps_reset_chip_status(chip);
@@ -1601,9 +1616,11 @@ static void cps_wls_tx_irq_handler(struct cps_wls_chip *chip, int irq_flag)
 		 * the old cps_set_hw_idle() here drove sw_en low, which removed
 		 * the WPT supply and left the coil dead for the rest of the
 		 * session.  Measured on +b12: the boot-time RX_REMOVED left GPIO
-		 * 105/56/107 stuck low and every later pen placement was missed. */
+		 * 105/56/107 stuck low and every later pen placement was missed.
+		 * cps_set_hw_state() now also leaves charge-allow PERMITTED
+		 * (off_state = 0) -- without that the +b13 chip idled in the
+		 * "not allowed" state and stormed RX_REMOVED (2026-10-02). */
 		cps_set_hw_state(chip, false);
-		chip->charge_allow = 1;
 		cps_log("pen removed\n");
 	}
 
@@ -2030,9 +2047,11 @@ static void cps_init_work_func(struct work_struct *work)
 			chip->hboost_volt, chip->hboost_status);
 		cps_gpio_set_value(chip, GP_SLEEP, 0);
 		cps_wls_hw_reset(chip);
-	} else {
-		chip->charge_allow = 1;
 	}
+	/* Charge-allow is left PERMITTED at the end of bring-up, exactly like
+	 * the vendor (cps_set_charge_allow(chip, true) -> off_state = 0), so
+	 * the coil may engage when a pen arrives. */
+	cps_set_charge_allow(chip, true);
 	return;
 
 init_fail:
