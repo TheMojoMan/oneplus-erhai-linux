@@ -2697,18 +2697,29 @@
 };
 
 /* ---------------------------------------------------------------------------
- * Pen wireless charger — CPS8601 WPT (Qi) TX on the qupv3 hub i2c 990000
- * (Android qupv3_hub_i2c3 == mainline i2c_hub_4) at addr 0x41, the tablet's
- * coil that charges the "wireless pen".  Standalone driver
+ * Pen wireless charger — CPS8601 WPT (Qi) TX on the qupv3 hub i2c @98c000
+ * (= mainline i2c_hub_3, QUP_CORE_0 SE3, gpio70/71 "i2chub0_se3") at addr
+ * 0x41, the tablet's coil that charges the "wireless pen".  Standalone driver
  * drivers/power/supply/oplus_cps8601.c (CONFIG_CHARGER_OPLUS_CPS8601).
  * GPIOs and thresholds taken from the Android OPlus DTS (oplus-chg-erhai):
  * int gpio172 (falling), sw_en 105, sleep 106, scan 56, off_state 107;
- * the pen is supplied by the H-BoOST rail (7 V idle / 10 V while attached)
+ * the pen is supplied by the H-Boost rail (7 V idle / 10 V while attached)
  * over pmic_glink (owner 32785, opcode 0x10007).
+ *
+ * 2026-10-02 bus fix (OxygenOS 16 ground truth, tmp/pen-oxygenos/): the chip
+ * previously sat on i2c_hub_4 (@990000) — the AW88261 speaker-amp bus.  The
+ * driver bound (DT-declared) but EVERY transfer NACKed (-6 / ENXIO, "i2c read
+ * reg 0x2 error -6"): the chip was simply not on that bus.  Stock Android
+ * puts it on 9c0000.qupv3_i2c_geni_se/98c000.i2c (Android i2c-13, "13-0041")
+ * whose QUP carries NO other device, while the amps are on Android buses 4/9.
+ * i2c_hub_3 was unused in this DTS; the chip's own wake/power lines are the
+ * same &tlmm GPIOs below (unchanged).
  * ---------------------------------------------------------------------------
  */
-&i2c_hub_4 {
+&i2c_hub_3 {
 	status = "okay";
+	/* Android runs 98c000.i2c at 400 kHz (dmesg ground truth). */
+	clock-frequency = <400000>;
 
 	cps8601: pencil-wireless-charger@41 {
 		compatible = "oplus,wls-charger-cps8601";
