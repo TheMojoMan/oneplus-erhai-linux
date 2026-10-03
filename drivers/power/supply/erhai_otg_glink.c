@@ -408,7 +408,8 @@ static int erhai_otg_gauge_soc(void)
  *
  * The value is handed back through *out as a SIGNED 32-bit number and the real
  * error through the return code, so a caller can accept a negative reading
- * (the pack current is signed) without confusing it with an errno.
+ * (the pack current is signed; in the ADSP's vendor convention it is NEGATIVE
+ * while charging) without confusing it with an errno.
  */
 static int erhai_otg_get_op_s32(struct erhai_otg *otg, u32 opcode, u32 property,
 				int *out)
@@ -1130,16 +1131,36 @@ static int erhai_otg_bat_get_property(struct power_supply *psy,
 			return ret;
 		val->intval = ret;	/* µV assumed (sm8350 family) */
 		return 0;
-	case POWER_SUPPLY_PROP_CURRENT_NOW:
+	case POWER_SUPPLY_PROP_CURRENT_NOW: {
 		/*
-		 * The ADSP gauge reports this as a SIGNED current (µA; charge
-		 * positive, discharge negative), so a negative value is a valid
-		 * reading.  Read it through the signed getter: the plain getter
-		 * would return the negative value as an errno and the read would
-		 * fail whenever the net pack current was <= 0 (BUG-009).
+		 * The ADSP gauge speaks the VENDOR (Android) convention: the NET
+		 * pack current is NEGATIVE while the pack is charging (Android's
+		 * healthd and its battery psy agree).  Linux userspace expects
+		 * the OPPOSITE sign (positive = current INTO the pack, negative
+		 * = out of it), and upower is strict about it:
+		 * up_device_battery_refresh() forces
+		 * UP_DEVICE_STATE_DISCHARGING whenever current_now < 0, even
+		 * when `status` reads "Charging" (see upower's
+		 * src/linux/up-device-supply-battery.c).  That is why GNOME
+		 * showed a discharging battery on a QBG pad that was actually
+		 * fast-charging, and why upower reported no charge rate.
+		 *
+		 * The in-kernel erhai_pps engine wants the Linux sign too: it
+		 * rejects a negative current as -EIO (its battery read fails
+		 * whenever the pack charges) and its pack-stall watchdog trips
+		 * on `ibat < 100 mA`.  So read the raw ADSP value through the
+		 * signed getter (BUG-009: the plain getter returned <= 0 as an
+		 * errno) and NEGATE it, making this psy expose the standard
+		 * Linux sign.  This psy only exists on QBG (gauge-absent) SKUs
+		 * — the TI bq27z561 path is untouched.
 		 */
-		return erhai_otg_get_op_s32(otg, BC_BATTERY_PROPERTY_GET,
-					    BC_BATT_CURR_NOW, &val->intval);
+		ret = erhai_otg_get_op_s32(otg, BC_BATTERY_PROPERTY_GET,
+					   BC_BATT_CURR_NOW, &val->intval);
+		if (ret < 0)
+			return ret;
+		val->intval = -val->intval;
+		return 0;
+	}
 	case POWER_SUPPLY_PROP_TEMP:
 		ret = erhai_otg_get_op(otg, BC_BATTERY_PROPERTY_GET,
 				       BC_BATT_TEMP);
