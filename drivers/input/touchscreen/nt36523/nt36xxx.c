@@ -67,6 +67,15 @@ MODULE_PARM_DESC(pen_mode_on_cmd, "NT36536 extended pen-mode sub-command (0x10 h
 static uint pen_dump;
 module_param(pen_dump, uint, 0644);
 MODULE_PARM_DESC(pen_dump, "non-zero: print the raw 14-byte pen report block whenever it changes");
+static uint pen_dump_all;
+module_param(pen_dump_all, uint, 0644);
+MODULE_PARM_DESC(pen_dump_all, "non-zero: print the WHOLE event frame (0..79) whenever any byte changes");
+/*
+ * set on every pen-mode arm so the NEXT frame prints the pen block even when it
+ * did not change — otherwise a capture of a run where the IC never sees a pen
+ * contains no "pen buf" line at all and the IC's status stays invisible.
+ */
+static u8 pen_dump_force;
 static uint pen_resend;
 static int nvt_pen_resend_set(const char *val, const struct kernel_param *kp);
 static const struct kernel_param_ops nvt_pen_resend_ops = {
@@ -1325,12 +1334,37 @@ static irqreturn_t nvt_ts_work_func(int irq, void *data)
 		if (pen_dump) {
 			static uint8_t pen_dump_last[PEN_DATA_LEN];
 
-			if (memcmp(pen_dump_last, &point_data[66], PEN_DATA_LEN)) {
+			if (pen_dump_force || memcmp(pen_dump_last, &point_data[66], PEN_DATA_LEN)) {
+				pen_dump_force = 0;
 				memcpy(pen_dump_last, &point_data[66], PEN_DATA_LEN);
 				NVT_LOG("pen buf %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
 					point_data[66], point_data[67], point_data[68], point_data[69], point_data[70],
 					point_data[71], point_data[72], point_data[73], point_data[74], point_data[75],
 					point_data[76], point_data[77], point_data[78], point_data[79]);
+			}
+		}
+
+		/*
+		 * erhai: full-frame raw dump on ANY byte change — tells "the IC reports
+		 * no pen at the offsets we expect" apart from "the pen block sits
+		 * somewhere else in the frame".  Enable only while probing a stylus:
+		 * a moving finger changes this every frame.
+		 */
+		if (pen_dump_all) {
+			static uint8_t raw_last[POINT_DATA_LEN + PEN_DATA_LEN];
+
+			if (memcmp(raw_last, point_data, sizeof(raw_last))) {
+				int r;
+
+				memcpy(raw_last, point_data, sizeof(raw_last));
+				for (r = 0; r < (int)sizeof(raw_last); r += 20)
+					NVT_LOG("raw %02d-%02d %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
+						r, r + 19,
+						point_data[r], point_data[r + 1], point_data[r + 2], point_data[r + 3],
+						point_data[r + 4], point_data[r + 5], point_data[r + 6], point_data[r + 7],
+						point_data[r + 8], point_data[r + 9], point_data[r + 10], point_data[r + 11],
+						point_data[r + 12], point_data[r + 13], point_data[r + 14], point_data[r + 15],
+						point_data[r + 16], point_data[r + 17], point_data[r + 18], point_data[r + 19]);
 			}
 		}
 
@@ -1560,8 +1594,16 @@ static int32_t nvt_pen_ext_cmd_send(uint8_t subcmd)
 			return 0;
 	}
 
+	/*
+	 * erhai: MUST return a real error here.  This used to `return ret`, and
+	 * `ret` is CTP_SPI_READ()'s value (0 = the SPI transfer succeeded), so a
+	 * command the FW never consumed still looked like success and
+	 * disable_pen_input_device() printed "... acked" — measured live on
+	 * Marcos' pad 2026-10-02: "pen cmd 0x10 NOT accepted by FW (status=0x7F)"
+	 * and "pen cmd 0x7F/0x10 acked" on the same arm.
+	 */
 	NVT_ERR("pen cmd 0x%02X NOT accepted by FW (status=0x%02X)\n", subcmd, buf[1]);
-	return ret;
+	return -EIO;
 }
 
 static int32_t disable_pen_input_device(bool disable) {
@@ -1586,6 +1628,10 @@ static int32_t disable_pen_input_device(bool disable) {
 	NVT_LOG("pen charge state is %s, %s pen input device (pen cmd 0x7F/0x%02X acked)\n",
 		ts->pen_is_charge ? "ENABLE" : "DISABLE",
 		disable ? "DISABLE" : "ENABLE", subcmd);
+
+	/* force the next frame to print the pen report block (pen_dump captures) */
+	if (pen_dump)
+		pen_dump_force = 1;
 
 nvt_set_pen_enable_out:
 	NVT_LOG("--\n");
