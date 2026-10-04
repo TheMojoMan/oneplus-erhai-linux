@@ -203,6 +203,7 @@
 #define MIN_BOOST_VOLT_MV	2000
 #define DEFAULT_BOOST_VOLT_MV	5800
 #define SOC_THRESHOLD		90
+#define FULL_SOC		100
 #define POWER_EXPIRED_DEFAULT	120
 
 #define CPS_OCP_THRESHOLD	500
@@ -227,6 +228,7 @@ enum power_disable_reason {
 	PEN_REASON_CHARGE_STOP,
 	PEN_REASON_CHARGE_EPT,
 	PEN_REASON_CHARGE_OCP,
+	PEN_REASON_RECHARGE,
 	PEN_OFF_REASON_MAX,
 };
 
@@ -429,6 +431,16 @@ struct cps_wls_chip {
 	int hboost_status;
 	int soc_threshold;
 	int pen_support_track;
+	/*
+	 * Charge-full bookkeeping (vendor cps_wls_get_ask_packet()/rx_soc_store()):
+	 * `pen_full` latches once the pen reports itself full over the POWER
+	 * packet so the coil stays off across a coil-removed/re-attach cycle;
+	 * `rx_soc` is the userspace (BLE) SoC the pen package feeds back in via
+	 * the writable rx_soc debugfs, and is what releases the latch again.
+	 */
+	int rx_soc;
+	bool pen_full;
+	unsigned int power_enable_reason;
 
 	int chip_id;
 	unsigned short fw_version;
@@ -985,7 +997,13 @@ static void cps_set_hw_state(struct cps_wls_chip *chip, bool charging)
 		gpio_direction_output(chip->wls_scan_gpio, charging ? 0 : 1);
 	if (gpio_is_valid(chip->wls_sleep_gpio))
 		gpio_direction_output(chip->wls_sleep_gpio, 0);
-	cps_set_charge_allow(chip, true);
+	/*
+	 * Charge-allow (off_state) is normally PERMITTED, but a pen latched as
+	 * full must NOT be charged again -- hold it off while the pen is still
+	 * on the coil.  When the pen is gone (pen_present == 0) allow is left on
+	 * so the chip keeps scanning without storming RX_REMOVED (+b13 lesson).
+	 */
+	cps_set_charge_allow(chip, !(chip->pen_full && chip->pen_present));
 }
 
 static void cps_set_hw_idle(struct cps_wls_chip *chip)
@@ -1397,6 +1415,28 @@ static void cps_ask_packet(struct cps_wls_chip *chip)
 	if (data[0] == POWER_PKG_HEAD && data[1] == POWER_PKG_CMD) {
 		chip->pen_soc = data[2];
 		cps_log("pen SoC %d%%\n", chip->pen_soc);
+		/*
+		 * Vendor cps_wls_get_ask_packet(): a POWER packet is the pen
+		 * asking the coil to stop.  A full pen (==100%) additionally
+		 * latches charge-full so it is not topped up again the moment
+		 * it re-attaches; the userspace rx_soc write releases the latch
+		 * once the pen has drained below rx,soc_threshold.
+		 */
+		if (chip->pen_soc >= FULL_SOC) {
+			if (chip->charging) {
+				cps_log("pen full (%d%%) - charge stopped\n",
+					chip->pen_soc);
+				cancel_delayed_work(&chip->expire_work);
+			}
+			chip->pen_full = true;
+			chip->power_disable_reason = PEN_REASON_CHARGE_FULL;
+			chip->charging = false;
+			cps_set_charge_allow(chip, false);
+		} else if (chip->charging) {
+			chip->power_disable_reason = PEN_REASON_CHARGE_STOP;
+			chip->charging = false;
+			cps_set_charge_allow(chip, false);
+		}
 	}
 }
 
@@ -1427,6 +1467,7 @@ static void cps_reset_chip_status(struct cps_wls_chip *chip)
 	chip->tx_voltage = 0;
 	chip->tx_current = 0;
 	chip->power_disable_reason = PEN_REASON_UNKNOWN;
+	chip->power_enable_reason = PEN_REASON_UNKNOWN;
 }
 
 static int cps_q_cali_run(struct cps_wls_chip *chip)
@@ -1565,6 +1606,39 @@ static inline u64 get_current_time_ms(void)
 	return (u64)ts.tv_sec * 1000 + (u64)ts.tv_nsec / 1000000;
 }
 
+/*
+ * Vendor rechg_work_func(): re-arm the coil once the userspace (BLE) SoC has
+ * dropped to/below the threshold while the coil is held by the charge-full
+ * latch.  The coil's own POWER packet cannot drive this (a stopped coil makes
+ * the pen silent), which is exactly why stock routes it through the writable
+ * rx_soc attribute the charger HAL feeds.
+ */
+static void cps_recharge_run(struct cps_wls_chip *chip)
+{
+	if (chip->removed || !chip->init_done)
+		return;
+	if (!chip->pen_present || chip->charging)
+		return;
+
+	chip->power_enable_reason = PEN_REASON_RECHARGE;
+	chip->pen_full = false;
+	if (cps_set_boost_and_allow(chip, true) != CPS_WLS_SUCCESS) {
+		/* rail refused: keep the latch so the next rx_soc write retries */
+		chip->pen_full = true;
+		return;
+	}
+	chip->charge_allow = 1;
+	chip->charging = true;
+	chip->power_disable_reason = PEN_REASON_UNKNOWN;
+	cps_set_hw_state(chip, true);
+	chip->tx_start_time = get_current_time_ms();
+	schedule_delayed_work(&chip->expire_work,
+		round_jiffies_relative(msecs_to_jiffies(
+			chip->power_expired_time * MIN_TO_MS)));
+	cps_log("pen recharge (rx_soc %d%% <= %d%%, boost %dmV)\n",
+		chip->rx_soc, chip->soc_threshold, chip->hboost_volt);
+}
+
 static void cps_wls_tx_irq_handler(struct cps_wls_chip *chip, int irq_flag)
 {
 	if (!chip)
@@ -1582,16 +1656,31 @@ static void cps_wls_tx_irq_handler(struct cps_wls_chip *chip, int irq_flag)
 		chip->pen_present = 1;
 		chip->pen_status = PEN_STATUS_NEAR;
 		if (!chip->charging) {
-			chip->tx_start_time = get_current_time_ms();
-			if (cps_set_boost_and_allow(chip, true) == CPS_WLS_SUCCESS) {
-				chip->charge_allow = 1;
-				chip->charging = true;
-				cps_set_hw_state(chip, true);
-				schedule_delayed_work(&chip->expire_work,
-					round_jiffies_relative(msecs_to_jiffies(
-						chip->power_expired_time * MIN_TO_MS)));
-				cps_log("pen attached: charging (boost %dmV)\n",
-					chip->hboost_volt);
+			if (chip->pen_full && chip->rx_soc > chip->soc_threshold) {
+				/*
+				 * The pen is back on the coil but the userspace
+				 * SoC still says it is full: hold the coil off
+				 * (the rx_soc write re-arms once it drains).
+				 */
+				chip->charge_allow = 0;
+				cps_set_charge_allow(chip, false);
+				cps_log("pen attached at %d%% (full) - not charging\n",
+					chip->rx_soc);
+			} else {
+				chip->tx_start_time = get_current_time_ms();
+				if (cps_set_boost_and_allow(chip, true) ==
+				    CPS_WLS_SUCCESS) {
+					chip->charge_allow = 1;
+					chip->charging = true;
+					cps_set_hw_state(chip, true);
+					schedule_delayed_work(&chip->expire_work,
+						round_jiffies_relative(
+						msecs_to_jiffies(
+						chip->power_expired_time *
+						MIN_TO_MS)));
+					cps_log("pen attached: charging (boost %dmV)\n",
+						chip->hboost_volt);
+				}
 			}
 		}
 		cps_send_pencil_uevent(chip, true);
@@ -2106,6 +2195,32 @@ static int state_get(void *data, u64 *val)
 	return 0;
 }
 
+/*
+ * Writable rx_soc (vendor DEVICE_ATTR_RW(rx_soc)): the pen package feeds the
+ * pen's BLE SoC back in here.  When the coil is held off by the charge-full
+ * latch and this value has dropped to/below rx,soc_threshold, re-arm charging.
+ */
+static int rx_soc_get(void *data, u64 *val)
+{
+	struct cps_wls_chip *chip = data;
+	*val = chip ? (u64)chip->rx_soc : 0;
+	return 0;
+}
+
+static int rx_soc_set(void *data, u64 val)
+{
+	struct cps_wls_chip *chip = data;
+
+	if (!chip || val > FULL_SOC)
+		return -EINVAL;
+
+	chip->rx_soc = (int)val;
+	if (chip->pen_full && chip->rx_soc <= chip->soc_threshold &&
+	    !chip->charge_allow)
+		cps_recharge_run(chip);
+	return 0;
+}
+
 static int q_cali_get(void *data, u64 *val)
 {
 	struct cps_wls_chip *chip = data;
@@ -2179,6 +2294,7 @@ DEFINE_DEBUGFS_ATTRIBUTE(ble_mac_addr_fops, ble_mac_addr_get, NULL, "%llx\n");
 DEFINE_DEBUGFS_ATTRIBUTE(fw_version_fops, fw_version_get, NULL, "%u\n");
 DEFINE_DEBUGFS_ATTRIBUTE(chip_id_fops, chip_id_get, NULL, "%x\n");
 DEFINE_DEBUGFS_ATTRIBUTE(state_fops, state_get, NULL, "%llu\n");
+DEFINE_DEBUGFS_ATTRIBUTE(rx_soc_fops, rx_soc_get, rx_soc_set, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(q_cali_fops, q_cali_get, q_cali_set, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(ept_fops, ept_get, NULL, "%llu\n");
 DEFINE_DEBUGFS_ATTRIBUTE(reg_fops, reg_get, reg_set, "%llx\n");
@@ -2198,6 +2314,8 @@ static void cps_create_debugfs(struct cps_wls_chip *chip)
 			    &chip_id_fops);
 	debugfs_create_file("state", 0444, chip->debug_root, chip,
 			    &state_fops);
+	debugfs_create_file("rx_soc", 0644, chip->debug_root, chip,
+			    &rx_soc_fops);
 	debugfs_create_file("q_cali", 0644, chip->debug_root, chip,
 			    &q_cali_fops);
 	debugfs_create_file("ept_reason", 0444, chip->debug_root, chip,
@@ -2226,6 +2344,8 @@ static int cps_wls_chrg_probe(struct i2c_client *client)
 	chip->client = client;
 	chip->dev = &client->dev;
 	chip->pen_soc = -1;
+	chip->rx_soc = FULL_SOC;
+	chip->pen_full = false;
 	mutex_init(&chip->irq_lock);
 	mutex_init(&chip->i2c_lock);
 	mutex_init(&chip->glk_lock);
