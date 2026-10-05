@@ -107,6 +107,7 @@ struct pogo_kbd {
 	struct input_dev *kbd;
 	struct input_dev *touchpad;
 	bool attached;		/* OWB keyboard stream alive (sysfs) */
+	u8 nfc_status;		/* keyboard NFC front-end: 1 = card near, 0 = far */
 
 	/* detection diagnostics (per poll cycle) */
 	u32 rx_frames;		/* completed OWB frames since probe */
@@ -544,6 +545,25 @@ static void pogo_kbd_dispatch(struct pogo_kbd *kb, const u8 *buf, int len)
 		/* power-up (sub 0x01) / heartbeat (sub 0x05): plug-present beacon */
 		if (buf[2] == 0x01)
 			dev_info(kb->dev, "keyboard plug-in (power-up sync)\n");
+		/*
+		 * NFC/RFID front-end inside the keyboard MCU (vendor
+		 * pogo_keyboard_core.c, SYNC_UPLOAD handler): the keyboard senses
+		 * an NFC field (a card/phone held against the folio) and reports
+		 * near (0x07 0xe0) / far (0x08 0xe1). This is a PRESENCE
+		 * detector, not a reader: the MCU protocol also defines an NFC
+		 * enable sub-command (0x3a/0x06) and an NFC data sub-command
+		 * (0x3a/0x07), but no card-data path is implemented anywhere in
+		 * the vendor source, so this cannot feed a PC/SC reader.
+		 */
+		if (buf[2] == 0x07 && buf[3] == 0xe0) {
+			kb->nfc_status = 1;
+			dev_info(kb->dev, "nfc card near\n");
+			sysfs_notify(&kb->dev->kobj, NULL, "nfc_status");
+		} else if (buf[2] == 0x08 && buf[3] == 0xe1) {
+			kb->nfc_status = 0;
+			dev_info(kb->dev, "nfc card far\n");
+			sysfs_notify(&kb->dev->kobj, NULL, "nfc_status");
+		}
 		break;
 	default:
 		break;
@@ -741,8 +761,23 @@ static ssize_t attached_show(struct device *dev,
 }
 static DEVICE_ATTR_RO(attached);
 
+/*
+ * sysfs: keyboard NFC/RFID presence ("1" while a card/phone NFC field is
+ * sensed against the folio keyboard, "0" otherwise). Presence only — see the
+ * SYNC_UPLOAD dispatch for why this cannot act as a PC/SC reader.
+ */
+static ssize_t nfc_status_show(struct device *dev,
+			       struct device_attribute *attr, char *buf)
+{
+	struct pogo_kbd *kb = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf, "%d\n", kb->nfc_status);
+}
+static DEVICE_ATTR_RO(nfc_status);
+
 static const struct attribute_group pogo_kbd_attr_group = {
-	.attrs = (struct attribute *[]){ &dev_attr_attached.attr, NULL },
+	.attrs = (struct attribute *[]){ &dev_attr_attached.attr,
+					 &dev_attr_nfc_status.attr, NULL },
 };
 
 #define POGO_OFF_MS		1000	/* rail-off time to force a keyboard reset */
