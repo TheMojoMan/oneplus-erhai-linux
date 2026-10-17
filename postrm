@@ -1,24 +1,24 @@
 #!/bin/bash
-# oneplus-erhai-linux postrm: remove the UKI this kernel's postinst installed on
-# the ESP. Named to match postinst exactly -- <release>[-l1]-b<N>.efi when the
-# deb carries a "+b<N>" Debian revision (the "-l1" tag when it was installed from
-# the linux1 partition), or <release>-<root partlabel>.efi without one (base
-# image build) -- so an upgrade of a *different* kernel package never deletes the
+# oneplus-erhai-linux postrm: remove the UKI this kernel's postinst installed in
+# /boot.  Named to match postinst exactly -- <release>[-l1]-b<N>.efi when the deb
+# carries a "+b<N>" Debian revision (the "-l1" tag when it was installed from the
+# linux1 partition), or <release>-<root partlabel>.efi without one (base image
+# build) -- so an upgrade of a *different* kernel package never deletes the
 # running one's boot entry.  An install deletes no .efi at all; this script is the
-# only thing that removes one, and only its own.
+# only thing that removes one, and only its own.  The ESP is not touched any more
+# (2026-10-17; the retired ESP machinery is preserved in
+# /media/data/develop/erhai/tmp/esp-uki-machinery-backup-20261017/).
 set -e
 
 # 1. Only on real removal, not on the remove step of an upgrade.
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 
-    # 2. Never touch the ESP or /lib/modules from inside a build CHROOT.  Both
-    #    belong to the machine RUNNING the build (mountinfo and /proc/cmdline are
-    #    the HOST's there, and the real ESP is reachable through the bind-mounted
-    #    /dev), so a chrooted purge would delete the developer's own boot entry --
-    #    the mirror image of the postinst bug fixed 2026-09-29.  Same detection as
-    #    postinst: compare OUR root filesystem with the root of the namespace's
-    #    PID 1 (live: equal, e.g. 66307:2 both; chroot: different); an absent or
-    #    unreadable /proc/1/root counts as a chroot, i.e. the safe direction.
+    # 2. Are we in a build CHROOT?  It decides ONE thing (2026-10-17, when the
+    #    ESP stopped being written): the root label used for the file name -- a
+    #    chroot is built for PARTLABEL=linux and must not take the HOST's cmdline
+    #    (same rule as postinst).  Nothing is skipped any more: the removal target
+    #    is /boot of THIS root filesystem, which inside a chroot IS the image's
+    #    own /boot -- exactly the file this package's postinst wrote there.
     IN_CHROOT=false
     ROOT_IDS="$(stat -c '%d:%i' / 2>/dev/null || true)"
     PID1_IDS="$(stat -L -c '%d:%i' /proc/1/root 2>/dev/null || true)"
@@ -26,11 +26,6 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
         IN_CHROOT=true
     elif [ -z "$ROOT_IDS" ] || [ -z "$PID1_IDS" ] || [ "$ROOT_IDS" != "$PID1_IDS" ]; then
         IN_CHROOT=true
-    fi
-    if [ "$IN_CHROOT" = true ]; then
-        echo "Post-remove: build chroot detected -- leaving the ESP and" \
-             "/lib/modules alone (they belong to the machine running the build)."
-        exit 0
     fi
 
     # 3. Kernel version of the package being removed. Strip the "+b<N>" Debian
@@ -66,23 +61,27 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
     if [ -z "$FULLVER" ]; then
         echo "Post-remove: cannot determine the version of" \
              "${DPKG_MAINTSCRIPT_PACKAGE:-the removed package}" \
-             "(no \$2 and dpkg-query gave nothing); leaving ESP and /lib/modules alone."
+             "(no \$2 and dpkg-query gave nothing); leaving /boot and /lib/modules alone."
         exit 0
     fi
     KVER="${FULLVER%%+b*}"
 
-    # 4. Root partition label, same derivation as postinst (the booted cmdline
-    #    first, then the partition backing /).  It decides the "-l1" tag below,
-    #    so it must come from the same sources postinst used -- a mismatch only
-    #    ever costs a no-op delete, never a wrong file.
-    ROOT_LABEL="${ERHAI_ROOT_LABEL:-$(tr ' ' '\n' < /proc/cmdline 2>/dev/null \
-                     | sed -n 's/^root=PARTLABEL=//p' | head -n1)}"
-    if [ -z "$ROOT_LABEL" ]; then
-        ROOT_LABEL=$(lsblk -no PARTLABEL "$(findmnt -no SOURCE /)" 2>/dev/null | head -n1)
-    fi
-
-    if [ -z "$ROOT_LABEL" ]; then
-        ROOT_LABEL="linux"
+    # 4. Root partition label, same derivation as postinst (a chroot is always
+    #    `linux`; otherwise the booted cmdline first, then the partition backing
+    #    /).  It decides the "-l1" tag below, so it must come from the same
+    #    sources postinst used -- a mismatch only ever costs a no-op delete, never
+    #    a wrong file.
+    if [ "$IN_CHROOT" = true ]; then
+        ROOT_LABEL="${ERHAI_ROOT_LABEL:-linux}"
+    else
+        ROOT_LABEL="${ERHAI_ROOT_LABEL:-$(tr ' ' '\n' < /proc/cmdline 2>/dev/null \
+                         | sed -n 's/^root=PARTLABEL=//p' | head -n1)}"
+        if [ -z "$ROOT_LABEL" ]; then
+            ROOT_LABEL=$(lsblk -no PARTLABEL "$(findmnt -no SOURCE /)" 2>/dev/null | head -n1)
+        fi
+        if [ -z "$ROOT_LABEL" ]; then
+            ROOT_LABEL="linux"
+        fi
     fi
 
     # 5. Rebuild the filename postinst used. The "+b<N>" Debian revision (when
@@ -107,65 +106,22 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
         TARGET_EFI="${CLEAN_KVER}-${ROOT_LABEL}.efi"
     fi
 
-    # 6. Find the ESP. ERHAI_ESP_PART is a test seam (tmp/postrm-test/ points it
-    #    at a loop image); production uses the by-partlabel link.
-    #
-    #    If the ESP is ALREADY mounted somewhere (e.g. someone is inspecting
-    #    /boot/efi), reuse that mount instead of mounting it a second time: a
-    #    block device has ONE superblock, so a second mount either fails or comes
-    #    up read-only and the delete would be skipped without a trace.
-    ESP_PART="${ERHAI_ESP_PART:-/dev/disk/by-partlabel/esp}"
-    ESP_REAL="$(readlink -f "$ESP_PART" 2>/dev/null || true)"
-    ESP_TARGET=""
-    for src in "$ESP_REAL" "$ESP_PART"; do
-        [ -n "$src" ] || continue
-        ESP_TARGET="$(findmnt -n -o TARGET --source "$src" 2>/dev/null | head -n1 || true)"
-        [ -n "$ESP_TARGET" ] && break
-    done
-
-    MNT_TMP=""
-    MOUNTED_BY_US=false
-    if [ -z "$ESP_TARGET" ] && [ -b "$ESP_PART" ]; then
-        MNT_TMP="$(mktemp -d)"
-        for i in 1 2 3; do
-            if mount "$ESP_PART" "$MNT_TMP" 2>/dev/null; then
-                ESP_TARGET="$MNT_TMP"
-                MOUNTED_BY_US=true
-                break
-            fi
-            sleep 1
-        done
-        if [ "$MOUNTED_BY_US" != true ]; then
-            rmdir "$MNT_TMP" 2>/dev/null || true
-            MNT_TMP=""
-        fi
-    fi
-
-    # 7. Delete the .efi if it is there.
-    if [ -z "$ESP_TARGET" ]; then
-        echo "Post-remove: ESP not available. Could not delete $TARGET_EFI (ignored)."
+    # 6. Delete our .efi from /boot of THIS root filesystem (2026-10-17: the ESP
+    #    is not involved any more -- no mount, no partlabel, no read-only
+    #    handling).  Only this package's own file is touched; every other kernel's
+    #    UKI in /boot stays exactly where it is.
+    DEST_FILE="/boot/$TARGET_EFI"
+    if [ ! -f "$DEST_FILE" ]; then
+        echo "Post-remove: $DEST_FILE not found, nothing to do."
+    elif [ "${ERHAI_POSTRM_DRY_RUN:-0}" = "1" ]; then
+        echo "Post-remove: DRY RUN -- would delete $DEST_FILE"
     else
-        DEST_FILE="$ESP_TARGET/EFI/ubuntu/$TARGET_EFI"
-        if [ ! -f "$DEST_FILE" ]; then
-            echo "Post-remove: $TARGET_EFI not found on ESP, nothing to do."
-        elif [ "${ERHAI_POSTRM_DRY_RUN:-0}" = "1" ]; then
-            echo "Post-remove: DRY RUN -- would delete $DEST_FILE"
-        else
-            echo "Post-remove: Deleting $TARGET_EFI from ESP ($ESP_TARGET)..."
-            if rm -f "$DEST_FILE" 2>/dev/null; then
-                sync
-            else
-                echo "Post-remove: could NOT delete $DEST_FILE (ESP mounted read-only?)" >&2
-            fi
-        fi
-        if [ "$MOUNTED_BY_US" = true ]; then
-            umount "$ESP_TARGET"
-        fi
+        echo "Post-remove: Deleting $DEST_FILE..."
+        rm -f "$DEST_FILE"
+        sync
     fi
 
-    [ -n "$MNT_TMP" ] && rmdir "$MNT_TMP" 2>/dev/null || true
-
-    # 8. Leftovers from depmod, which postinst ran.
+    # 7. Leftovers from depmod, which postinst ran.
     if [ "${ERHAI_POSTRM_DRY_RUN:-0}" = "1" ]; then
         echo "Post-remove: DRY RUN -- leaving /lib/modules/$KVER depmod leftovers alone."
     else
