@@ -917,6 +917,7 @@ struct wcd939x_sdw_priv {
 	struct sdw_stream_runtime *sruntime;
 	struct sdw_port_config port_config[WCD939X_MAX_SWR_PORTS];
 	struct wcd_sdw_ch_info *ch_info;
+	/* Requested switch state per channel ID, not per shared port. */
 	bool port_enable[WCD939X_MAX_SWR_CH_IDS];
 	/* per master port: bitmask of channels carrying data (get_channel_map) */
 	unsigned int master_channel_map[SDW_MAX_PORTS];

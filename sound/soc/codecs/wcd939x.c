@@ -2094,9 +2094,19 @@ static int wcd939x_get_swr_port(struct snd_kcontrol *kcontrol,
 	struct snd_soc_component *comp = snd_kcontrol_chip(kcontrol);
 	struct wcd939x_priv *wcd939x = snd_soc_component_get_drvdata(comp);
 	struct wcd939x_sdw_priv *wcd = wcd939x->sdw_priv[mixer->shift];
-	unsigned int portidx = wcd->ch_info[mixer->reg].port_num;
 
-	ucontrol->value.integer.value[0] = wcd->port_enable[portidx] ? 1 : 0;
+	/*
+	 * erhai: index the requested switch state by the CHANNEL ID
+	 * (mixer->reg), never by the shared SoundWire port number.  Several
+	 * logical channels live on one port (we map ADC1+ADC2 and ADC3+ADC4
+	 * that way), so port-number indexing aliased their readbacks:
+	 * enabling ADC1 made ADC2/ADC3 read back as enabled, and a state
+	 * save/restore then connected channels nobody selected.
+	 * (Fixes yzddmr6 <46088090+yzddmr6@users.noreply.github.com>,
+	 *  "ASoC: codecs: wcd939x: keep SoundWire switch state per channel",
+	 *  github.com/yzddmr6/linux-sm8750-erhai 4b39c25486.)
+	 */
+	ucontrol->value.integer.value[0] = wcd->port_enable[mixer->reg] ? 1 : 0;
 
 	return 0;
 }
@@ -2123,9 +2133,11 @@ static int wcd939x_set_swr_port(struct snd_kcontrol *kcontrol,
 	struct wcd939x_sdw_priv *wcd = wcd939x->sdw_priv[mixer->shift];
 	unsigned int portidx = wcd->ch_info[mixer->reg].port_num;
 
-	wcd->port_enable[portidx] = !!ucontrol->value.integer.value[0];
+	/* Requested state per CHANNEL ID; portidx stays the physical port
+	 * for the SoundWire port configuration (see get_swr_port). */
+	wcd->port_enable[mixer->reg] = !!ucontrol->value.integer.value[0];
 
-	wcd939x_connect_port(wcd, portidx, mixer->reg, wcd->port_enable[portidx]);
+	wcd939x_connect_port(wcd, portidx, mixer->reg, wcd->port_enable[mixer->reg]);
 
 	return 1;
 }
@@ -3337,15 +3349,30 @@ static int wcd939x_soc_codec_probe(struct snd_soc_component *component)
 	wcd939x_io_init(component);
 
 	/*
-	 * erhai mic ChMap defaults (the real topology, == the DTS
-	 * qcom,tx-channel-mapping and the Android lane ground truth):
-	 *   ADC1 -> master port 3 lane 1 = SWRM_TX3_CH1 (num 54)
-	 *   ADC4 -> master port 4 lane 2 = SWRM_TX4_CH2 (num 59)
-	 * Override at runtime via tinymix "ADCx ChMap" if a boot probe
-	 * needs another lane (e.g. SWRM_TX4_CH1 for ADC4).
+	 * erhai mic b27 (2026-10-19): the vendor ChMap DEFAULTS ARE GONE.
+	 *
+	 * They were the reverse-engineered OxygenOS layout
+	 * (ADC1 -> master port 3 lane 1 = num 54, ADC4 -> master port 4 lane 2 =
+	 * num 59), i.e. labels that describe a port layout this tree no longer
+	 * uses since A-1 put all four ADCs on slave port 1 / master port 2.
+	 * Leaving them set made wcd939x_sdw_connect_port() override the ch_info
+	 * lane: label 59 decodes to lane 2, so ADC4 rode slave-port channel 2
+	 * (port ch_mask became 0x3 = ADC1+ADC2 instead of 0x9 = ADC1+ADC4) and
+	 * its data went to SWR_INPUT1 while the route/UCM listen on
+	 * SWR_INPUT3/SWR_MIC3 - so the second captured channel was silent.
+	 * Verified live on +b26:
+	 *   MICDBG chmap: slave ch 3 on slv port 1 -> mstr port 2 lane num 59
+	 *   (TX4_CH2) port_ch_mask 0x2
+	 *   MICDBG sdw_hw_params: port_config[0] num=1 ch_mask=0x3
+	 * With the map left zero, connect_port() falls back to
+	 * ch_info->master_ch_mask (wcd-common.h = ch_mask), which is exactly what
+	 * the working OnePlus Pad 2 Pro port runs: ADC1 -> BIT(0) -> lane 1 =
+	 * SWR_INPUT0 (SWR_MIC0), ADC4 -> BIT(3) -> lane 4 = SWR_INPUT3
+	 * (SWR_MIC3) - the pair the UCM and erhai.dts audio-routing select.
+	 *
+	 * The runtime "ADCx ChMap" control still exists, so a lane can be
+	 * re-probed live (tinymix) without touching this default again.
 	 */
-	wcd939x->tx_master_ch_map[WCD939X_ADC1] = 54;
-	wcd939x->tx_master_ch_map[WCD939X_ADC4] = 59;
 
 	/* Set all interrupts as edge triggered */
 	for (i = 0; i < wcd939x_regmap_irq_chip.num_regs; i++)

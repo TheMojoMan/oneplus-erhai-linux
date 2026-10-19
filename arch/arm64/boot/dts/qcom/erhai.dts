@@ -153,19 +153,15 @@
 				"DMIC2", "MIC BIAS3",
 				"DMIC3", "MIC BIAS1",
 				"DMIC4", "MIC BIAS1",
-				/* Slot numbers must match the TX SMIC MUX
-				 * selection in the UCM (SWR_MIC9 <- ADC4,
-				 * SWR_MIC4 <- ADC1) per OxygenOS GT:
-				 * ADC1 ChMap = TX2_CH1 = slot 4, ADC4 ChMap
-				 * = TX3_CH2 = slot 9; GT MUX0=SWR_MIC9
-				 * (DEC0 <- ADC4), MUX1=SWR_MIC4 (DEC1 <-
-				 * ADC1). Swapped from <9,ADC1>/<4,ADC4> in
-				 * +b37 (was authored 0-based from the UCM
-				 * MUX values, crossing the DEC↔ADC pairing
-				 * vs GT — only affected PCM channel order,
-				 * the UCM stays untouched). */
-				"TX SWR_INPUT4", "ADC1_OUTPUT",
-				"TX SWR_INPUT9", "ADC4_OUTPUT";
+				/* A-1 (2026-10-19): STOCK lane<->channel mapping, as the working
+				 * OnePlus Pad 2 Pro port runs it.  Lane n = master
+				 * channel n+1, so ADC1 = ch1 -> SWR_INPUT0 and ADC4
+				 * = ch4 -> SWR_INPUT3, matching the UCM
+				 * TX SMIC MUX0 = SWR_MIC0 / MUX1 = SWR_MIC3.
+				 * (The erhai 4/9 numbers were a derived guess;
+				 * see microphone-MEMORY-2026-10-19.md 52.8.) */
+				"TX SWR_INPUT0", "ADC1_OUTPUT",
+				"TX SWR_INPUT3", "ADC4_OUTPUT";
 
 		wcd-playback-dai-link {
 			link-name = "WCD Playback";
@@ -2438,58 +2434,65 @@
 	};
 };
 
-/* WCD9395 TX (capture) — SoundWire, device 3 (live GT). */
+/* WCD9395 TX (capture) - SoundWire, device 3.
+ * A-1 (2026-10-19): STOCK, matching the working OnePlus Pad 2 Pro
+ * port.  The erhai-derived overrides that used to live here are
+ * REMOVED so the node inherits the stock sm8750.dtsi values
+ * (ports-word-length 0xff = default, offset1 <0 0 1 1>,
+ * ports-sinterval-low <1 1 3 3>, lane-control <1 2 0 0>) and the
+ * slave->master port mapping is the SoundWire core default:
+ *   qcom,ports-word-length  = <0xff 0x0f 0x0f 0x0f>   (removed)
+ *   qcom,ports-offset1      = <0 0 0 0>               (removed)
+ *   qcom,ports-sinterval-low= <1 1 1 1>               (removed)
+ *   qcom,ports-lane-control = <1 2 1 2>               (removed)
+ *   qcom,tx-port-mapping    = <3 4 0 0>               (removed)
+ *   qcom,tx-channel-mapping = <1 0 0 2>               (removed)
+ * Those values were reverse-engineered from partial Android
+ * traces and never produced a working capture; the stock values
+ * are what the working port runs.  See
+ * microphone-MEMORY-2026-10-19.md 52.8. */
 &swr2 {
 	status = "okay";
 
-	/* 48 kHz PCM capture, master SI = 0x01 on the ACTIVE master ports
-	 * (3,4): 2026-09-11 Android GT (va_swr_ctrl reg dump during a WORKING
-	 * recording) programs DP PORT_CTRL = (ch_mask<<24) | SI=0x01 and
-	 * PORT_CTRL_2 = lane 1/2, both banks. SI here is the col-stride minus
-	 * 1: 16-bit word = 1 col, back-to-back samples -> 4 samples per
-	 * 16-col frame * 12 kHz = 48 kHz. The older SI=0xC7 theory (stride
-	 * 200 -> one sample per 200 frames) delivered the zero trickle;
-	 * live devmem pokes with the GT values produced the first ever
-	 * nonzero samples (+b39). */
-	/* Payload packing (2026-09-10): the SDW core derives slave
-	 * BlockCtrl1 (word length) from stream->params.bps, and the qcom
-	 * master from qcom,ports-word-length. Both sides must be 16-bit
-	 * PCM (0x0f = 16-1) or the intf assembles garbage. Block offsets:
-	 * core starts port_bo=1; DP1 (slave) = 1 -> master port 3,
-	 * DP2 (slave) = 1+16 = 17 (0x11) -> master port 4, bps=16,
-	 * ch_count=1. Entries are indexed by master port 1..4. */
-	qcom,ports-word-length = /bits/ 8 <0xff 0x0f 0x0f 0x0f>;
-	qcom,ports-offset1 = /bits/ 8 <0x00 0x00 0x00 0x00>;
-	qcom,ports-sinterval-low = /bits/ 8 <0x01 0x01 0x01 0x01>;
-	/* PORT_CTRL_2 (+4) = lane 1/2 per GT: the qcom master writes it
-	 * when valid (255 = skip). GT DP3: 0x01, DP4: 0x02. */
-	qcom,ports-lane-control = /bits/ 8 <0x01 0x02 0x01 0x02>;
-
+	/*
+	 * b26 (2026-10-19): the b23/b24 framing overrides are GONE.  The
+	 * working OnePlus Pad 2 Pro port carries NO &swr2 properties at all -
+	 * it runs the stock sm8750.dtsi table (word-length 0xff on ALL four
+	 * ports, sinterval-low <1 1 3 3>, offset1 <0 0 1 1>) - and its wcd_tx
+	 * mapping (below) puts the capture on MASTER PORT 2, so per-port
+	 * patching is neither needed nor validated by any working capture.
+	 * Both lines live in git history (b23/b24) if the framed port ever
+	 * turns out to matter.
+	 */
 	wcd_tx: codec@0,3 {
 		compatible = "sdw20217010e00";
 		reg = <0 3>;
-		/* OxygenOS runtime ChMap ground truth: ADC1 rides master
-		 * port 3 (SWRM_TX2_CH1 — the vendor master DT port table
-		 * maps port 3 = TX2_CH1-4, port 4 = TX3_CH1-4) and ADC4
-		 * master port 4 (SWRM_TX3_CH2); slave side: ADC1 -> DP1
-		 * ch1, ADC4 -> DP2 ch2 (see wcd939x_sdw_tx_ch_info). The
-		 * ADSP codec_dma intf channel = master port - 1 (vendor
-		 * swrm_get_master_port(): mstr_port_id = i-1), so the
-		 * TX3 BE map {02,03} = ports {3,4}. +b32's {2,3} reading
-		 * was a false correction: with the master DPn PCM_PORT_
-		 * CTRL missing, EVERY mapping delivered zeros (fixed in
-		 * +b35, see qcom_swrm_port_enable).
-		 * Property is indexed by SLAVE port number. DP3/DP4
-		 * (dmics) fall back to auto-allocation. */
-		qcom,tx-port-mapping = <3 4 0 0>;
-		/* Master channel per slave TX channel id, in ch_info order
-		 * (adc1, adc2, adc3, adc4, ...): ADC1 -> master ch1
-		 * (SWRM_TX2_CH1), ADC4 -> master ch2 (SWRM_TX3_CH2).
-		 * The ADSP TX3 intf map {02,03} (intf ch N = master port
-		 * N+1) then yields PCM ch0 = ADC1, ch1 = ADC4 — the exact
-		 * vendor capture wiring. 0 keeps the default for that
-		 * channel. */
-		qcom,tx-channel-mapping = /bits/ 8 <1 0 0 2>;
+
+		/*
+		 * qcom,tx-port-mapping is NOT optional for our driver:
+		 * wcd939x_sdw_probe() sets wcd->is_tx = true ONLY inside this
+		 * branch, so without it the TX slave is initialised as an RX
+		 * device, its source ports/dpn props/regmap setup are skipped
+		 * and the card never probes ("could not get TX device regmap",
+		 * adev bind -19).
+		 *
+		 * b26 (2026-10-19): the value is now EXACTLY the working
+		 * OnePlus Pad 2 Pro's <2 2 3 4> (slave port -> master port)
+		 * instead of our own derivation <1 0 0 0>.  All four ADCs sit
+		 * on slave port 1 (ch_info: ADC1..ADC4 = BIT(0)..BIT(3)), so
+		 * they all ride MASTER PORT 2 - the master port the WORKING
+		 * port uses.  (The stock sm8750.dtsi table frames all four
+		 * ports with its default 0xff, i.e. it programs no per-port
+		 * word length; that is what the working pad runs.)
+		 *
+		 * qcom,tx-channel-mapping is deliberately ABSENT, exactly as on
+		 * the working port: the ch_info table's default
+		 * master_ch_mask = ch_mask (wcd-common.h) is then kept -
+		 * upstream behaviour - whereas DTS values override it (and the
+		 * old <1 2 3 4> made the tx-macro lane decode pick a master
+		 * channel mask the route did not use).
+		 */
+		qcom,tx-port-mapping = <2 2 3 4>;
 	};
 };
 
