@@ -234,8 +234,19 @@ static int q6apm_dai_prepare(struct snd_soc_component *component,
 	cfg.sample_rate = runtime->rate;
 	cfg.num_channels = runtime->channels;
 	cfg.bit_width = prtd->bits_per_sample;
+	/*
+	 * erhai mic A-2: hand the ALSA sample CONTAINER width to the DSP as
+	 * well (S24_LE = 32-bit word), else the PCM shared-memory description
+	 * disagrees with the buffer layout.  Ported from yzddmr6
+	 * <46088090+yzddmr6@users.noreply.github.com>, "ASoC: qcom:
+	 * audioreach: preserve the PCM sample container width",
+	 * github.com/yzddmr6/linux-sm8750-erhai 4739a12a35.
+	 */
+	cfg.bits_per_sample = snd_pcm_format_physical_width(runtime->format);
 	cfg.fmt = SND_AUDIOCODEC_PCM;
-	audioreach_set_default_channel_mapping(cfg.channel_map, runtime->channels);
+	ret = audioreach_set_default_channel_mapping(cfg.channel_map, runtime->channels);
+	if (ret)
+		return ret;
 	if (prtd->state) {
 		/* clear the previous setup if any  */
 		q6apm_graph_stop(prtd->graph);
@@ -840,8 +851,9 @@ static int q6apm_dai_compr_set_params(struct snd_soc_component *component,
 		cfg.num_channels = 2;
 		cfg.bit_width = prtd->bits_per_sample;
 		cfg.fmt = codec->id;
-		audioreach_set_default_channel_mapping(cfg.channel_map,
-						       cfg.num_channels);
+		ret = audioreach_set_default_channel_mapping(cfg.channel_map, cfg.num_channels);
+		if (ret)
+			return ret;
 		memcpy(&cfg.codec, codec, sizeof(*codec));
 
 		ret = q6apm_graph_media_format_shmem(prtd->graph, &cfg);

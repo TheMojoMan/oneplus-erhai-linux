@@ -279,7 +279,6 @@ struct tx_macro {
 	struct tx_mute_work tx_mute_dwork[NUM_DECIMATORS];
 	unsigned long active_ch_mask[TX_MACRO_MAX_DAIS];
 	unsigned long active_ch_cnt[TX_MACRO_MAX_DAIS];
-	int active_decimator[TX_MACRO_MAX_DAIS];
 	struct regmap *regmap;
 	struct clk *mclk;
 	struct clk *npl;
@@ -951,20 +950,26 @@ static int tx_macro_tx_mixer_put(struct snd_kcontrol *kcontrol,
 	u32 enable = ucontrol->value.integer.value[0];
 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
 
-	if (enable) {
-		if (tx->active_decimator[dai_id] == dec_id)
-			return 0;
+	/*
+	 * erhai: idempotence keyed on the per-control BIT, not on a single
+	 * "last enabled decimator" field.  With DEC0+DEC1 both on (our mic
+	 * use case) the old model re-entered the enable branch on every
+	 * re-application of the control and inflated active_ch_cnt, which
+	 * tx_macro_get_channel_map() hands to the DSP as the capture
+	 * channel count; disabling DEC0 also silently skipped DEC1.
+	 * (Fixes yzddmr6 <46088090+yzddmr6@users.noreply.github.com>,
+	 *  "ASoC: codecs: lpass-tx-macro: track every enabled capture
+	 *  channel", github.com/yzddmr6/linux-sm8750-erhai 63d6d0dac6.)
+	 */
+	if (!!enable == test_bit(dec_id, &tx->active_ch_mask[dai_id]))
+		return 0;
 
+	if (enable) {
 		set_bit(dec_id, &tx->active_ch_mask[dai_id]);
 		tx->active_ch_cnt[dai_id]++;
-		tx->active_decimator[dai_id] = dec_id;
 	} else {
-		if (tx->active_decimator[dai_id] == -1)
-			return 0;
-
 		tx->active_ch_cnt[dai_id]--;
 		clear_bit(dec_id, &tx->active_ch_mask[dai_id]);
-		tx->active_decimator[dai_id] = -1;
 	}
 	snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, enable, update);
 
@@ -1266,20 +1271,15 @@ static int tx_macro_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
 	u8 decimator;
 
-	/* active decimator not set yet */
-	if (tx->active_decimator[dai->id] == -1)
-		return 0;
-
-	decimator = tx->active_decimator[dai->id];
-
-	if (mute)
+	/* erhai: mute/unmute EVERY enabled decimator - the old code only
+	 * touched the last one, so with DEC0+DEC1 on, DEC0 was left
+	 * PGA-muted for the whole capture (digital silence, invisible in
+	 * any register dump of the mixer/enum state).  See the mixer put
+	 * callback for the attribution. */
+	for_each_set_bit(decimator, &tx->active_ch_mask[dai->id], TX_MACRO_DEC_MAX)
 		snd_soc_component_write_field(component,
 					      CDC_TXn_TX_PATH_CTL(decimator),
-					      CDC_TXn_PGA_MUTE_MASK, 0x1);
-	else
-		snd_soc_component_update_bits(component,
-					      CDC_TXn_TX_PATH_CTL(decimator),
-					      CDC_TXn_PGA_MUTE_MASK, 0x0);
+					      CDC_TXn_PGA_MUTE_MASK, !!mute);
 
 	return 0;
 }
@@ -2385,11 +2385,6 @@ static int tx_macro_probe(struct platform_device *pdev)
 	dev_set_drvdata(dev, tx);
 
 	tx->dev = dev;
-
-	/* Set active_decimator default value */
-	tx->active_decimator[TX_MACRO_AIF1_CAP] = -1;
-	tx->active_decimator[TX_MACRO_AIF2_CAP] = -1;
-	tx->active_decimator[TX_MACRO_AIF3_CAP] = -1;
 
 	/* set MCLK and NPL rates */
 	ret = clk_set_rate(tx->mclk, MCLK_FREQ);

@@ -121,6 +121,9 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	struct qcom_snd_tdm_slot_cfg cpu_cfg;
 	struct qcom_snd_tdm_slot_cfg codec_cfg;
 	int bclk_freq;
+	/* erhai mic A-2 (d1f84c6f9f): keep the link's own DAI format */
+	unsigned int cpu_fmt = (rtd->dai_link->dai_fmt & ~SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) |
+		SND_SOC_DAIFMT_BP_FP;
 	int ret;
 	int i;
 
@@ -131,7 +134,7 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	if (!cpu_cfg.slots)
 		return 0;
 
-	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+	ret = snd_soc_dai_set_fmt(cpu_dai, cpu_fmt);
 	if (ret && ret != -ENOTSUPP)
 		return ret;
 
@@ -331,8 +334,8 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 		break;
 	}
 
-
-	return 0;
+	/* erhai mic A-2 (d1f84c6f9f): board-requested conversions last */
+	return qcom_snd_be_hw_params_fixup(rtd, params);
 }
 
 static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
@@ -344,6 +347,9 @@ static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 	int mclk_freq = sc8280xp_get_mclk_freq(params);
 	int bclk_freq = sc8280xp_get_bclk_freq(params);
+	/* erhai mic A-2 (d1f84c6f9f): keep the link's own DAI format */
+	unsigned int cpu_fmt = (rtd->dai_link->dai_fmt & ~SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) |
+		SND_SOC_DAIFMT_BP_FP;
 	int ret;
 
 	switch (cpu_dai->id) {
@@ -351,11 +357,12 @@ static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
 	case QUINARY_MI2S_RX ... QUINARY_MI2S_TX:
 	case SENARY_MI2S_RX ... SENARY_MI2S_TX:
 	case LPI_MI2S_RX_0 ... LPI_MI2S_TX_4:
-		ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+		ret = snd_soc_dai_set_fmt(cpu_dai, cpu_fmt);
 		if (ret && ret != -ENOTSUPP)
 			return ret;
 
-		if (data->priv->codec_dai_fmt) {
+		/* an explicit link DAI format wins over the board default */
+		if (!rtd->dai_link->dai_fmt && data->priv->codec_dai_fmt) {
 			ret = snd_soc_dai_set_fmt(codec_dai,
 						  data->priv->codec_dai_fmt);
 			if (ret && ret != -ENOTSUPP)
@@ -434,6 +441,23 @@ static int ayaneo_ps2_snd_prepare(struct snd_pcm_substream *substream)
 }
 
 /*
+ * erhai mic A-2b (2026-10-19): the CPU-dai TX channel-map derivation below is
+ * an erhai invention - the working OnePlus Pad 2 Pro port programs NO BE
+ * channel map at all and lets q6dma_hw_params() install the default FL/FR map
+ * (audioreach_set_default_channel_mapping()).  Ours overwrote that map with
+ * the compaction of the codec's master_channel_map, which with the b26 DTS is
+ * a single entry ({0} before, {1} after) while q6dma_set_channel_map() copies
+ * exactly that many entries into cfg->channel_map[] - so the remaining
+ * entries stayed stale and the DSP received a map whose first id is not the
+ * FL/FR pair.  Default OFF = parity with the working port; set to 1 to get the
+ * pre-b26 behaviour back at runtime.
+ */
+static bool erhai_tx_chmap;
+module_param(erhai_tx_chmap, bool, 0644);
+MODULE_PARM_DESC(erhai_tx_chmap,
+		 "derive the CPU-dai TX channel map from the codec (default 0 = off, like the working port)");
+
+/*
  * For SoundWire capture backends the ADSP codec_dma interface must be told
  * which LPASS intf channel carries each logical PCM channel. The codec
  * get_channel_map() returns master_channel_map[] indexed by master port
@@ -510,7 +534,9 @@ static int sc8280xp_snd_prepare(struct snd_pcm_substream *substream)
 	case TX_CODEC_DMA_TX_3:
 	case TX_CODEC_DMA_TX_4:
 	case TX_CODEC_DMA_TX_5:
-		ret = sc8280xp_snd_set_cpu_tx_channel_map(rtd, cpu_dai);
+		/* erhai mic A-2b: off by default, see erhai_tx_chmap */
+		if (erhai_tx_chmap)
+			ret = sc8280xp_snd_set_cpu_tx_channel_map(rtd, cpu_dai);
 		break;
 	default:
 		break;

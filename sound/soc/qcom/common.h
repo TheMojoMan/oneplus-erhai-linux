@@ -17,6 +17,10 @@ struct qcom_snd_tdm_slot_cfg {
 };
 
 int qcom_snd_parse_of(struct snd_soc_card *card);
+/* erhai mic A-2 (d1f84c6f9f): apply optional backend-rate/-channels/
+ * -sample-format conversions on top of the machine driver's defaults. */
+int qcom_snd_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
+			      struct snd_pcm_hw_params *params);
 int qcom_snd_get_dai_tdm_slots(struct snd_soc_pcm_runtime *rtd,
 			       struct qcom_snd_tdm_slot_cfg *cpu_cfg,
 			       struct qcom_snd_tdm_slot_cfg *codec_cfg);

@@ -10,6 +10,7 @@
 #include <sound/pcm_params.h>
 #include <dt-bindings/soc/qcom,gpr.h>
 #include "q6apm.h"
+#include "q6dsp-common.h"
 #include "audioreach.h"
 
 /* SubGraph Config */
@@ -313,19 +314,15 @@ void *audioreach_alloc_apm_cmd_pkt(int pkt_size, uint32_t opcode, uint32_t token
 }
 EXPORT_SYMBOL_GPL(audioreach_alloc_apm_cmd_pkt);
 
-void audioreach_set_default_channel_mapping(u8 *ch_map, int num_channels)
+int audioreach_set_default_channel_mapping(u8 *ch_map, int num_channels)
 {
-	if (num_channels == 1) {
-		ch_map[0] =  PCM_CHANNEL_FL;
-	} else if (num_channels == 2) {
-		ch_map[0] =  PCM_CHANNEL_FL;
-		ch_map[1] =  PCM_CHANNEL_FR;
-	} else if (num_channels == 4) {
-		ch_map[0] =  PCM_CHANNEL_FL;
-		ch_map[1] =  PCM_CHANNEL_FR;
-		ch_map[2] =  PCM_CHANNEL_LS;
-		ch_map[3] =  PCM_CHANNEL_RS;
-	}
+	int ret = q6dsp_map_channels(ch_map, num_channels);
+
+	/* Preserve the AudioReach mono convention used by existing topologies. */
+	if (!ret && num_channels == 1)
+		ch_map[0] = PCM_CHANNEL_FL;
+
+	return ret;
 }
 EXPORT_SYMBOL_GPL(audioreach_set_default_channel_mapping);
 
@@ -1319,7 +1316,15 @@ static int audioreach_pcm_set_media_format(struct q6apm_graph *graph,
 	media_cfg->interleaved = module->interleave_type;
 	media_cfg->num_channels = mcfg->num_channels;
 	media_cfg->q_factor = mcfg->bit_width - 1;
-	media_cfg->bits_per_sample = mcfg->bit_width;
+	/*
+	 * erhai mic A-2: S24_LE stores each 24-bit sample in a 32-bit ALSA
+	 * word, so describe the CONTAINER width when the caller supplies one
+	 * (ALSA's physical width) and keep the old fallback otherwise.
+	 * Ported from yzddmr6 <46088090+yzddmr6@users.noreply.github.com>,
+	 * "ASoC: qcom: audioreach: preserve the PCM sample container width",
+	 * github.com/yzddmr6/linux-sm8750-erhai 4739a12a35.
+	 */
+	media_cfg->bits_per_sample = mcfg->bits_per_sample ?: mcfg->bit_width;
 	/* Convert the physical mapping to a logical mapping of the channels */
 	for (i = 0, j = 0; i < AR_PCM_MAX_NUM_CHANNEL && j < mcfg->num_channels; i++) {
 		if (!mcfg->channel_map[i])
@@ -1411,7 +1416,8 @@ static int audioreach_shmem_set_media_format(struct q6apm_graph *graph,
 		cfg->sample_rate = mcfg->sample_rate;
 		cfg->bit_width = mcfg->bit_width;
 		cfg->alignment = PCM_LSB_ALIGNED;
-		cfg->bits_per_sample = mcfg->bit_width;
+		/* erhai mic A-2 (4739a12a35): container width, see above */
+		cfg->bits_per_sample = mcfg->bits_per_sample ?: mcfg->bit_width;
 		cfg->q_factor = mcfg->bit_width - 1;
 		cfg->endianness = PCM_LITTLE_ENDIAN;
 		cfg->num_channels = mcfg->num_channels;
