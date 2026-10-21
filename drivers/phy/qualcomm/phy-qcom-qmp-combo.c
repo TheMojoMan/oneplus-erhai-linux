@@ -4256,6 +4256,14 @@ static int qmp_combo_usb_power_on(struct phy *phy)
 	unsigned int val;
 	int ret;
 
+	/*
+	 * erhai: usb_power_off() powers the PCS down, but with the common
+	 * block kept alive (see usb_exit) com_init() returns early and never
+	 * powers it back up, so PHYSTATUS never clears on the next init
+	 * (-110 on every system resume). Power the PCS up as com_init() does.
+	 */
+	qphy_setbits(pcs, cfg->regs[QPHY_PCS_POWER_DOWN_CONTROL], SW_PWRDN);
+
 	qmp_configure(qmp->dev, serdes, cfg->serdes_tbl, cfg->serdes_tbl_num);
 
 	/* Tx, Rx, and PCS configurations */
