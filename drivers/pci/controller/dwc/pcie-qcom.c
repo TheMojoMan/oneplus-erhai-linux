@@ -33,6 +33,7 @@
 #include <linux/regulator/consumer.h>
 #include <linux/reset.h>
 #include <linux/slab.h>
+#include <linux/suspend.h>
 #include <linux/types.h>
 #include <linux/units.h>
 
@@ -415,6 +416,17 @@ MODULE_PARM_DESC(qcom_pcie_wcn_relink,
 		"erhai: cnss_set_pci_link cold-cycles the WCN at cal->mission (default on)");
 static unsigned int qcom_pcie_wcn_relink_settle_ms = 100;
 module_param(qcom_pcie_wcn_relink_settle_ms, uint, 0644);
+/*
+ * erhai: a SYSTEM suspend/resume pair (cnss_pci_suspend -> MHI SUSPEND(6)+WoW,
+ * cnss_pci_resume -> MHI RESUME(7)) is NOT an idle shutdown, so it must not
+ * cold-cycle the chip (see qcom_pcie_wcn_set_link()).  This knob restores the
+ * OLD, broken behaviour for A/B: 1 = do the atomic cold-cycle even during a
+ * system sleep, 0 (default) = leave the link/chip alone there.
+ */
+static unsigned int qcom_pcie_wcn_sleep_cycle;
+module_param(qcom_pcie_wcn_sleep_cycle, uint, 0644);
+MODULE_PARM_DESC(qcom_pcie_wcn_sleep_cycle,
+		 "erhai: 1 = cold-cycle the WCN inside a system suspend/resume too (old behaviour, breaks MHI resume; default 0)");
 
 static void __qcom_pcie_perst_assert(struct qcom_pcie *pcie, bool assert)
 {
@@ -477,6 +489,37 @@ int qcom_pcie_wcn_set_link(bool up)
 		return -ENODEV;
 	}
 	pci = pcie->pci;
+
+	/*
+	 * SYSTEM SLEEP (suspend AND resume): never cold-cycle.  A system
+	 * suspend/resume pair is not an idle shutdown: cnss_pci_suspend() has
+	 * just put the chip into MHI SUSPEND(6) + WoW and cnss_pci_resume() will
+	 * ask for MHI RESUME(7) on the way back, i.e. it expects the SAME
+	 * firmware image to still be running.  A cold cycle in between reboots
+	 * the chip (fresh SBL->AMSS, MHI back in RESET), so RESUME(7) is refused
+	 * with -EINVAL -> cnss_pci_resume() returns -EAGAIN and wlan.ko NEVER
+	 * re-attaches: "Target is suspended" on every WMI command,
+	 * hdd_start_station_adapter "failed to create vdev: -22", no networks,
+	 * radio on/off dead, USB-C dead too -- i.e. every suspend cost the WLAN
+	 * until the next reboot (measured 2026-10-21).
+	 *
+	 * pm_suspend_in_progress() spans exactly the window we must not touch:
+	 * it is set in suspend_devices_and_enter() before dpm_suspend_start()
+	 * and cleared after dpm_resume_end(), so it is true for BOTH
+	 * cnss_pci_suspend() and cnss_pci_resume().  Behaviour here is then
+	 * identical to the old cnss stub (qcom_pcie_wcn_relink=0): the PCI core
+	 * and cnss do their own LPM save/restore and the chip simply survives
+	 * the sleep.  NOTE the pending flag is deliberately neither armed nor
+	 * consumed here, so a cycle armed BEFORE the sleep (a real idle
+	 * shutdown) is still executed by the first UP after the system runs
+	 * again.  A/B knob: qcom_pcie_wcn_sleep_cycle=1 restores the old path.
+	 */
+	if (pm_suspend_in_progress() && !qcom_pcie_wcn_sleep_cycle) {
+		dev_info(pci->dev,
+			 "erhai-cc: WCN %s during system sleep -- link/chip untouched, NO cold-cycle (pending=%d)\n",
+			 up ? "UP" : "DOWN", qcom_pcie_wcn_cycle_pending);
+		return 0;
+	}
 
 	if (!up) {
 		/* Defer: leave the link up while cnss does its bookkeeping. */
