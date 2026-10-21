@@ -911,6 +911,15 @@ static void hif_exec_napi_kill(struct hif_exec_context *ctx)
 	struct hif_napi_exec_context *n_ctx = hif_exec_get_napi(ctx);
 	int irq_ind;
 
+	/*
+	 * erhai: a second kill of the same context must be a no-op. The first
+	 * kill deletes the napi and frees its dummy netdev, but napi.dev still
+	 * points at the freed netdev, and netif_napi_del() and napi_disable()
+	 * take netdev_lock(napi->dev): a second kill locks freed memory.
+	 */
+	if (!n_ctx->netdev)
+		return;
+
 	if (ctx->inited) {
 		qdf_napi_disable(&n_ctx->napi);
 		ctx->inited = 0;
