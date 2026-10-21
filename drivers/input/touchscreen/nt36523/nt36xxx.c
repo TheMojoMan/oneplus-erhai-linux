@@ -1767,8 +1767,20 @@ static void nvt_resume_work(struct work_struct *work)
  */
 void nvt_ts_panel_power_off(void)
 {
-	if (!ts || !bTouchIsAwake)
+	if (!ts)
 		return;
+
+	/*
+	 * A resume_work still in flight has not set bTouchIsAwake yet; let it
+	 * finish on live rails, or it completes after they drop and leaves the
+	 * IC marked awake, so the next panel enable skips re-init.
+	 */
+	if (ts->event_wq)
+		flush_work(&ts->resume_work);
+	if (!bTouchIsAwake) {
+		NVT_LOG("display off: NT36536 already asleep\n");
+		return;
+	}
 
 	NVT_LOG("display off: sleeping NT36536 before panel rail drop\n");
 	nvt_ts_suspend(&ts->client->dev);
@@ -2450,6 +2462,19 @@ static int nvt_drm_notifier_callback(struct notifier_block *self, unsigned long 
 
 static int nvt_pm_suspend(struct device *dev)
 {
+	/*
+	 * erhai: a panel enable during suspend entry (console switch) queues
+	 * resume_work, which then races the SPI controller's suspend
+	 * (-ESHUTDOWN). Finish queued work while the bus is still up, then put
+	 * the IC to sleep so the panel enable after resume re-inits it.
+	 */
+	flush_work(&ts->resume_work);
+	flush_work(&ts->suspend_work);
+	if (bTouchIsAwake && !ts->db_wakeup) {
+		NVT_LOG("system suspend: sleeping NT36536\n");
+		nvt_ts_suspend(dev);
+	}
+
 	if (device_may_wakeup(dev) && ts->db_wakeup) {
 		NVT_LOG("enable touch irq wake\n");
 		enable_irq_wake(ts->client->irq);
