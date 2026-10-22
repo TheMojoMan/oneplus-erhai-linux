@@ -850,6 +850,26 @@ int sc8547a_pps_snapshot(int *vbus_mv, int *vbat_mv, int *ibus_ma)
 }
 EXPORT_SYMBOL_GPL(sc8547a_pps_snapshot);
 
+/*
+ * Raw master REG_06 (converter status) and REG_07 (CHG_EN) for the erhai_pps
+ * trace: whether CHG_EN is still latched between feeds.  Read-only.  REG_0F
+ * (interrupt flags) is left to the IRQ handler: a flag register may clear on
+ * read, which would hide flags from it.
+ */
+int sc8547a_pps_regs(u8 *r06, u8 *r07)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+	int ret;
+
+	if (!sc)
+		return -ENODEV;
+	ret = sc8547_read_byte(sc, SC8547_REG_06, r06);
+	if (ret)
+		return ret;
+	return sc8547_read_byte(sc, SC8547_REG_07, r07);
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_regs);
+
 bool sc8547a_pps_cp_engaged(void)
 {
 	return pps_cp_engaged;

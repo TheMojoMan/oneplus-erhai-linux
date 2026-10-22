@@ -45,4 +45,7 @@ int sc8547a_pps_cp_engage(int *need_mv);
 int sc8547a_pps_cp_feed(int *vbus_mv, int *vbat_mv);
 void sc8547a_pps_cp_disengage(void);
 
+/* Raw master REG_06 / REG_07 for the erhai_pps trace (read-only). */
+int sc8547a_pps_regs(u8 *r06, u8 *r07);
+
 #endif /* _SC8547A_H_ */

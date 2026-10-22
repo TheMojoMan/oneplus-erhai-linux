@@ -66,6 +66,9 @@
 #include "erhai_otg_glink.h"
 #include "sc8547a.h"
 
+#define CREATE_TRACE_POINTS
+#include "erhai_pps_trace.h"
+
 /* sc8547a PPS-CP API (see drivers/power/supply/sc8547a.c) — the 2:1 charge-pump
  * entry points this engine drives when the chip window is reachable.  Resolved
  * lazily via symbol_get() exactly like pps_sc_delivering(): this module must
@@ -287,6 +290,16 @@ MODULE_PARM_DESC(pps_cp_feed_ms,
 		 "engine poll period (ms) while the CP is engaged - must stay under the "
 		 "SC8547A 1000 ms REG_09 watchdog window");
 
+static unsigned int pps_log_ticks = 60;
+module_param(pps_log_ticks, uint, 0644);
+MODULE_PARM_DESC(pps_log_ticks,
+		 "log this many charging ticks per session to dmesg (default 60 = ~2 minutes at 2000 ms)");
+
+static bool pps_voocphy_enable = true;
+module_param(pps_voocphy_enable, bool, 0644);
+MODULE_PARM_DESC(pps_voocphy_enable,
+		 "value written to USB_PPS_VOOCPHY_ENABLE(49) on PPS entry (default 1 = vendor order; lab experiment 2b sets 0)");
+
 /* ---- state machine ---- */
 enum pps_state {
 	PPS_IDLE = 0,		/* nothing attached / not a PPS adapter */
@@ -333,6 +346,7 @@ struct erhai_pps {
 	unsigned long		armed_since;
 	unsigned long		ramp_since;
 	unsigned int		stall_count;
+	bool			plug_logged;	/* adapter line printed for this plug */
 
 	/* what we last commanded / observed */
 	unsigned int		set_volt_mv;
@@ -393,6 +407,16 @@ static bool pps_sc_identifying(void)
 		identifying = fn();
 
 	return identifying;
+}
+
+/* optional raw REG_06/REG_07 read for the trace (sc8547a module) */
+static int pps_sc_regs(u8 *r06, u8 *r07)
+{
+	static int (*fn)(u8 *r06, u8 *r07);
+
+	if (!fn)
+		fn = (int (*)(u8 *, u8 *))symbol_get(sc8547a_pps_regs);
+	return fn ? fn(r06, r07) : -ENODEV;
 }
 
 /* ---- ADSP prop helpers ---- */
@@ -568,6 +592,7 @@ static void pps_exit(struct erhai_pps *p, const char *reason)
 	p->exits++;
 	p->charg_ticks = 0;
 	pr_info("erhai_pps: exit: %s\n", reason);
+	trace_erhai_pps_cp_event(reason, 0, -1, -1, -1, p->set_volt_mv);
 	/* drop the charge pump BEFORE the 5 V revert: at 5 V the 2:1 window is
 	 * gone and a latched CHG_EN has nothing to drive but also no watchdog. */
 	if (pps_cp_is_engaged())
@@ -593,8 +618,18 @@ static void pps_poll(struct erhai_pps *p)
 	case PPS_IDLE: {
 		bool vooc;
 
-		if (online <= 0)
+		if (online <= 0) {
+			p->plug_logged = false;
 			return;
+		}
+		if (!p->plug_logged) {
+			p->plug_logged = true;
+			pr_info("erhai_pps: adapter online: real_type %d pps_type %d pps_max_curr %d vbus %d mV\n",
+				pps_usb_get(PPS_PROP_USB_REAL_TYPE),
+				pps_usb_get(PPS_PROP_USB_GET_PPS_TYPE),
+				pps_usb_get(PPS_PROP_USB_GET_PPS_MAX_CURR),
+				p->vbus_mv);
+		}
 		if (!pps_deployable(p, &vooc))
 			return;
 		pps_enter(p, PPS_ARMED, "PD_PPS adapter");
@@ -639,7 +674,8 @@ static void pps_poll(struct erhai_pps *p)
 		 * the PDO caps input at ~1.3 A.  The sequence below delivers
 		 * 8.2-8.6 V x 3 A in ~= 24 W, pack 3.6-4 A and climbing.
 		 */
-		rc = pps_usb_set(PPS_PROP_USB_PPS_VOOCPHY_ENABLE, 1);
+		rc = pps_usb_set(PPS_PROP_USB_PPS_VOOCPHY_ENABLE,
+				 pps_voocphy_enable ? 1 : 0);
 		if (rc)
 			goto fail;
 		rc = pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, pps_target_volt_mv);
@@ -808,16 +844,22 @@ fail:
 			const struct erhai_pps_sc_api *a = pps_sc_cp_get();
 
 			if (a) {
-				int cvbus = 0, cvbat = 0, diff = 0, rc;
+				int cvbus = 0, cvbat = 0, cibus = 0, diff = 0, rc;
 
-				rc = a->snapshot(&cvbus, &cvbat, NULL);
+				rc = a->snapshot(&cvbus, &cvbat, &cibus);
 				if (rc == 0) {
 					diff = cvbus - cvbat * 2;
 					if (a->cp_engaged()) {
 						rc = a->cp_feed(&cvbus, &cvbat);
 						if (rc) {
-							pr_info("erhai_pps: CP feed drop rc=%d (diff %d mV) - buck path\n",
-								rc, diff);
+							/* cvbus/cvbat are feed()'s own reads; ibus is
+							 * from the snapshot just before it */
+							pr_info("erhai_pps: CP feed drop rc=%d (diff %d mV ibus %d mA set %u mV) - buck path\n",
+								rc, cvbus - cvbat * 2, cibus,
+								p->set_volt_mv);
+							trace_erhai_pps_cp_event("drop", rc, cvbus,
+										 cvbat, cibus,
+										 p->set_volt_mv);
 							p->cp_drops++;
 						}
 					} else {
@@ -830,8 +872,13 @@ fail:
 							rc = a->cp_engage(&need);
 							if (rc == 0) {
 								p->cp_engages++;
-								pr_info("erhai_pps: CP 2:1 ENGAGED (chip vbus %d mV vbat %d mV diff %d mV)\n",
-								    cvbus, cvbat, diff);
+								pr_info("erhai_pps: CP 2:1 ENGAGED (chip vbus %d mV vbat %d mV diff %d mV ibus %d mA set %u mV)\n",
+								    cvbus, cvbat, diff, cibus,
+								    p->set_volt_mv);
+								trace_erhai_pps_cp_event("engage", 0,
+											 cvbus, cvbat,
+											 cibus,
+											 p->set_volt_mv);
 							}
 						}
 						/* b6: servo PPS VOLT toward 2*vbat + target
@@ -871,16 +918,55 @@ fail:
 			}
 		}
 		p->charg_ticks++;
-		if (p->charg_ticks < 60)	/* ~first 2 minutes */
-			pr_info("erhai_pps: %s vbus %d mV vbat %d mV ibat %d mA soc %d%% t %dC curr %u mA\n",
+		if (p->charg_ticks < pps_log_ticks)
+			pr_info("erhai_pps: %s vbus %d mV vbat %d mV ibat %d mA soc %d%% t %dC set %u mV curr %u mA cp %s\n",
 				charging ? "charging" : "taper",
 				p->vbus_mv, p->vbat_mv, p->ibat_ma, p->soc,
-				p->temp_c, p->set_curr_ma);
+				p->temp_c, p->set_volt_mv, p->set_curr_ma,
+				pps_cp_is_engaged() ? "on" : "off");
 		return;
 	}
 	default:
 		return;
 	}
+}
+
+/* one tracepoint sample per poll while a session is up; chip reads only
+ * happen when the event is enabled */
+static void pps_trace_sample(struct erhai_pps *p)
+{
+	const struct erhai_pps_sc_api *a;
+	struct erhai_pps_trace_sample s = {
+		.state		= pps_state_names[p->state],
+		.adsp_vbus_mv	= p->vbus_mv,
+		.set_volt_mv	= p->set_volt_mv,
+		.set_curr_ma	= p->set_curr_ma,
+		.vbat_mv	= p->vbat_mv,
+		.ibat_ma	= p->ibat_ma,
+		.soc		= p->soc,
+		.temp_c		= p->temp_c,
+		.chip_vbus_mv	= -1,
+		.chip_vbat_mv	= -1,
+		.chip_ibus_ma	= -1,
+		.r06		= -1,
+		.r07		= -1,
+	};
+	u8 r06, r07;
+
+	if (!trace_erhai_pps_sample_enabled() || p->state == PPS_IDLE)
+		return;
+	a = pps_sc_cp_get();
+	if (a) {
+		s.cp = a->cp_engaged();
+		if (a->snapshot(&s.chip_vbus_mv, &s.chip_vbat_mv,
+				&s.chip_ibus_ma))
+			s.chip_vbus_mv = s.chip_vbat_mv = s.chip_ibus_ma = -1;
+		if (!pps_sc_regs(&r06, &r07)) {
+			s.r06 = r06;
+			s.r07 = r07;
+		}
+	}
+	trace_erhai_pps_sample(&s);
 }
 
 static void pps_ws(struct work_struct *work)
@@ -890,6 +976,7 @@ static void pps_ws(struct work_struct *work)
 
 	mutex_lock(&pps_lock);
 	pps_poll(p);
+	pps_trace_sample(p);
 	mutex_unlock(&pps_lock);
 	/* while the charge pump is engaged, poll at the REG_09 watchdog feed
 	 * interval (must stay under the SC8547A 1000 ms window); otherwise the
