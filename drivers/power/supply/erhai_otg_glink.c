@@ -810,6 +810,28 @@ int erhai_otg_adsp_prop_get(u32 opcode, u32 property)
 }
 EXPORT_SYMBOL_GPL(erhai_otg_adsp_prop_get);
 
+/*
+ * Last BATT_CHG_EN that userspace policy asked for through the debugfs cmd
+ * knob (the desktop's bypass-charging switch writes "24 0 0x31"); true =
+ * inhibit.  erhai_pps's own BATT_CHG_EN writes do not go through the knob.
+ */
+static bool erhai_otg_cmd_inhibit;
+
+/*
+ * Is charging inhibited by policy: the max_soc limit holding, or a userspace
+ * BATT_CHG_EN=0?  The ADSP inhibit only stops the ADSP's own charger, so a
+ * driver that feeds the pack another way (the SC8547A pump under erhai_pps)
+ * must stand down while this is true.
+ */
+bool erhai_otg_charge_inhibited(void)
+{
+	struct erhai_otg *otg = erhai_otg_glink_dev;
+
+	return READ_ONCE(erhai_otg_cmd_inhibit) ||
+	       (otg && READ_ONCE(otg->chglim_state) == 1);
+}
+EXPORT_SYMBOL_GPL(erhai_otg_charge_inhibited);
+
 int erhai_otg_adsp_prop_set(u32 opcode, u32 property, u32 value)
 {
 	if (!erhai_otg_glink_dev)
@@ -1385,6 +1407,9 @@ static ssize_t erhai_otg_cmd_write(struct file *file, const char __user *ubuf,
 	ret = erhai_otg_set_op(otg, opcode, property, value);
 	if (ret < 0)
 		return ret;
+
+	if (opcode == BC_BATTERY_PROPERTY_SET && property == BATT_CHG_EN)
+		WRITE_ONCE(erhai_otg_cmd_inhibit, value == 0);
 
 	/*
 	 * Keep the kernel's armed flag coherent with manual userspace
