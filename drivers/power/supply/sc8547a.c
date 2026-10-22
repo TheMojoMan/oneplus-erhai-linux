@@ -823,6 +823,7 @@ static int sc8547_reset_voocphy(struct sc8547a_device *sc)
  * window or REG_07 self-clears and the CP drops out on its own (safety).
  */
 static bool pps_cp_engaged;
+static bool pps_adc_hold;	/* keep the ADC on across drops (PPS session) */
 static bool sc8547_slave_is_on(void);	/* defined in the slave section below */
 
 void sc8547a_pps_cp_disengage(void);	/* defined below, called by feed()'s drop path */
@@ -963,9 +964,28 @@ void sc8547a_pps_cp_disengage(void)
 	/* full teardown mirrors the VOOC exit path (reset_voocphy): CP off,
 	 * watchdog off, OCP/OVP and ADC back to base defaults. */
 	sc8547_reset_voocphy(sc);
+	/* ...except the ADC while the PPS session is still up: engage() and the
+	 * engine steer on these ADCs, and with the ADC off they read the last
+	 * conversion forever (lab Experiment 4: 855 identical samples). */
+	if (pps_adc_hold)
+		sc8547_set_adc_enable(sc, true);
 	dev_info(sc->dev, "PPS CP: master disengaged - buck path restored\n");
 }
 EXPORT_SYMBOL_GPL(sc8547a_pps_cp_disengage);
+
+/*
+ * Hold the master ADC on for a whole PPS session (vendor oplus_chg_pps keeps
+ * the CP ADC on from switch-check to exit).  Off again when released.
+ */
+void sc8547a_pps_adc_hold(bool on)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+
+	pps_adc_hold = on;
+	if (sc && !pps_cp_engaged)
+		sc8547_set_adc_enable(sc, on);
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_adc_hold);
 
 /* ------------------ slave charge-pump (2:1 parallel) ------------------ *
  * The slave SC8547A shares the bus current in parallel with the master so

@@ -150,6 +150,10 @@ static void pps_cp_drop(void)
 
 #define PPS_USB_TYPE_PD_PPS		8	/* POWER_SUPPLY_USB_TYPE_PD_PPS */
 
+/* USB_INPUT_CURR_LIMIT "unsuspend": no limit from the host (vendor
+ * oplus_hal_adsp.c:6294 writes this to release WIRED_CHARGE_SUSPEND) */
+#define PPS_ICL_UNSUSPEND		0xFFFFFFFF
+
 #define PPS_USB_OP_GET			0x32
 #define PPS_USB_OP_SET			0x33
 #define PPS_BATT_OP_GET			0x30
@@ -267,24 +271,68 @@ MODULE_PARM_DESC(pps_cp_enable,
 		 "drive the SC8547A charge pump 2:1 from the PPS bus when the chip window is reachable "
 		 "(b5; owner-testing).  Disable = pure buck path (b4 behaviour).");
 
-static unsigned int pps_cp_target_mv = 150;
-module_param(pps_cp_target_mv, uint, 0644);
-MODULE_PARM_DESC(pps_cp_target_mv,
-		 "CP servo target for vbus - 2*vbat at the chip (mV; engage window is 110..700)");
+static bool pps_cp_buck_suspend = true;
+module_param(pps_cp_buck_suspend, bool, 0644);
+MODULE_PARM_DESC(pps_cp_buck_suspend,
+		 "suspend the buck (USB_INPUT_CURR_LIMIT 0) while the pump runs, as the vendor does "
+		 "(WIRED_CHARGE_SUSPEND); any pump stop resumes it in the same poll");
 
-static unsigned int pps_cp_vstep_mv = 50;
+static unsigned int pps_cp_entry_margin_mv = 450;
+module_param(pps_cp_entry_margin_mv, uint, 0644);
+MODULE_PARM_DESC(pps_cp_entry_margin_mv,
+		 "pump entry: request 2*vbat + this before engaging (mV; vendor +450)");
+
+static unsigned int pps_cp_lift_ms = 5000;
+module_param(pps_cp_lift_ms, uint, 0644);
+MODULE_PARM_DESC(pps_cp_lift_ms,
+		 "time allowed for the pump to engage after the entry request, buck suspended (ms)");
+
+static unsigned int pps_cp_rearm_ms = 10000;
+module_param(pps_cp_rearm_ms, uint, 0644);
+MODULE_PARM_DESC(pps_cp_rearm_ms, "hold-off after a pump drop or a failed entry (ms)");
+
+static unsigned int pps_cp_rearm_max = 5;
+module_param(pps_cp_rearm_max, uint, 0644);
+MODULE_PARM_DESC(pps_cp_rearm_max, "pump attempts per plug-in; then buck path for the rest of it");
+
+static unsigned int pps_cp_vstep_mv = 40;
 module_param(pps_cp_vstep_mv, uint, 0644);
-MODULE_PARM_DESC(pps_cp_vstep_mv, "CP PPS-voltage servo step (mV) per poll");
+MODULE_PARM_DESC(pps_cp_vstep_mv, "pump ibus servo: PPS voltage step (mV) per poll (vendor 40)");
+
+static unsigned int pps_cp_vstep_over_mv = 100;
+module_param(pps_cp_vstep_over_mv, uint, 0644);
+MODULE_PARM_DESC(pps_cp_vstep_over_mv,
+		 "pump ibus servo: step down (mV) when ibus is over target + 500 mA (vendor 100)");
+
+static unsigned int pps_cp_ibus_band_ma = 100;
+module_param(pps_cp_ibus_band_ma, uint, 0644);
+MODULE_PARM_DESC(pps_cp_ibus_band_ma, "pump ibus servo: deadband around the target (mA; vendor 100)");
+
+static unsigned int pps_cp_diff_max_mv = 650;
+module_param(pps_cp_diff_max_mv, uint, 0644);
+MODULE_PARM_DESC(pps_cp_diff_max_mv,
+		 "never step VBUS up while vbus - 2*vbat at the chip is at or above this (mV; "
+		 "the pump drops at 700)");
+
+static unsigned int pps_cp_ibat_max_ma = 9000;
+module_param(pps_cp_ibat_max_ma, uint, 0644);
+MODULE_PARM_DESC(pps_cp_ibat_max_ma, "pump ibus servo: step VBUS down while the pack takes more than this (mA)");
+
+static unsigned int pps_cp_min_ibus_ma = 300;
+module_param(pps_cp_min_ibus_ma, uint, 0644);
+MODULE_PARM_DESC(pps_cp_min_ibus_ma,
+		 "engaged pump carrying less than this for 4 polls (after pps_cp_settle_ms) is "
+		 "released to the buck (mA; vendor 300)");
+
+static unsigned int pps_cp_settle_ms = 2000;
+module_param(pps_cp_settle_ms, uint, 0644);
+MODULE_PARM_DESC(pps_cp_settle_ms, "grace after an engage before the low-ibus check (ms)");
 
 static unsigned int pps_cp_max_volt_mv = 9500;
 module_param(pps_cp_max_volt_mv, uint, 0644);
-MODULE_PARM_DESC(pps_cp_max_volt_mv, "CP servo PPS VBUS ceiling (mV)");
+MODULE_PARM_DESC(pps_cp_max_volt_mv, "pump PPS VBUS ceiling (mV)");
 
-static unsigned int pps_cp_min_volt_mv = 8400;
-module_param(pps_cp_min_volt_mv, uint, 0644);
-MODULE_PARM_DESC(pps_cp_min_volt_mv, "CP servo PPS VBUS floor (mV) - never undershoot the buck point");
-
-static unsigned int pps_cp_feed_ms = 500;
+static unsigned int pps_cp_feed_ms = 300;
 module_param(pps_cp_feed_ms, uint, 0644);
 MODULE_PARM_DESC(pps_cp_feed_ms,
 		 "engine poll period (ms) while the CP is engaged - must stay under the "
@@ -365,6 +413,17 @@ struct erhai_pps {
 	unsigned long		charg_ticks;
 	unsigned int		cp_engages;
 	unsigned int		cp_drops;
+
+	/* pump controller (c3) */
+	bool			buck_off;	/* ICL 0 written for the pump */
+	bool			adc_held;	/* sc8547a ADC held on for the session */
+	unsigned long		cp_lift_since;	/* entry request sent (0 = not lifting) */
+	unsigned long		cp_holdoff_until;
+	unsigned long		cp_engaged_since;
+	unsigned int		cp_low_cnt;	/* consecutive low-ibus polls */
+	unsigned long		cp_fed_at;	/* last successful feed */
+	bool			inhibit_held;	/* policy inhibit seen this session */
+	unsigned int		cp_rearms;	/* pump attempts this plug */
 };
 
 static struct erhai_pps *g_pps;
@@ -419,6 +478,17 @@ static int pps_sc_regs(u8 *r06, u8 *r07)
 	return fn ? fn(r06, r07) : -ENODEV;
 }
 
+/* optional "keep the pump ADC on for the session" (sc8547a module) */
+static void pps_sc_adc_hold(bool on)
+{
+	static void (*fn)(bool on);
+
+	if (!fn)
+		fn = (void (*)(bool))symbol_get(sc8547a_pps_adc_hold);
+	if (fn)
+		fn(on);
+}
+
 /* ---- ADSP prop helpers ---- */
 static int pps_usb_get(u32 prop)
 {
@@ -451,15 +521,18 @@ static struct power_supply *pps_bat_psy(void)
 	return psy;
 }
 
-static int pps_psy_int(struct power_supply *psy, enum power_supply_property prop)
+/* the value goes through *out: a discharging pack reads a negative
+ * current_now, which is a reading, not an errno (lab c3 run 1) */
+static int pps_psy_int(struct power_supply *psy, enum power_supply_property prop,
+		       int *out)
 {
 	union power_supply_propval val = { };
 	int rc;
 
 	rc = power_supply_get_property(psy, prop, &val);
-	if (rc)
-		return rc;
-	return val.intval;
+	if (!rc)
+		*out = val.intval;
+	return rc;
 }
 
 /* fills p->vbat_mv / p->ibat_ma / p->soc / p->temp_c; returns 0 on success */
@@ -471,13 +544,14 @@ static int pps_read_battery(struct erhai_pps *p)
 	if (!psy)
 		return -ENODEV;
 
-	v = pps_psy_int(psy, POWER_SUPPLY_PROP_VOLTAGE_NOW);
-	i = pps_psy_int(psy, POWER_SUPPLY_PROP_CURRENT_NOW);
-	s = pps_psy_int(psy, POWER_SUPPLY_PROP_CAPACITY);
-	t = pps_psy_int(psy, POWER_SUPPLY_PROP_TEMP);
-	power_supply_put(psy);
-	if (v < 0 || i < 0 || s < 0 || t < 0)
+	if (pps_psy_int(psy, POWER_SUPPLY_PROP_VOLTAGE_NOW, &v) ||
+	    pps_psy_int(psy, POWER_SUPPLY_PROP_CURRENT_NOW, &i) ||
+	    pps_psy_int(psy, POWER_SUPPLY_PROP_CAPACITY, &s) ||
+	    pps_psy_int(psy, POWER_SUPPLY_PROP_TEMP, &t)) {
+		power_supply_put(psy);
 		return -EIO;
+	}
+	power_supply_put(psy);
 
 	/* sysfs battery: voltage_now uV -> mV; current_now uA -> mA; temp 0.1C -> C */
 	p->vbat_mv = v / 1000;
@@ -552,10 +626,15 @@ static void pps_revert(struct erhai_pps *p)
 	rc = pps_batt_set(PPS_PROP_BATT_CHG_CTRL_LIM, 0);
 	if (rc)
 		pps_prop_err(p, "revert CHG_CTRL_LIM", rc);
-	rc = pps_batt_set(PPS_PROP_BATT_CHG_EN, 1);
+	/* re-enable charging only when no policy holds the pack (bypass
+	 * switch, max_soc): this write must not undo the user's inhibit */
+	rc = pps_batt_set(PPS_PROP_BATT_CHG_EN, erhai_otg_charge_inhibited() ? 0 : 1);
 	if (rc)
 		pps_prop_err(p, "revert CHG_EN", rc);
-	rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT, 1500000);
+	/* unsuspend, not a number: the ADSP takes 0 as "suspend input" and only
+	 * the vendor's 0xFFFFFFFF releases it; a plain limit written after a
+	 * suspend leaves the input suspended (lab, c4 build 7 bypass test) */
+	rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT, PPS_ICL_UNSUSPEND);
 	if (rc)
 		pps_prop_err(p, "revert ICL", rc);
 	rc = pps_usb_set(PPS_PROP_USB_PPS_VOOCPHY_ENABLE, 0);
@@ -565,6 +644,10 @@ static void pps_revert(struct erhai_pps *p)
 	p->set_volt_mv = 0;
 	p->set_curr_ma = 0;
 	p->stall_count = 0;
+	p->buck_off = false;
+	p->cp_lift_since = 0;
+	/* the next attached poll re-runs the plug-in unsuspend */
+	p->plug_logged = false;
 }
 
 /* ---- state transitions ---- */
@@ -597,8 +680,199 @@ static void pps_exit(struct erhai_pps *p, const char *reason)
 	 * gone and a latched CHG_EN has nothing to drive but also no watchdog. */
 	if (pps_cp_is_engaged())
 		pps_cp_drop();
+	if (p->adc_held) {
+		pps_sc_adc_hold(false);
+		p->adc_held = false;
+	}
 	pps_revert(p);
 	pps_enter(p, PPS_IDLE, NULL);
+}
+
+/* ---- pump controller (c3): the vendor recipe, docs/vendor-pps.md ---- */
+
+/* PPS request as the vendor sends it: VOLT then CURR, always both
+ * (oplus_chg_set_pps_config, adsp.c:10302-10303) */
+static int pps_pdo_set(struct erhai_pps *p, unsigned int mv, unsigned int ma)
+{
+	int rc = pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, mv);
+
+	if (rc)
+		return rc;
+	p->set_volt_mv = mv;
+	rc = pps_usb_set(PPS_PROP_USB_SET_PPS_CURR, ma);
+	if (!rc)
+		p->set_curr_ma = ma;
+	return rc;
+}
+
+/* buck input suspend for the pump (vendor WIRED_CHARGE_SUSPEND -> ICL 0,
+ * adsp.c:6294); resume writes the vendor's unsuspend value, 0xFFFFFFFF:
+ * after a 0 the ADSP ignores an ordinary limit (lab, c4 build 7: input stuck
+ * at 0.1 W after "ICL 3000000"; 0xFFFFFFFF released it at once) */
+static int pps_buck_set(struct erhai_pps *p, bool off)
+{
+	int rc;
+
+	if (p->buck_off == off)
+		return 0;
+	rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT,
+			 off ? 0 : PPS_ICL_UNSUSPEND);
+	if (rc) {
+		pr_warn("erhai_pps: buck %s failed rc=%d\n",
+			off ? "suspend" : "resume", rc);
+		return rc;
+	}
+	p->buck_off = off;
+	trace_erhai_pps_cp_event(off ? "buck-off" : "buck-on", 0, -1, -1, -1,
+				 p->set_volt_mv);
+	return 0;
+}
+
+/*
+ * The guard: a pump that stops (drop, failed entry, taper, disabled) hands
+ * the plug straight back to the buck in the same poll.  Counted stops start
+ * the re-arm hold-off.  Non-zero only when the buck could not be resumed;
+ * the caller then exits, and the revert writes the ICL again.
+ */
+static int pps_cp_release(struct erhai_pps *p, const char *why, bool count)
+{
+	if (pps_cp_is_engaged())
+		pps_cp_drop();
+	p->cp_lift_since = 0;
+	if (count) {
+		p->cp_rearms++;
+		p->cp_holdoff_until = jiffies + msecs_to_jiffies(pps_cp_rearm_ms);
+		pr_info("erhai_pps: CP %s - buck path (attempt %u/%u, next in %u ms)\n",
+			why, p->cp_rearms, pps_cp_rearm_max, pps_cp_rearm_ms);
+	}
+	return pps_buck_set(p, false);
+}
+
+/*
+ * One pump step per poll while CHARGING.  Not engaged: once the PPS current
+ * is at its target (engaging during the ramp starves the pump, lab
+ * Experiment 4), suspend the buck so the bus is unloaded, request
+ * 2*vbat + pps_cp_entry_margin_mv, and engage when the chip window opens
+ * (vendor pps.c:1881-2014).  Engaged: feed the watchdog and servo the PPS
+ * voltage on the pump's own ibus, 40 mV at a time (vendor pps.c:3242-3361).
+ * Returns non-zero when the engine must exit.
+ */
+static int pps_cp_step(struct erhai_pps *p)
+{
+	const struct erhai_pps_sc_api *a = pps_sc_cp_get();
+	unsigned int target = p->target_curr_ma;
+	int cvbus, cvbat, cibus, diff, rc, need = 0;
+	unsigned int nv;
+
+	if (!a)
+		return 0;
+	if (!p->adc_held) {
+		pps_sc_adc_hold(true);
+		p->adc_held = true;
+	}
+	if (a->snapshot(&cvbus, &cvbat, &cibus)) {
+		/* blind: never leave a pump unfed or the buck suspended */
+		if (a->cp_engaged() || p->cp_lift_since)
+			return pps_cp_release(p, "adc read failed", true);
+		return 0;
+	}
+	diff = cvbus - cvbat * 2;
+
+	if (a->cp_engaged()) {
+		rc = a->cp_feed(&cvbus, &cvbat);
+		if (rc) {
+			/* cvbus/cvbat are feed()'s own reads; ibus is from the
+			 * snapshot just before it */
+			pr_info("erhai_pps: CP feed drop rc=%d (diff %d mV ibus %d mA set %u mV)\n",
+				rc, cvbus - cvbat * 2, cibus, p->set_volt_mv);
+			trace_erhai_pps_cp_event("drop", rc, cvbus, cvbat, cibus,
+						 p->set_volt_mv);
+			p->cp_drops++;
+			return pps_cp_release(p, "drop", true);
+		}
+		p->cp_fed_at = jiffies;
+		/* switching but carrying nothing: with the buck suspended the
+		 * pack would sit idle (vendor: 4 results under 300 mA) */
+		if (cibus < (int)pps_cp_min_ibus_ma &&
+		    time_after_eq(jiffies, p->cp_engaged_since +
+				  msecs_to_jiffies(pps_cp_settle_ms))) {
+			if (++p->cp_low_cnt >= 4)
+				return pps_cp_release(p, "low ibus", true);
+		} else {
+			p->cp_low_cnt = 0;
+		}
+		nv = p->set_volt_mv;
+		if (cibus > (int)(target + 500))
+			nv -= pps_cp_vstep_over_mv;
+		else if (cibus > (int)(target + pps_cp_ibus_band_ma) ||
+			 p->ibat_ma > (int)pps_cp_ibat_max_ma)
+			nv -= pps_cp_vstep_mv;
+		else if (cibus < (int)target - (int)pps_cp_ibus_band_ma &&
+			 diff < (int)pps_cp_diff_max_mv)
+			nv += pps_cp_vstep_mv;
+		nv = clamp_t(unsigned int, nv, cvbat * 2 + 100, pps_cp_max_volt_mv);
+		if (nv != p->set_volt_mv && pps_pdo_set(p, nv, target))
+			return -EIO;
+		return 0;
+	}
+
+	if (p->cp_rearms >= pps_cp_rearm_max ||
+	    time_before(jiffies, p->cp_holdoff_until) ||
+	    p->set_curr_ma < target)
+		return 0;
+
+	if (!p->cp_lift_since) {
+		if (pps_cp_buck_suspend && pps_buck_set(p, true)) {
+			p->cp_rearms++;
+			p->cp_holdoff_until = jiffies +
+					      msecs_to_jiffies(pps_cp_rearm_ms);
+			return 0;
+		}
+		nv = min_t(unsigned int,
+			   roundup(cvbat * 2 + pps_cp_entry_margin_mv, 20),
+			   pps_cp_max_volt_mv);
+		p->cp_lift_since = jiffies | 1;
+		pr_info("erhai_pps: CP entry: buck %s, request %u mV at %u mA (chip vbat %d mV diff %d mV)\n",
+			p->buck_off ? "suspended" : "on", nv, target, cvbat, diff);
+		return pps_pdo_set(p, nv, target);
+	}
+
+	rc = a->cp_engage(&need);
+	if (rc == 0) {
+		p->cp_lift_since = 0;
+		p->cp_engaged_since = jiffies;
+		p->cp_fed_at = jiffies;
+		p->cp_low_cnt = 0;
+		p->cp_engages++;
+		pr_info("erhai_pps: CP 2:1 ENGAGED (chip vbus %d mV vbat %d mV diff %d mV ibus %d mA set %u mV)\n",
+			cvbus, cvbat, diff, cibus, p->set_volt_mv);
+		trace_erhai_pps_cp_event("engage", 0, cvbus, cvbat, cibus,
+					 p->set_volt_mv);
+		return 0;
+	}
+	/*
+	 * Not in the pump's window yet: walk the request toward it, as the
+	 * vendor does (pps.c:2020-2035), instead of waiting on one shot.  The
+	 * unloaded bus overshoots the request by up to ~250 mV (c4 build 7:
+	 * diff 708-783 mV for a 2*vbat + 450 request, 5 timeouts in a row).
+	 */
+	if (rc == -EAGAIN) {
+		nv = p->set_volt_mv;
+		if (diff > (int)pps_cp_diff_max_mv)
+			nv -= pps_cp_vstep_over_mv;
+		else if (diff < (int)pps_cp_entry_margin_mv / 2)
+			nv += pps_cp_vstep_over_mv;
+		nv = clamp_t(unsigned int, nv, cvbat * 2 + 100, pps_cp_max_volt_mv);
+		if (nv != p->set_volt_mv && pps_pdo_set(p, nv, target))
+			return -EIO;
+	}
+	if (time_after_eq(jiffies, p->cp_lift_since +
+			  msecs_to_jiffies(pps_cp_lift_ms))) {
+		pr_info("erhai_pps: CP entry timed out (diff %d mV, engage rc=%d)\n",
+			diff, rc);
+		return pps_cp_release(p, "entry timeout", true);
+	}
+	return 0;
 }
 
 
@@ -623,12 +897,25 @@ static void pps_poll(struct erhai_pps *p)
 			return;
 		}
 		if (!p->plug_logged) {
+			int icl = pps_usb_get(PPS_PROP_USB_INPUT_CURR_LIMIT);
+
 			p->plug_logged = true;
-			pr_info("erhai_pps: adapter online: real_type %d pps_type %d pps_max_curr %d vbus %d mV\n",
+			/*
+			 * Every plug-in starts unsuspended: the revert at a
+			 * detach runs after the cable is gone, and the ADSP appears
+			 * to keep the last input limit it took while attached (0
+			 * when a session ends with the pump running; "icl was" below
+			 * shows what it held).  Left alone, the
+			 * next fixed-PD/5 V charger never charges (lab c4 dock
+			 * check: pack at -0.7..-1.1 A on the dock).
+			 */
+			rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT,
+					 PPS_ICL_UNSUSPEND);
+			pr_info("erhai_pps: adapter online: real_type %d pps_type %d pps_max_curr %d vbus %d mV (icl was %d, unsuspend rc=%d)\n",
 				pps_usb_get(PPS_PROP_USB_REAL_TYPE),
 				pps_usb_get(PPS_PROP_USB_GET_PPS_TYPE),
 				pps_usb_get(PPS_PROP_USB_GET_PPS_MAX_CURR),
-				p->vbus_mv);
+				p->vbus_mv, icl, rc);
 		}
 		if (!pps_deployable(p, &vooc))
 			return;
@@ -693,7 +980,8 @@ static void pps_poll(struct erhai_pps *p)
 		rc = pps_batt_set(PPS_PROP_BATT_AP_FASTCHG_ALLOW, 1);
 		if (rc)
 			goto fail;
-		rc = pps_batt_set(PPS_PROP_BATT_CHG_EN, 1);
+		rc = pps_batt_set(PPS_PROP_BATT_CHG_EN,
+				  erhai_otg_charge_inhibited() ? 0 : 1);
 		if (rc)
 			goto fail;
 		rc = pps_batt_set(PPS_PROP_BATT_CHG_CTRL_LIM, pps_fcc_ma * 1000);
@@ -711,6 +999,10 @@ static void pps_poll(struct erhai_pps *p)
 		p->set_volt_mv = pps_target_volt_mv;
 		p->set_curr_ma = pps_start_curr_ma;
 		p->target_curr_ma = min(pps_target_curr_ma, pps_max_curr_ma);
+		p->buck_off = false;
+		p->cp_lift_since = 0;
+		p->cp_holdoff_until = jiffies;
+		p->cp_rearms = 0;
 		p->sessions++;
 		p->entries++;
 		pps_enter(p, PPS_RAMP, NULL);
@@ -769,8 +1061,13 @@ fail:
 			return;
 		}
 		rc = pps_read_battery(p);
-		if (rc)
+		if (rc) {
+			/* blind: never sit with the buck suspended */
+			if ((p->buck_off || pps_cp_is_engaged()) &&
+			    pps_cp_release(p, "pack read failed", true))
+				pps_exit(p, PPS_EXIT_REASON_SET_FAIL);
 			return;
+		}
 
 		/* safety exits first */
 		if (p->vbat_mv < (int)pps_vbat_min_mv) {
@@ -791,7 +1088,7 @@ fail:
 		}
 		/* pack-stall watchdog: nothing flowing at high VBUS */
 		if (pps_stall_polls && p->vbus_mv > 7000 &&
-		    p->ibat_ma < 100) {
+		    p->ibat_ma < 100 && !p->cp_lift_since) {
 			if (++p->stall_count >= pps_stall_polls) {
 				pps_exit(p, PPS_EXIT_REASON_STALL);
 				return;
@@ -801,6 +1098,10 @@ fail:
 		}
 
 		if (p->vbat_mv >= (int)pps_vbat_max_mv) {
+			if (pps_cp_release(p, "taper", false)) {
+				pps_exit(p, PPS_EXIT_REASON_SET_FAIL);
+				return;
+			}
 			if (charging)
 				pps_enter(p, PPS_TAPER, "vbat at CV");
 			/* taper: shed current in steps, then hand to 5 V */
@@ -829,106 +1130,69 @@ fail:
 		}
 
 		/*
-		 * CP 2:1 direct-charge (b5, owner-testing): run the SC8547A pump
-		 * from the PPS bus when the chip's vbus - 2*vbat sits inside the
-		 * engage window, servoing the PPS VOLT setpoint in small steps
-		 * toward pps_cp_target_mv (the ADSP's settle is its own closed-loop
-		 * choice — open-loop setpoints wander ~8.1-8.3 V — so the chip ADC
-		 * is the only reliable steering input).  On any excursion the CP
-		 * disengages and we keep the buck path (stay in PPS).  Never runs
-		 * while the serial VOOC ladder is delivering; the engine's
-		 * collapse/soc/temp/vbat exits drop the CP via pps_exit BEFORE
-		 * the 5 V revert.
+		 * CP 2:1 direct-charge: the vendor's PPS + virtual_cp recipe
+		 * (pps_cp_step()).  The engine's collapse/soc/temp/vbat exits drop
+		 * the pump via pps_exit BEFORE the 5 V revert.  Pump off at runtime
+		 * (pps_cp_enable=0) or the API gone: hand back to the buck.
 		 */
-		if (pps_cp_enable && charging) {
-			const struct erhai_pps_sc_api *a = pps_sc_cp_get();
-
-			if (a) {
-				int cvbus = 0, cvbat = 0, cibus = 0, diff = 0, rc;
-
-				rc = a->snapshot(&cvbus, &cvbat, &cibus);
-				if (rc == 0) {
-					diff = cvbus - cvbat * 2;
-					if (a->cp_engaged()) {
-						rc = a->cp_feed(&cvbus, &cvbat);
-						if (rc) {
-							/* cvbus/cvbat are feed()'s own reads; ibus is
-							 * from the snapshot just before it */
-							pr_info("erhai_pps: CP feed drop rc=%d (diff %d mV ibus %d mA set %u mV) - buck path\n",
-								rc, cvbus - cvbat * 2, cibus,
-								p->set_volt_mv);
-							trace_erhai_pps_cp_event("drop", rc, cvbus,
-										 cvbat, cibus,
-										 p->set_volt_mv);
-							p->cp_drops++;
-						}
-					} else {
-						/* engage only once the chip window is
-						 * (at least) reachable */
-						if (diff >= 0 &&
-						    p->set_volt_mv <= pps_cp_max_volt_mv) {
-							int need = 0;
-
-							rc = a->cp_engage(&need);
-							if (rc == 0) {
-								p->cp_engages++;
-								pr_info("erhai_pps: CP 2:1 ENGAGED (chip vbus %d mV vbat %d mV diff %d mV ibus %d mA set %u mV)\n",
-								    cvbus, cvbat, diff, cibus,
-								    p->set_volt_mv);
-								trace_erhai_pps_cp_event("engage", 0,
-											 cvbus, cvbat,
-											 cibus,
-											 p->set_volt_mv);
-							}
-						}
-						/* b6: servo PPS VOLT toward 2*vbat + target
-						 * even when diff < 0.  The ADSP settle is
-						 * its own closed loop and at higher SOC it
-						 * can sit UNDER 2*vbat (measured -470 mV on
-						 * the b5 boot); b5 only servoed after a
-						 * -EAGAIN engage attempt, which can never
-						 * happen with diff < 0, so the engine never
-						 * even tried to reach the window.  Keep
-						 * walking toward the target (ceiling
-						 * pps_cp_max_volt_mv, floor
-						 * pps_cp_min_volt_mv); the engage gate
-						 * above fires the chip the moment the window
-						 * appears. */
-						if (p->charg_ticks > 3) {
-							unsigned int nv;
-							int target = pps_cp_target_mv;
-
-							if (diff < target) {
-								nv = min(p->set_volt_mv +
-								     pps_cp_vstep_mv,
-								     pps_cp_max_volt_mv);
-								if (nv > p->set_volt_mv &&
-								    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
-								    p->set_volt_mv = nv;
-							} else if (diff > target + (int)pps_cp_vstep_mv) {
-								nv = p->set_volt_mv - pps_cp_vstep_mv;
-								if (nv >= pps_cp_min_volt_mv &&
-								    nv < p->set_volt_mv &&
-								    !pps_usb_set(PPS_PROP_USB_SET_PPS_VOLT, nv))
-								    p->set_volt_mv = nv;
-							}
-						}
-					}
-				}
-			}
+		if (erhai_otg_charge_inhibited()) {
+			/* bypass / max_soc: the pump would charge straight
+			 * through the ADSP inhibit; the buck obeys it */
+			if (!p->inhibit_held)
+				pr_info("erhai_pps: charging inhibited by policy - pump off, buck holds the pack\n");
+			p->inhibit_held = true;
+			rc = pps_cp_release(p, "inhibited", false);
+		} else if (pps_cp_enable) {
+			if (p->inhibit_held)
+				pr_info("erhai_pps: charge inhibit released - pump allowed\n");
+			p->inhibit_held = false;
+			rc = pps_cp_step(p);
+		} else {
+			rc = pps_cp_release(p, "disabled", false);
+		}
+		if (rc) {
+			pps_exit(p, PPS_EXIT_REASON_SET_FAIL);
+			return;
 		}
 		p->charg_ticks++;
 		if (p->charg_ticks < pps_log_ticks)
-			pr_info("erhai_pps: %s vbus %d mV vbat %d mV ibat %d mA soc %d%% t %dC set %u mV curr %u mA cp %s\n",
+			pr_info("erhai_pps: %s vbus %d mV vbat %d mV ibat %d mA soc %d%% t %dC set %u mV curr %u mA cp %s buck %s\n",
 				charging ? "charging" : "taper",
 				p->vbus_mv, p->vbat_mv, p->ibat_ma, p->soc,
 				p->temp_c, p->set_volt_mv, p->set_curr_ma,
-				pps_cp_is_engaged() ? "on" : "off");
+				pps_cp_is_engaged() ? "on" : "off",
+				p->buck_off ? "off" : "on");
 		return;
 	}
 	default:
 		return;
 	}
+}
+
+/*
+ * The guard's backstop, run after every poll whatever path pps_poll() took:
+ * a suspended buck must always have an engaged pump that was fed within the
+ * 1000 ms watchdog, or be inside the entry window.  Otherwise hand the plug
+ * back to the buck now (c3 run 1: an early return left the buck suspended
+ * with no pump for 5.5 minutes).
+ */
+static void pps_cp_backstop(struct erhai_pps *p)
+{
+	bool stuck;
+
+	if (!p->buck_off)
+		return;
+	if (pps_cp_is_engaged())
+		stuck = time_after(jiffies, p->cp_fed_at + msecs_to_jiffies(1000));
+	else
+		stuck = !p->cp_lift_since ||
+			time_after(jiffies, p->cp_lift_since +
+				   msecs_to_jiffies(pps_cp_lift_ms + 1000));
+	if (!stuck)
+		return;
+	pr_warn("erhai_pps: CP backstop: buck suspended without a working pump - resuming the buck\n");
+	if (pps_cp_release(p, "backstop", true))
+		pps_exit(p, PPS_EXIT_REASON_SET_FAIL);
 }
 
 /* one tracepoint sample per poll while a session is up; chip reads only
@@ -945,6 +1209,7 @@ static void pps_trace_sample(struct erhai_pps *p)
 		.ibat_ma	= p->ibat_ma,
 		.soc		= p->soc,
 		.temp_c		= p->temp_c,
+		.buck_off	= p->buck_off,
 		.chip_vbus_mv	= -1,
 		.chip_vbat_mv	= -1,
 		.chip_ibus_ma	= -1,
@@ -973,18 +1238,21 @@ static void pps_ws(struct work_struct *work)
 {
 	struct erhai_pps *p = container_of(to_delayed_work(work),
 					   struct erhai_pps, work);
+	bool fast;
 
 	mutex_lock(&pps_lock);
 	pps_poll(p);
+	pps_cp_backstop(p);
 	pps_trace_sample(p);
+	fast = pps_cp_is_engaged() || p->cp_lift_since;
 	mutex_unlock(&pps_lock);
-	/* while the charge pump is engaged, poll at the REG_09 watchdog feed
-	 * interval (must stay under the SC8547A 1000 ms window); otherwise the
-	 * normal telemetry cadence is fine.  A dropped poll = a watchdog expiry
-	 * self-clears REG_07, so this can only slow the CP down, never strand it. */
+	/* while the charge pump is engaged (or being entered), poll at the
+	 * REG_09 watchdog feed interval (must stay under the SC8547A 1000 ms
+	 * window); otherwise the normal telemetry cadence is fine.  A dropped
+	 * poll = a watchdog expiry self-clears REG_07, so this can only slow the
+	 * CP down, never strand it. */
 	schedule_delayed_work(&p->work,
-			      msecs_to_jiffies(pps_cp_is_engaged() ?
-					      pps_cp_feed_ms : pps_poll_ms));
+			      msecs_to_jiffies(fast ? pps_cp_feed_ms : pps_poll_ms));
 }
 
 
@@ -1002,10 +1270,11 @@ static int pps_state_show(struct seq_file *s, void *v)
 		seq_printf(s, "read vbus %d mV vbat %d mV ibat %d mA soc %d%% t %d C\n",
 			   p->vbus_mv, p->vbat_mv, p->ibat_ma, p->soc,
 			   p->temp_c);
-	seq_printf(s, "sessions %llu entries %u exits %u cp %s (eng %u drop %u)\n",
+	seq_printf(s, "sessions %llu entries %u exits %u cp %s (eng %u drop %u attempts %u) buck %s\n",
 		   p->sessions, p->entries, p->exits,
 		   pps_cp_is_engaged() ? "on" : "off",
-		   p->cp_engages, p->cp_drops);
+		   p->cp_engages, p->cp_drops, p->cp_rearms,
+		   p->buck_off ? "suspended" : "on");
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(pps_state);
@@ -1071,8 +1340,12 @@ static void __exit erhai_pps_exit(void)
 		return;
 	mutex_lock(&pps_lock);
 	cancel_delayed_work_sync(&p->work);
-	if (p->state != PPS_IDLE)
+	if (p->state != PPS_IDLE) {
+		pps_cp_drop();
 		pps_revert(p);
+	}
+	if (p->adc_held)
+		pps_sc_adc_hold(false);
 	mutex_unlock(&pps_lock);
 	debugfs_remove_recursive(p->debugfs);
 	kfree(p);

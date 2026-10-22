@@ -28,6 +28,7 @@ struct erhai_pps_trace_sample {
 	int		soc;
 	int		temp_c;
 	bool		cp;		/* engine's view: pump engaged */
+	bool		buck_off;	/* buck suspended (ICL 0) for the pump */
 	int		chip_vbus_mv;	/* SC8547A master ADCs */
 	int		chip_vbat_mv;
 	int		chip_ibus_ma;
@@ -52,6 +53,7 @@ TRACE_EVENT(erhai_pps_sample,
 		__field(int, soc)
 		__field(int, temp_c)
 		__field(bool, cp)
+		__field(bool, buck_off)
 		__field(int, chip_vbus_mv)
 		__field(int, chip_vbat_mv)
 		__field(int, chip_ibus_ma)
@@ -69,6 +71,7 @@ TRACE_EVENT(erhai_pps_sample,
 		__entry->soc = s->soc;
 		__entry->temp_c = s->temp_c;
 		__entry->cp = s->cp;
+		__entry->buck_off = s->buck_off;
 		__entry->chip_vbus_mv = s->chip_vbus_mv;
 		__entry->chip_vbat_mv = s->chip_vbat_mv;
 		__entry->chip_ibus_ma = s->chip_ibus_ma;
@@ -76,11 +79,11 @@ TRACE_EVENT(erhai_pps_sample,
 		__entry->r07 = s->r07;
 	),
 
-	TP_printk("%s vbus=%d set=%u/%u vbat=%d ibat=%d soc=%d t=%d cp=%d chip_vbus=%d chip_vbat=%d diff=%d ibus=%d r06=%d r07=%d",
+	TP_printk("%s vbus=%d set=%u/%u vbat=%d ibat=%d soc=%d t=%d cp=%d buck_off=%d chip_vbus=%d chip_vbat=%d diff=%d ibus=%d r06=%d r07=%d",
 		  __get_str(state), __entry->adsp_vbus_mv,
 		  __entry->set_volt_mv, __entry->set_curr_ma,
 		  __entry->vbat_mv, __entry->ibat_ma, __entry->soc,
-		  __entry->temp_c, __entry->cp,
+		  __entry->temp_c, __entry->cp, __entry->buck_off,
 		  __entry->chip_vbus_mv, __entry->chip_vbat_mv,
 		  __entry->chip_vbus_mv - 2 * __entry->chip_vbat_mv,
 		  __entry->chip_ibus_ma, __entry->r06, __entry->r07)
