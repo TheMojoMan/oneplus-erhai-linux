@@ -198,15 +198,21 @@ static unsigned int pps_start_curr_ma = 1000;
 module_param(pps_start_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_start_curr_ma, "PPS entry current (mA)");
 
-static unsigned int pps_target_curr_ma = 3000;
+static unsigned int pps_target_curr_ma = 4000;
 module_param(pps_target_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_target_curr_ma,
-		 "PPS input current target (mA) - live-validated 3000 with the 100 W Anker "
-		 "(8.2-8.6 V x 3 A in = ~24 W); Android's 2 A ICL is a floor, not a ceiling");
+		 "PPS input current target (mA), capped per plug by the adapter's own PPS max "
+		 "current - lab-validated 4000 through the pump (~39 W, 32-34 C)");
 
-static unsigned int pps_max_curr_ma = 3000;
+static unsigned int pps_max_curr_ma = 4000;
 module_param(pps_max_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_max_curr_ma, "hard PPS input current ceiling (mA)");
+
+static unsigned int pps_cable_safe_ma = 3000;
+module_param(pps_cable_safe_ma, uint, 0644);
+MODULE_PARM_DESC(pps_cable_safe_ma,
+		 "PPS current cap when the adapter does not report its PPS max current (mA); "
+		 "a source offers more than 3 A only over a 5 A e-marked cable");
 
 static unsigned int pps_iclim_ma = 3000;
 module_param(pps_iclim_ma, uint, 0644);
@@ -328,9 +334,11 @@ static unsigned int pps_cp_settle_ms = 2000;
 module_param(pps_cp_settle_ms, uint, 0644);
 MODULE_PARM_DESC(pps_cp_settle_ms, "grace after an engage before the low-ibus check (ms)");
 
-static unsigned int pps_cp_max_volt_mv = 9500;
+static unsigned int pps_cp_max_volt_mv = 9900;
 module_param(pps_cp_max_volt_mv, uint, 0644);
-MODULE_PARM_DESC(pps_cp_max_volt_mv, "pump PPS VBUS ceiling (mV)");
+MODULE_PARM_DESC(pps_cp_max_volt_mv,
+		 "pump PPS VBUS ceiling (mV); 9900 keeps the engaged chip under its 10 V VBUS_OVP "
+		 "(lab: 9.17 V max at 4 A), vendor 10500");
 
 static unsigned int pps_cp_feed_ms = 300;
 module_param(pps_cp_feed_ms, uint, 0644);
@@ -945,6 +953,8 @@ static void pps_poll(struct erhai_pps *p)
 		return;
 	}
 	case PPS_NEGOTIATE: {
+		int adapter_ma;
+
 		/*
 		 * Entry sequence — ORDER IS LOAD-BEARING (live-validated 2026-09-24,
 		 * 100 W Anker, b3 kernel): the ADSP charger_pd latches its PPS APDO
@@ -998,7 +1008,15 @@ static void pps_poll(struct erhai_pps *p)
 
 		p->set_volt_mv = pps_target_volt_mv;
 		p->set_curr_ma = pps_start_curr_ma;
-		p->target_curr_ma = min(pps_target_curr_ma, pps_max_curr_ma);
+		/* never ask for more than the adapter offers on this cable
+		 * (vendor pps.c:1735-1774 caps by the adapter's max too) */
+		adapter_ma = pps_usb_get(PPS_PROP_USB_GET_PPS_MAX_CURR);
+		if (adapter_ma <= 0)
+			adapter_ma = pps_cable_safe_ma;
+		p->target_curr_ma = min3(pps_target_curr_ma, pps_max_curr_ma,
+					 (unsigned int)adapter_ma);
+		pr_info("erhai_pps: PPS current target %u mA (adapter offers %d mA)\n",
+			p->target_curr_ma, adapter_ma);
 		p->buck_off = false;
 		p->cp_lift_since = 0;
 		p->cp_holdoff_until = jiffies;
