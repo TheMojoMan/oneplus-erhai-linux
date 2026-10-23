@@ -944,10 +944,22 @@ static void fastrpc_free_map(struct kref *ref)
 	kfree(map);
 }
 
-static void fastrpc_map_put(struct fastrpc_map *map)
+static noinline void fastrpc_map_put(struct fastrpc_map *map)
 {
-	if (map)
-		kref_put(&map->refcount, fastrpc_free_map);
+	if (!map)
+		return;
+
+	/*
+	 * erhai (b32-test-03 diagnostic): a put on a map that is already at zero
+	 * is the double put this build chases (the 2026-10-23
+	 * "refcount_t: underflow; use-after-free").  %pS names the call site.
+	 */
+	if (!kref_read(&map->refcount))
+		pr_warn("erhai DIAG map-put on a DEAD map %px fd %d size 0x%llx kind %s owner_ctx %px from %pS\n",
+			map, map->fd, map->size, map->kind ? map->kind : "?",
+			map->owner_ctx, __builtin_return_address(0));
+
+	kref_put(&map->refcount, fastrpc_free_map);
 }
 
 static int fastrpc_map_get(struct fastrpc_map *map)
@@ -1359,22 +1371,39 @@ static void fastrpc_context_free(struct kref *ref)
 	fl = ctx->fl;
 
 	/*
-	 * erhai (b33 diagnostic): the anomaly this build chases.  Printed only
-	 * when one of the objects this free is about to put is ALREADY at zero
-	 * -- i.e. exactly the "refcount_t: underflow; use-after-free" case, with
-	 * the map references included (they are put first, and a map that the
-	 * fd-close release already freed would warn from inside this function
-	 * too).  Silent in normal operation.
+	 * erhai (b32-test-03 diagnostic): the anomaly this build chases.  Printed
+	 * only when one of the objects this free is about to put is ALREADY at
+	 * zero -- i.e. exactly the "refcount_t: underflow; use-after-free" case,
+	 * the context's own maps included (they are put first, and a map the
+	 * fd-close release already freed warns from inside this function too).
+	 * Silent in normal operation.
 	 */
-	if (fl && (!kref_read(&fl->refcount) || !kref_read(&cctx->refcount))) {
-		pr_warn("erhai DIAG ctx-free: ctx %px ctxid 0x%llx nbufs %d pid %d fl %px ref %d cctx %px ref %d\n",
-			ctx, ctx->ctxid, ctx->nbufs, ctx->pid, fl,
-			kref_read(&fl->refcount), cctx, kref_read(&cctx->refcount));
+	{
+		bool bad = fl && (!kref_read(&fl->refcount) ||
+				  !kref_read(&cctx->refcount));
+
 		for (i = 0; i < ctx->nbufs; i++)
-			pr_warn("erhai DIAG   map[%d] %px ref %d\n", i,
-				ctx->maps[i],
-				ctx->maps[i] ? kref_read(&ctx->maps[i]->refcount) : -1);
-		fastrpc_channel_books(cctx, "DIAG ctx-free books");
+			if (ctx->maps[i] && !kref_read(&ctx->maps[i]->refcount))
+				bad = true;
+
+		if (bad) {
+			pr_warn("erhai DIAG ctx-free: ctx %px ctxid 0x%llx nbufs %d pid %d fl %px ref %d cctx %px ref %d\n",
+				ctx, ctx->ctxid, ctx->nbufs, ctx->pid, fl,
+				fl ? kref_read(&fl->refcount) : -1, cctx,
+				kref_read(&cctx->refcount));
+			for (i = 0; i < ctx->nbufs; i++)
+				pr_warn("erhai DIAG   map[%d] %px fd %d size 0x%llx kind %s ref %d owner_ctx %px\n",
+					i, ctx->maps[i],
+					ctx->maps[i] ? ctx->maps[i]->fd : -1,
+					ctx->maps[i] ? ctx->maps[i]->size : 0,
+					ctx->maps[i] && ctx->maps[i]->kind ?
+						ctx->maps[i]->kind : "?",
+					ctx->maps[i] ?
+						kref_read(&ctx->maps[i]->refcount) : -1,
+					ctx->maps[i] ?
+						ctx->maps[i]->owner_ctx : NULL);
+			fastrpc_channel_books(cctx, "DIAG ctx-free books");
+		}
 	}
 
 	for (i = 0; i < ctx->nbufs; i++) {
