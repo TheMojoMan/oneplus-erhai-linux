@@ -359,6 +359,19 @@ struct fastrpc_map {
 	struct kref refcount;
 	/* erhai (b77): which path attached it: "ctx", "user", "init-file" */
 	const char *kind;
+	/*
+	 * erhai (b33): set when this map was created BY a context (kind "ctx",
+	 * fastrpc_create_maps()), i.e. when the map's single reference belongs
+	 * to that context and is dropped in fastrpc_context_free().  Such a map
+	 * is also linked in fl->maps, but it must NOT be put by the fd-close
+	 * release: doing that freed the map while the (parked) context still
+	 * referenced it, and the context's own put then decremented zero --
+	 * "refcount_t: underflow; use-after-free" from fastrpc_context_free
+	 * (inlined fastrpc_map_put) at every shutdown that had an interrupted
+	 * invoke.  A map the context merely REFERENCED (a lookup with take_ref,
+	 * kind "user"/"init-file") keeps owner_ctx == NULL and is released here.
+	 */
+	struct fastrpc_invoke_ctx *owner_ctx;
 };
 
 struct fastrpc_invoke_ctx {
@@ -436,6 +449,17 @@ struct fastrpc_channel_ctx {
 	bool poll_mode_supported;
 	/* Per-channel sequence counter; incremented on every context allocation */
 	atomic_t ctx_seq;
+	/*
+	 * erhai (b33 diagnostic): how many references this channel ever handed
+	 * out (fastrpc_channel_ctx_get) and how many were given back
+	 * (fastrpc_channel_ctx_put).  gets - puts must always equal
+	 * kref_read(&refcount); a put on a channel whose refcount is already 0
+	 * is the "refcount_t: underflow; use-after-free" of 2026-10-23, and
+	 * these two numbers say whether a reference was LOST (gets too small) or
+	 * PUT TWICE (puts too large) -- and the put site is printed with %pS.
+	 */
+	atomic_t erhai_gets;
+	atomic_t erhai_puts;
 	u64 dma_mask;
 	const struct fastrpc_soc_data *soc_data;
 };
@@ -1055,11 +1079,24 @@ static int fastrpc_remote_heap_alloc(struct fastrpc_user *fl, struct device *dev
 	return  __fastrpc_buf_alloc(fl, rdev, size, obuf, tag, ctxid);
 }
 
+/* erhai (b33 diagnostic): the channel reference books, and who is asking. */
+static void fastrpc_channel_books(struct fastrpc_channel_ctx *cctx,
+				  const char *why)
+{
+	pr_warn("erhai DIAG %s: cctx %px ref %d gets %d puts %d\n", why, cctx,
+		kref_read(&cctx->refcount), atomic_read(&cctx->erhai_gets),
+		atomic_read(&cctx->erhai_puts));
+}
+
 static void fastrpc_channel_ctx_free(struct kref *ref)
 {
 	struct fastrpc_channel_ctx *cctx;
 
 	cctx = container_of(ref, struct fastrpc_channel_ctx, refcount);
+
+	pr_warn("erhai DIAG channel-FREE: cctx %px gets %d puts %d -- every further put on it is a use-after-free\n",
+		cctx, atomic_read(&cctx->erhai_gets),
+		atomic_read(&cctx->erhai_puts));
 
 	idr_destroy(&cctx->ctx_idr);
 	kfree(cctx);
@@ -1067,11 +1104,18 @@ static void fastrpc_channel_ctx_free(struct kref *ref)
 
 static void fastrpc_channel_ctx_get(struct fastrpc_channel_ctx *cctx)
 {
+	atomic_inc(&cctx->erhai_gets);
 	kref_get(&cctx->refcount);
 }
 
-static void fastrpc_channel_ctx_put(struct fastrpc_channel_ctx *cctx)
+static noinline void fastrpc_channel_ctx_put(struct fastrpc_channel_ctx *cctx)
 {
+	atomic_inc(&cctx->erhai_puts);
+	if (!kref_read(&cctx->refcount))
+		pr_warn("erhai DIAG channel-put on a DEAD cctx %px (ref 0, gets %d puts %d) from %pS\n",
+			cctx, atomic_read(&cctx->erhai_gets),
+			atomic_read(&cctx->erhai_puts),
+			__builtin_return_address(0));
 	kref_put(&cctx->refcount, fastrpc_channel_ctx_free);
 }
 
@@ -1117,13 +1161,30 @@ static void fastrpc_user_release_buffers(struct fastrpc_user *fl, const char *wh
 	struct fastrpc_buf *buf, *b, *imem;
 	LIST_HEAD(intr);
 	unsigned long flags;
-	unsigned int nmaps = 0, nmmaps = 0, nintr = 0;
-	u64 maps_sz = 0, imem_sz = 0;
+	unsigned int nmaps = 0, nmmaps = 0, nintr = 0, nowned = 0;
+	u64 maps_sz = 0, imem_sz = 0, owned_sz = 0;
 
 	spin_lock_irqsave(&fl->lock, flags);
 	imem = fl->init_mem;
 	fl->init_mem = NULL;
 	list_for_each_entry(map, &fl->maps, node) {
+		/*
+		 * erhai (b33): a map that a CONTEXT created (kind "ctx") is owned
+		 * by that context -- its single reference is dropped in
+		 * fastrpc_context_free().  Putting it here as well freed the map
+		 * while the (parked) context still referenced it, and the
+		 * context's own put then decremented zero: the "refcount_t:
+		 * underflow; use-after-free" from fastrpc_context_free (inlined
+		 * fastrpc_map_put) that every shutdown with an interrupted
+		 * invoke produced.  Leave it to its context -- the fd-close
+		 * cancel below frees that context in the same call, so the IOVA
+		 * still comes back here.
+		 */
+		if (map->owner_ctx) {
+			nowned++;
+			owned_sz += map->size;
+			continue;
+		}
 		nmaps++;
 		maps_sz += map->size;
 	}
@@ -1147,9 +1208,10 @@ static void fastrpc_user_release_buffers(struct fastrpc_user *fl, const char *wh
 		return;
 
 	dev_warn(fl->sctx->dev,
-		 "erhai: %s: releasing client %d resources: init_mem 0x%llx, maps %u / 0x%llx, mmaps %u, parked-mmaps %u\n",
+		 "erhai: %s: releasing client %d resources: init_mem 0x%llx, maps %u / 0x%llx, mmaps %u, parked-mmaps %u, ctx-owned maps %u / 0x%llx\n",
 		 why, fl->client_id, (unsigned long long)imem_sz, nmaps,
-		 (unsigned long long)maps_sz, nmmaps, nintr);
+		 (unsigned long long)maps_sz, nmmaps, nintr, nowned,
+		 (unsigned long long)owned_sz);
 
 	if (imem) {
 		fastrpc_buf_free(imem);
@@ -1157,6 +1219,9 @@ static void fastrpc_user_release_buffers(struct fastrpc_user *fl, const char *wh
 	}
 
 	list_for_each_entry_safe(map, m, &fl->maps, node) {
+		/* erhai (b33): owned by a (still parked) context -- not ours */
+		if (map->owner_ctx)
+			continue;
 		list_del_init(&map->node);
 		fastrpc_map_put(map);
 	}
@@ -1293,8 +1358,36 @@ static void fastrpc_context_free(struct kref *ref)
 	cctx = ctx->cctx;
 	fl = ctx->fl;
 
-	for (i = 0; i < ctx->nbufs; i++)
+	/*
+	 * erhai (b33 diagnostic): the anomaly this build chases.  Printed only
+	 * when one of the objects this free is about to put is ALREADY at zero
+	 * -- i.e. exactly the "refcount_t: underflow; use-after-free" case, with
+	 * the map references included (they are put first, and a map that the
+	 * fd-close release already freed would warn from inside this function
+	 * too).  Silent in normal operation.
+	 */
+	if (fl && (!kref_read(&fl->refcount) || !kref_read(&cctx->refcount))) {
+		pr_warn("erhai DIAG ctx-free: ctx %px ctxid 0x%llx nbufs %d pid %d fl %px ref %d cctx %px ref %d\n",
+			ctx, ctx->ctxid, ctx->nbufs, ctx->pid, fl,
+			kref_read(&fl->refcount), cctx, kref_read(&cctx->refcount));
+		for (i = 0; i < ctx->nbufs; i++)
+			pr_warn("erhai DIAG   map[%d] %px ref %d\n", i,
+				ctx->maps[i],
+				ctx->maps[i] ? kref_read(&ctx->maps[i]->refcount) : -1);
+		fastrpc_channel_books(cctx, "DIAG ctx-free books");
+	}
+
+	for (i = 0; i < ctx->nbufs; i++) {
+		/*
+		 * erhai (b33): a map this context created (kind "ctx") is ours --
+		 * the fd-close release deliberately leaves it to us (see struct
+		 * fastrpc_map.owner_ctx); clear the marker so a map that survives
+		 * (still referenced elsewhere) cannot point at a freed context.
+		 */
+		if (ctx->maps[i])
+			ctx->maps[i]->owner_ctx = NULL;
 		fastrpc_map_put(ctx->maps[i]);
+	}
 
 	fastrpc_buf_free(ctx->buf);
 
@@ -1734,12 +1827,23 @@ get_err:
 
 static int fastrpc_map_create(struct fastrpc_user *fl, int fd,
 			      u64 len, u32 attr, struct fastrpc_map **ppmap,
-			      const char *kind)
+			      const char *kind, struct fastrpc_invoke_ctx *owner)
 {
+	int err;
+
 	if (!fastrpc_map_lookup(fl, fd, ppmap, true))
 		return 0;
 
-	return fastrpc_map_attach(fl, fd, len, attr, ppmap, kind);
+	/*
+	 * erhai (b33): a map newly created for a context is owned by it -- see
+	 * struct fastrpc_map.owner_ctx.  Maps created for the client (kind
+	 * "user"/"init-file") pass owner == NULL and stay the client's.
+	 */
+	err = fastrpc_map_attach(fl, fd, len, attr, ppmap, kind);
+	if (!err && owner && *ppmap)
+		(*ppmap)->owner_ctx = owner;
+
+	return err;
 }
 
 /*
@@ -1818,7 +1922,7 @@ static int fastrpc_create_maps(struct fastrpc_invoke_ctx *ctx)
 		if (i < ctx->nbufs)
 			err = fastrpc_map_create(ctx->fl, ctx->args[i].fd,
 				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i],
-				 "ctx");
+				 "ctx", ctx);
 		else
 			err = fastrpc_map_attach(ctx->fl, ctx->args[i].fd,
 				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i],
@@ -2450,7 +2554,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 
 	if (init.filelen && init.filefd) {
 		err = fastrpc_map_create(fl, init.filefd, init.filelen, 0, &map,
-					 "init-file");
+					 "init-file", NULL);
 		if (err)
 			goto err;
 	}
@@ -2579,6 +2683,9 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 	 */
 	fastrpc_dump_user_state(fl, "fd-close");
 
+	/* erhai (b33 diagnostic): the channel books as this client goes away */
+	fastrpc_channel_books(cctx, "fd-close entry");
+
 	fastrpc_release_current_dsp_process(fl);
 
 	/*
@@ -2597,6 +2704,8 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 		dev_warn(fl->sctx->dev,
 			 "erhai: fd-close: client %d released its resources, cancelled %u left-over context(s), kref now %d\n",
 			 fl->client_id, cancelled, kref_read(&fl->refcount));
+		/* erhai (b33 diagnostic): after the release, before the last put */
+		fastrpc_channel_books(cctx, "fd-close after release");
 	}
 
 	spin_lock_irqsave(&cctx->lock, flags);
@@ -3140,7 +3249,7 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 		return -EFAULT;
 
 	/* create SMMU mapping */
-	err = fastrpc_map_create(fl, req.fd, req.length, 0, &map, "user");
+	err = fastrpc_map_create(fl, req.fd, req.length, 0, &map, "user", NULL);
 	if (err) {
 		dev_err(dev, "failed to map buffer, fd = %d\n", req.fd);
 		return err;
@@ -3649,6 +3758,9 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	struct fastrpc_user *user;
 	unsigned long flags;
 
+	/* erhai (b33 diagnostic): the books before/after the probe reference */
+	fastrpc_channel_books(cctx, "rpmsg-remove entry");
+
 	/* No invocations past this point */
 	spin_lock_irqsave(&cctx->lock, flags);
 	cctx->rpdev = NULL;
@@ -3670,6 +3782,7 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 
 	of_platform_depopulate(&rpdev->dev);
 
+	fastrpc_channel_books(cctx, "rpmsg-remove before put");
 	fastrpc_channel_ctx_put(cctx);
 }
 
