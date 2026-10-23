@@ -378,6 +378,13 @@ struct fastrpc_invoke_ctx {
 	bool is_work_done;
 	/* process updates poll memory instead of glink response */
 	bool is_polled;
+	/*
+	 * erhai: the reference taken in fastrpc_invoke_send() may be put only
+	 * ONCE -- a duplicated/replayed glink COMPLETE must not free a context
+	 * that is still linked in fastrpc_user->pending (use-after-free; see
+	 * fastrpc_rpmsg_callback()).
+	 */
+	unsigned long reply_put_done;
 	struct kref refcount;
 	struct list_head node; /* list of ctxs */
 	struct completion work;
@@ -1071,6 +1078,33 @@ static void fastrpc_channel_ctx_put(struct fastrpc_channel_ctx *cctx)
 static void fastrpc_context_put(struct fastrpc_invoke_ctx *ctx);
 
 /*
+ * erhai: a context sitting in fastrpc_user->pending is OWNED by that list --
+ * the reference fastrpc_context_alloc() took is dropped by whoever takes the
+ * context OFF the list, and by nobody else.  Every remover (the invoke path,
+ * the fd-close release, fastrpc_user_free()) therefore asks this helper first,
+ * which makes putting a context twice impossible: a second put frees a context
+ * that is still linked in `pending`, and the next put of that dangling entry
+ * walks freed memory -- exactly the "refcount_t: underflow; use-after-free"
+ * seen in fastrpc_context_free at fd close on 2026-10-23 (see
+ * fastrpc_rpmsg_callback()).  list_del_init() is what makes the test valid.
+ *
+ * Returns true when THIS caller removed it, i.e. when it must put it.
+ */
+static bool fastrpc_pending_unlink(struct fastrpc_user *fl,
+				   struct fastrpc_invoke_ctx *ctx)
+{
+	bool owned;
+
+	spin_lock(&fl->lock);
+	owned = !list_empty(&ctx->node);
+	if (owned)
+		list_del_init(&ctx->node);
+	spin_unlock(&fl->lock);
+
+	return owned;
+}
+
+/*
  * erhai: release everything a client owns that holds CDSP IOVA ranges.
  * Idempotent (it NULLs what it took), so it can run both at fd close and again
  * from fastrpc_user_free() when the last reference finally drops.  Must be
@@ -1155,26 +1189,34 @@ static void fastrpc_user_release_buffers(struct fastrpc_user *fl, const char *wh
 static unsigned int fastrpc_cancel_pending_contexts(struct fastrpc_user *fl,
 						    const char *why)
 {
-	struct fastrpc_invoke_ctx *ctx, *n;
-	LIST_HEAD(dead);
-	unsigned long flags;
+	struct fastrpc_invoke_ctx *ctx;
 	unsigned int count = 0;
 
-	spin_lock_irqsave(&fl->lock, flags);
-	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
-		list_del(&ctx->node);
-		list_add_tail(&ctx->node, &dead);
-		count++;
-	}
-	spin_unlock_irqrestore(&fl->lock, flags);
+	/*
+	 * Take the contexts off the list one by one and put them OUTSIDE the
+	 * list lock (the put frees the context and may sleep in the DMA/dma-buf
+	 * layer).  The head is re-read every round, so a context that another
+	 * path unlinked first is simply skipped -- and because
+	 * fastrpc_pending_unlink() is the only unlinker, every context's list
+	 * reference is dropped exactly once.
+	 */
+	for (;;) {
+		spin_lock(&fl->lock);
+		ctx = list_first_entry_or_null(&fl->pending,
+					       struct fastrpc_invoke_ctx, node);
+		if (ctx)
+			list_del_init(&ctx->node);
+		spin_unlock(&fl->lock);
 
-	list_for_each_entry_safe(ctx, n, &dead, node) {
+		if (!ctx)
+			break;
+
 		dev_warn(fl->sctx->dev,
 			 "erhai: %s: dropping the user reference of left-over context ctxid 0x%llx sc 0x%x pid %d refs %d\n",
 			 why, ctx->ctxid, ctx->sc, ctx->pid,
 			 kref_read(&ctx->refcount));
-		list_del(&ctx->node);
 		fastrpc_context_put(ctx);
+		count++;
 	}
 
 	return count;
@@ -1214,9 +1256,13 @@ static void fastrpc_user_free(struct kref *ref)
 	 */
 	fastrpc_user_release_buffers(fl, "user-free");
 
+	/*
+	 * erhai: put only what THIS path unlinked -- the fd-close release may
+	 * have taken some of these contexts already (fastrpc_pending_unlink()).
+	 */
 	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
-		list_del(&ctx->node);
-		fastrpc_context_put(ctx);
+		if (fastrpc_pending_unlink(fl, ctx))
+			fastrpc_context_put(ctx);
 	}
 	fastrpc_iova_summary(fl, "exit-after-pending");
 
@@ -1997,8 +2043,14 @@ static int fastrpc_invoke_send(struct fastrpc_session_ctx *sctx,
 
 	ret = rpmsg_send(cctx->rpdev->ept, (void *)msg, sizeof(*msg));
 
-	if (ret)
+	if (ret) {
+		/*
+		 * erhai: this drops the reference taken above, so a response
+		 * that still races in must not put it a second time.
+		 */
+		test_and_set_bit(0, &ctx->reply_put_done);
 		fastrpc_context_put(ctx);
+	}
 
 	return ret;
 
@@ -2129,11 +2181,13 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 
 bail:
 	if (err != -ERESTARTSYS && err != -ETIMEDOUT) {
-		/* We are done with this compute context */
-		spin_lock(&fl->lock);
-		list_del(&ctx->node);
-		spin_unlock(&fl->lock);
-		fastrpc_context_put(ctx);
+		/*
+		 * We are done with this compute context.  Put it only if WE took
+		 * it off the pending list -- the fd-close release may have
+		 * already (fastrpc_pending_unlink()).
+		 */
+		if (fastrpc_pending_unlink(fl, ctx))
+			fastrpc_context_put(ctx);
 	} else {
 		/*
 		 * erhai: this context, and the reference it holds on `fl`, stay
@@ -3505,6 +3559,33 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 	data->poll_mode_supported = soc_data->poll_mode_supported ||
 		of_machine_get_match(fastrpc_poll_supported_machines);
 
+	/*
+	 * erhai: initialize the channel BEFORE the device nodes are registered.
+	 * fastrpc_device_register() -> misc_register() publishes /dev/fastrpc-*
+	 * and a client may open() it at once -- and that path uses all of this
+	 * state (kref_get() on the refcount, spin_lock(&cctx->lock),
+	 * idr_alloc_cyclic(&cctx->ctx_idr), cctx->rpdev, cctx->users).  With the
+	 * initialization after the registration, such an early open() did
+	 * kref_get() on the zeroed refcount, and the kref_init() that used to
+	 * follow the registration then RESET the counter -- losing the
+	 * reference that open() took, so the channel's last put decremented
+	 * zero: "refcount_t: underflow; use-after-free" (the 2026-10-23
+	 * report; same class as the duplicate COMPLETE handled in
+	 * fastrpc_rpmsg_callback()).
+	 */
+	kref_init(&data->refcount);
+	atomic_set(&data->ctx_seq, 0);
+
+	rdev->dma_mask = &data->dma_mask;
+	dma_set_mask_and_coherent(rdev, DMA_BIT_MASK(32));
+	INIT_LIST_HEAD(&data->users);
+	INIT_LIST_HEAD(&data->invoke_interrupted_mmaps);
+	spin_lock_init(&data->lock);
+	idr_init(&data->ctx_idr);
+	data->domain_id = domain_id;
+	data->rpdev = rpdev;
+	dev_set_drvdata(&rpdev->dev, data);
+
 	switch (domain_id) {
 	case ADSP_DOMAIN_ID:
 	case MDSP_DOMAIN_ID:
@@ -3531,19 +3612,6 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 		err = -EINVAL;
 		goto err_free_data;
 	}
-
-	kref_init(&data->refcount);
-	atomic_set(&data->ctx_seq, 0);
-
-	rdev->dma_mask = &data->dma_mask;
-	dma_set_mask_and_coherent(rdev, DMA_BIT_MASK(32));
-	INIT_LIST_HEAD(&data->users);
-	INIT_LIST_HEAD(&data->invoke_interrupted_mmaps);
-	spin_lock_init(&data->lock);
-	idr_init(&data->ctx_idr);
-	data->domain_id = domain_id;
-	data->rpdev = rpdev;
-	dev_set_drvdata(&rpdev->dev, data);
 
 	err = of_platform_populate(rdev->of_node, NULL, NULL, rdev);
 	if (err)
@@ -3664,8 +3732,26 @@ static int fastrpc_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 	 * The DMA buffer associated with the context cannot be freed in
 	 * interrupt context so schedule it through a worker thread to
 	 * avoid a kernel BUG.
+	 *
+	 * erhai: the reference this put releases was taken in
+	 * fastrpc_invoke_send() and belongs to the RESPONSE -- so it must be
+	 * released exactly once.  A duplicated (or replayed) glink COMPLETE for
+	 * a context that is still alive would otherwise put it twice: the
+	 * second put frees the context while it is still linked in
+	 * fastrpc_user->pending, and whoever puts that dangling entry later
+	 * (fastrpc_user_free() or the fd-close release) walks freed memory --
+	 * observed 2026-10-23 as
+	 *   refcount_t: underflow; use-after-free
+	 *   fastrpc_context_free <- kref_put <- fastrpc_device_release
+	 * The sequence-number check above only rejects responses for a RECYCLED
+	 * ctxid; this one covers the same live context answering twice.
 	 */
-	schedule_work(&ctx->put_work);
+	if (!test_and_set_bit(0, &ctx->reply_put_done))
+		schedule_work(&ctx->put_work);
+	else
+		dev_warn_ratelimited(&rpdev->dev,
+				     "erhai: duplicate COMPLETE for ctx 0x%llx ignored\n",
+				     rsp->ctx);
 
 	return 0;
 }
