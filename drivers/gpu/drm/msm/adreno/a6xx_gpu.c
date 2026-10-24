@@ -1113,15 +1113,26 @@ static int a6xx_ucode_load(struct msm_gpu *gpu)
 		msm_gem_object_set_name(a6xx_gpu->shadow_bo, "shadow");
 	}
 
-	a6xx_gpu->pwrup_reglist_ptr = msm_gem_kernel_new(gpu->dev, PWRUP_REGLIST_SIZE,
-							 MSM_BO_WC  | MSM_BO_MAP_PRIV,
-							 gpu->vm, &a6xx_gpu->pwrup_reglist_bo,
-							 &a6xx_gpu->pwrup_reglist_iova);
+	/*
+	 * a6xx_ucode_load() may run more than once (e.g. on a GPU recovery
+	 * reload), so only allocate the pwrup reglist once - otherwise the
+	 * previous object is overwritten and its pin/iova/refcount leak.
+	 */
+	if (!a6xx_gpu->pwrup_reglist_bo) {
+		a6xx_gpu->pwrup_reglist_ptr = msm_gem_kernel_new(gpu->dev, PWRUP_REGLIST_SIZE,
+								 MSM_BO_WC  | MSM_BO_MAP_PRIV,
+								 gpu->vm, &a6xx_gpu->pwrup_reglist_bo,
+								 &a6xx_gpu->pwrup_reglist_iova);
 
-	if (IS_ERR(a6xx_gpu->pwrup_reglist_ptr))
-		return PTR_ERR(a6xx_gpu->pwrup_reglist_ptr);
+		if (IS_ERR(a6xx_gpu->pwrup_reglist_ptr)) {
+			int ret = PTR_ERR(a6xx_gpu->pwrup_reglist_ptr);
 
-	msm_gem_object_set_name(a6xx_gpu->pwrup_reglist_bo, "pwrup_reglist");
+			a6xx_gpu->pwrup_reglist_ptr = NULL;
+			return ret;
+		}
+
+		msm_gem_object_set_name(a6xx_gpu->pwrup_reglist_bo, "pwrup_reglist");
+	}
 
 	return 0;
 }
@@ -2328,6 +2339,16 @@ static void a6xx_destroy(struct msm_gpu *gpu)
 	if (a6xx_gpu->shadow_bo) {
 		msm_gem_unpin_iova(a6xx_gpu->shadow_bo, gpu->vm);
 		drm_gem_object_put(a6xx_gpu->shadow_bo);
+	}
+
+	/*
+	 * msm_gem_kernel_new() holds a vaddr reference too, so the full
+	 * teardown is msm_gem_kernel_put() (put_vaddr + unpin + put).
+	 */
+	if (a6xx_gpu->pwrup_reglist_bo) {
+		msm_gem_kernel_put(a6xx_gpu->pwrup_reglist_bo, gpu->vm);
+		a6xx_gpu->pwrup_reglist_bo = NULL;
+		a6xx_gpu->pwrup_reglist_ptr = NULL;
 	}
 
 	a6xx_llc_slices_destroy(a6xx_gpu);
