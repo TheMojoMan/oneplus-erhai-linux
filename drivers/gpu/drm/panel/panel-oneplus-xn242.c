@@ -825,7 +825,17 @@ static const struct panel_desc erhai_desc = {
 		.node = NULL,
 	},
 	.format = MIPI_DSI_FMT_RGB888,
-	.mode_flags = MIPI_DSI_MODE_VIDEO | MIPI_DSI_CLOCK_NON_CONTINUOUS,
+	/*
+	 * Matches the vendor tree and the working SM8750 port (yzddmr6's
+	 * panel-novatek-nt36536.c): the clock lane stays in continuous HS.
+	 * This DSC video panel drops receiver lock if the clock lane returns
+	 * to LP during blanking.  NOTE: the flags that actually reach the DSI
+	 * host are the ones xn242_probe() writes before devm_mipi_dsi_attach()
+	 * (MIPI_DSI_MODE_VIDEO | MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT, no
+	 * NON_CONTINUOUS); this member is kept consistent with them so the
+	 * descriptor never suggests otherwise.
+	 */
+	.mode_flags = MIPI_DSI_MODE_VIDEO,
 	.init_sequence = erhai_init_sequence,
 };
 
