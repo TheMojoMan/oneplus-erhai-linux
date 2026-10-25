@@ -76,6 +76,9 @@
 #define BC_USB_PROPERTY_SET		0x33	/* BC_USB_STATUS_SET (req/resp) */
 #define BC_NOTIFY_IND			0x07	/* async ADSP -> AP notification */
 #define BC_SET_NOTIFY_REQ		0x04	/* register AP for async notifications */
+/* vendor PPS_OPCODE_READ_BUFFER: dump of the source caps charger_pd holds */
+#define BC_PPS_READ_BUFFER		0x10004
+#define BC_READ_BUFFER_WORDS		128	/* MAX_OEM_PROPERTY_DATA_SIZE */
 
 /* The vendor charger waits this long for each glink ack (battery_chg_write). */
 #define BC_WAIT_TIME_MS			2500
@@ -257,6 +260,21 @@ struct erhai_otg_notify_msg {
 	__le32 notification;
 };
 
+/*
+ * oem_read_buffer_req/resp_msg (oplus_hal_adsp.h): the PPS read buffer is
+ * data_buffer[0] = PPS imax, [1] = PPS vmax, [2..] = the source's raw PDOs.
+ */
+struct erhai_otg_rdbuf_req_msg {
+	struct pmic_glink_hdr hdr;
+	__le32 data_size;
+};
+
+struct erhai_otg_rdbuf_resp_msg {
+	struct pmic_glink_hdr hdr;
+	__le32 data_buffer[BC_READ_BUFFER_WORDS];
+	__le32 data_size;
+};
+
 /* battery_charger_resp_msg: the ADSP reply to a property GET/SET. */
 struct erhai_otg_resp_msg {
 	struct pmic_glink_hdr hdr;
@@ -323,6 +341,9 @@ struct erhai_otg {
 	bool psy_registered;
 	u32 resp_property;
 	u32 resp_value;
+	/* last BC_PPS_READ_BUFFER reply (same ack/lock as the property ops) */
+	u32 rdbuf[BC_READ_BUFFER_WORDS];
+	u32 rdbuf_words;
 
 	struct dentry *debugfs;
 };
@@ -842,6 +863,55 @@ int erhai_otg_adsp_prop_set(u32 opcode, u32 property, u32 value)
 	return erhai_otg_set_op(erhai_otg_glink_dev, opcode, property, value);
 }
 EXPORT_SYMBOL_GPL(erhai_otg_adsp_prop_set);
+
+int erhai_otg_adsp_src_pdos(u32 *pdo, int max)
+{
+	struct erhai_otg *otg = erhai_otg_glink_dev;
+	struct erhai_otg_rdbuf_req_msg msg = {
+		.hdr.owner = cpu_to_le32(PMIC_GLINK_OWNER_BATTMGR),
+		.hdr.type = cpu_to_le32(PMIC_GLINK_REQ_RESP),
+		.hdr.opcode = cpu_to_le32(BC_PPS_READ_BUFFER),
+		.data_size = cpu_to_le32(BC_READ_BUFFER_WORDS * sizeof(u32)),
+	};
+	unsigned long left;
+	int i, n = 0, ret;
+
+	if (!otg)
+		return -ENODEV;
+
+	mutex_lock(&otg->lock);
+
+	if (!otg->service_up) {
+		mutex_unlock(&otg->lock);
+		return -ENODEV;
+	}
+
+	reinit_completion(&otg->ack);
+	otg->error = 0;
+	otg->rdbuf_words = 0;
+
+	ret = pmic_glink_send(otg->client, &msg, sizeof(msg));
+	if (ret < 0) {
+		mutex_unlock(&otg->lock);
+		return ret;
+	}
+
+	left = wait_for_completion_timeout(&otg->ack,
+					   msecs_to_jiffies(BC_WAIT_TIME_MS));
+	if (!left) {
+		mutex_unlock(&otg->lock);
+		dev_warn(otg->dev, "no reply to the PPS read buffer (timed out)\n");
+		return -ETIMEDOUT;
+	}
+
+	for (i = 2; i < otg->rdbuf_words && n < max; i++)
+		if (otg->rdbuf[i])
+			pdo[n++] = otg->rdbuf[i];
+
+	mutex_unlock(&otg->lock);
+	return n;
+}
+EXPORT_SYMBOL_GPL(erhai_otg_adsp_src_pdos);
 static bool erhai_session_sync_enable = true;
 module_param(erhai_session_sync_enable, bool, 0644);
 MODULE_PARM_DESC(erhai_session_sync_enable,
@@ -1052,6 +1122,21 @@ static void erhai_otg_callback(const void *data, size_t len, void *priv)
 		} else {
 			otg->error = 0;
 		}
+		complete(&otg->ack);
+		return;
+	}
+
+	/* Reply to erhai_otg_adsp_src_pdos(): copy the dump, then ack. */
+	if (opcode == BC_PPS_READ_BUFFER) {
+		const struct erhai_otg_rdbuf_resp_msg *r = data;
+		u32 words = 0;
+
+		if (len >= sizeof(*r))
+			words = min_t(u32, le32_to_cpu(r->data_size) / sizeof(u32),
+				      BC_READ_BUFFER_WORDS);
+		for (u32 i = 0; i < words; i++)
+			otg->rdbuf[i] = le32_to_cpu(r->data_buffer[i]);
+		otg->rdbuf_words = words;
 		complete(&otg->ack);
 		return;
 	}

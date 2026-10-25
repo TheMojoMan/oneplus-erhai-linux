@@ -37,6 +37,13 @@ int erhai_otg_adsp_usb_prop(u32 property);
 int erhai_otg_adsp_prop_get(u32 opcode, u32 property);
 int erhai_otg_adsp_prop_set(u32 opcode, u32 property, u32 value);
 bool erhai_otg_charge_inhibited(void);
+/*
+ * Read the attached source's capabilities as the ADSP charger_pd holds them
+ * (vendor PPS_OPCODE_READ_BUFFER): up to max raw USB PD source PDOs into pdo[].
+ * Returns the number of non-zero PDOs (0 = none known yet) or a negative
+ * errno (-ENODEV glink session down, -ETIMEDOUT no reply).
+ */
+int erhai_otg_adsp_src_pdos(u32 *pdo, int max);
 #else
 static inline int erhai_otg_adsp_usb_prop(u32 property)
 {
@@ -51,6 +58,10 @@ static inline bool erhai_otg_charge_inhibited(void)
 	return false;
 }
 static inline int erhai_otg_adsp_prop_set(u32 opcode, u32 property, u32 value)
+{
+	return -ENODEV;
+}
+static inline int erhai_otg_adsp_src_pdos(u32 *pdo, int max)
 {
 	return -ENODEV;
 }
