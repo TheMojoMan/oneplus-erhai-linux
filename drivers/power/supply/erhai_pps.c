@@ -148,7 +148,15 @@ static void pps_cp_drop(void)
 #define PPS_PROP_BATT_VOLT_NOW		7
 #define PPS_PROP_BATT_CURR_NOW		9
 
+#define PPS_USB_TYPE_PD		6	/* POWER_SUPPLY_USB_TYPE_PD */
 #define PPS_USB_TYPE_PD_PPS		8	/* POWER_SUPPLY_USB_TYPE_PD_PPS */
+
+/* battery_property_id BATT_SET_PDO: fixed-PDO voltage request in mV (vendor
+ * oplus_chg_8350_set_pd_config() accepts 5000/9000/12000) */
+#define PPS_PROP_BATT_SET_PDO		25
+#define PPS_PD_FIXED_5V_MV		5000
+#define PPS_PD_FIXED_9V_MV		9000
+#define PPS_PD_SRC_PDOS			7	/* PPS_PDO_MAX */
 
 /* USB_INPUT_CURR_LIMIT "unsuspend": no limit from the host (vendor
  * oplus_hal_adsp.c:6294 writes this to release WIRED_CHARGE_SUSPEND) */
@@ -269,6 +277,19 @@ static bool pps_cp_init = true;
 module_param(pps_cp_init, bool, 0644);
 MODULE_PARM_DESC(pps_cp_init,
 		 "also write USB_PPS_CP_MODE_INIT(40)=1 + USB_PPS_MOS_CTRL(39)=1 on entry (vendor PHY init)");
+
+/* ---- fixed 9 V PD for plain PD (non-PPS, non-VOOC) sources ---- */
+static bool pps_pd9v_enable = true;
+module_param(pps_pd9v_enable, bool, 0644);
+MODULE_PARM_DESC(pps_pd9v_enable,
+		 "ask a plain PD source for its 9 V fixed PDO once the serial ladder has declined "
+		 "(Android's set_pd_config); without it such a brick stays on 5 V x 2 A");
+
+static unsigned int pps_pd9v_icl_ma = 2000;
+module_param(pps_pd9v_icl_ma, uint, 0644);
+MODULE_PARM_DESC(pps_pd9v_icl_ma,
+		 "input limit at 9 V (mA), lowered to the source's 9 V PDO current; 2000 is the "
+		 "vendor PD strategy (pd_strategy_data) below 41 C shell");
 
 /* ---- SC8547A charge-pump 2:1 (CP direct-charge from the PPS bus) ---- */
 static bool pps_cp_enable = true;
@@ -403,6 +424,10 @@ struct erhai_pps {
 	unsigned long		ramp_since;
 	unsigned int		stall_count;
 	bool			plug_logged;	/* adapter line printed for this plug */
+	unsigned long		plug_since;	/* jiffies the plug was first seen */
+	/* fixed 9 V PD: 0 not tried, 1 at 9 V, -1 done for this plug (5 V) */
+	int			pd9v;
+	unsigned int		pd9v_icl_ma;
 
 	/* what we last commanded / observed */
 	unsigned int		set_volt_mv;
@@ -884,6 +909,105 @@ static int pps_cp_step(struct erhai_pps *p)
 }
 
 
+/* ---- fixed 9 V PD ---- */
+/* the source's 9 V fixed PDO current in mA, 0 = no such PDO, <0 = unknown */
+static int pps_pd9v_pdo_ma(void)
+{
+	u32 pdo[PPS_PD_SRC_PDOS];
+	int i, n;
+
+	n = erhai_otg_adsp_src_pdos(pdo, ARRAY_SIZE(pdo));
+	if (n <= 0)
+		return n ? n : -ENODATA;
+	for (i = 0; i < n; i++) {
+		if ((pdo[i] >> 30) == 3 && ((pdo[i] >> 28) & 3) == 0)
+			/* PPS APDO: 100 mV units in 24:17 / 15:8, 50 mA in 6:0 */
+			pr_info("erhai_pps: source PDO %d: PPS %u-%u mV %u mA (%08x)\n",
+				i, ((pdo[i] >> 8) & 0xff) * 100,
+				((pdo[i] >> 17) & 0xff) * 100,
+				(pdo[i] & 0x7f) * 50, pdo[i]);
+		else if ((pdo[i] >> 30) == 0)
+			pr_info("erhai_pps: source PDO %d: fixed %u mV %u mA (%08x)\n",
+				i, ((pdo[i] >> 10) & 0x3ff) * 50,
+				(pdo[i] & 0x3ff) * 10, pdo[i]);
+		else
+			pr_info("erhai_pps: source PDO %d: type %u (%08x)\n",
+				i, pdo[i] >> 30, pdo[i]);
+	}
+	for (i = 0; i < n; i++) {
+		/* fixed supply: type 31:30 = 0, 50 mV units in 19:10, 10 mA in 9:0 */
+		if ((pdo[i] >> 30) == 0 &&
+		    ((pdo[i] >> 10) & 0x3ff) * 50 == PPS_PD_FIXED_9V_MV)
+			return (pdo[i] & 0x3ff) * 10;
+	}
+	return 0;
+}
+
+static void pps_pd9v_drop(struct erhai_pps *p, const char *why)
+{
+	int rc = pps_batt_set(PPS_PROP_BATT_SET_PDO, PPS_PD_FIXED_5V_MV);
+
+	if (!rc)
+		rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT, PPS_ICL_UNSUSPEND);
+	pr_info("erhai_pps: fixed PD back to 5 V (%s, rc=%d)\n", why, rc);
+	p->pd9v = -1;
+}
+
+/*
+ * A plain PD source (USB_REAL_TYPE PD, no PPS) that the serial ladder
+ * declined: Android asks charger_pd for the 9 V fixed PDO (BATT_SET_PDO), the
+ * ADSP never does it on its own, so the brick stays at 5 V x 2 A (~10 W, most
+ * of it eaten by the system).  One request per plug, after the same identify
+ * debounce the PPS path uses; back to 5 V if the pack leaves the temp window.
+ */
+static void pps_pd9v_poll(struct erhai_pps *p)
+{
+	int ma, rc;
+
+	if (!pps_pd9v_enable || p->pd9v < 0)
+		return;
+
+	if (p->pd9v > 0) {
+		if (!pps_read_battery(p) &&
+		    (p->temp_c < pps_temp_min_c || p->temp_c > pps_temp_max_c))
+			pps_pd9v_drop(p, PPS_EXIT_REASON_TEMP);
+		return;
+	}
+
+	if (time_before(jiffies, p->plug_since + msecs_to_jiffies(pps_identify_ms)))
+		return;
+	if (pps_usb_get(PPS_PROP_USB_REAL_TYPE) != PPS_USB_TYPE_PD)
+		return;
+	if (pps_usb_get(PPS_PROP_USB_VOOC_FAST_CHG_TYPE) >= (int)pps_vooc_min ||
+	    pps_sc_delivering() || pps_sc_identifying())
+		return;
+	if (erhai_otg_charge_inhibited() || pps_read_battery(p) ||
+	    p->soc >= (int)pps_soc_stop ||
+	    p->temp_c < pps_temp_min_c || p->temp_c > pps_temp_max_c)
+		return;
+
+	ma = pps_pd9v_pdo_ma();
+	if (ma == 0) {
+		pr_info("erhai_pps: PD source offers no 9 V fixed PDO; staying at 5 V\n");
+		p->pd9v = -1;
+		return;
+	}
+	p->pd9v_icl_ma = ma > 0 ? min_t(unsigned int, ma, pps_pd9v_icl_ma) :
+				  pps_pd9v_icl_ma;
+
+	rc = pps_usb_set(PPS_PROP_USB_INPUT_CURR_LIMIT, p->pd9v_icl_ma * 1000);
+	if (!rc)
+		rc = pps_batt_set(PPS_PROP_BATT_SET_PDO, PPS_PD_FIXED_9V_MV);
+	if (rc) {
+		pps_prop_err(p, "fixed PD 9 V request", rc);
+		pps_pd9v_drop(p, PPS_EXIT_REASON_SET_FAIL);
+		return;
+	}
+	pr_info("erhai_pps: fixed PD 9 V requested, icl %u mA (9 V PDO %d mA; soc %d%% t %d C)\n",
+		p->pd9v_icl_ma, ma, p->soc, p->temp_c);
+	p->pd9v = 1;
+}
+
 /* ---- the poll ---- */
 static void pps_poll(struct erhai_pps *p)
 {
@@ -902,12 +1026,14 @@ static void pps_poll(struct erhai_pps *p)
 
 		if (online <= 0) {
 			p->plug_logged = false;
+			p->pd9v = 0;
 			return;
 		}
 		if (!p->plug_logged) {
 			int icl = pps_usb_get(PPS_PROP_USB_INPUT_CURR_LIMIT);
 
 			p->plug_logged = true;
+			p->plug_since = jiffies;
 			/*
 			 * Every plug-in starts unsuspended: the revert at a
 			 * detach runs after the cable is gone, and the ADSP appears
@@ -925,8 +1051,10 @@ static void pps_poll(struct erhai_pps *p)
 				pps_usb_get(PPS_PROP_USB_GET_PPS_MAX_CURR),
 				p->vbus_mv, icl, rc);
 		}
-		if (!pps_deployable(p, &vooc))
+		if (!pps_deployable(p, &vooc)) {
+			pps_pd9v_poll(p);
 			return;
+		}
 		pps_enter(p, PPS_ARMED, "PD_PPS adapter");
 		return;
 	}
@@ -1282,6 +1410,9 @@ static int pps_state_show(struct seq_file *s, void *v)
 	seq_printf(s, "pps_enable %d\nstate %s\nlast_exit %s\n",
 		   pps_enable, pps_state_names[p->state],
 		   p->last_reason ?: "-");
+	seq_printf(s, "pd9v %s icl %u mA\n",
+		   p->pd9v > 0 ? "on" : p->pd9v < 0 ? "done" : "-",
+		   p->pd9v_icl_ma);
 	seq_printf(s, "set volt %u mV curr %u mA target %u mA\n",
 		   p->set_volt_mv, p->set_curr_ma, p->target_curr_ma);
 	if (p->state > PPS_IDLE)
