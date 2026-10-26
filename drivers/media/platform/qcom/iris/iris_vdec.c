@@ -364,15 +364,6 @@ int iris_vdec_streamon_input(struct iris_inst *inst)
 	if (ret)
 		return ret;
 
-	if (inst->domain == DECODER &&
-	    inst->display_delay_enable && !inst->display_delay) {
-		ret = hfi_ops->session_set_decode_order(inst);
-		if (ret)
-			dev_warn(inst->core->dev,
-				 "decode-order output not accepted by firmware: %d\n",
-				 ret);
-	}
-
 	ret = iris_alloc_and_queue_persist_bufs(inst, BUF_PERSIST);
 	if (ret)
 		return ret;
