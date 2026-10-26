@@ -230,6 +230,7 @@ static const u16 pogo_fn_remap[][2] = {
  */
 static const u16 pogo_fn_gen_remap[][2] = {
 	{0x68, KEY_F3},	/* F13		-> mic / settings	*/
+	{0x6b, KEY_F4},	/* F16		-> touchpad toggle	*/
 	{0x6c, KEY_F4},	/* F17		-> touchpad toggle	*/
 	{0x46, KEY_F5},	/* PrintScreen	-> screenshot		*/
 	{0x73, KEY_F6},	/* F24		-> lock			*/
