@@ -131,7 +131,6 @@ struct iris_hfi_session_ops {
 	int (*session_drain)(struct iris_inst *inst, u32 plane);
 	int (*session_resume_drain)(struct iris_inst *inst, u32 plane);
 	int (*session_close)(struct iris_inst *inst);
-	int (*session_set_decode_order)(struct iris_inst *inst);
 };
 
 struct hfi_subscription_params {

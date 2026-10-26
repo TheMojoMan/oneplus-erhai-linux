@@ -156,6 +156,10 @@ static enum platform_inst_fw_cap_type iris_get_cap_id(u32 id)
 		return LAYER5_BITRATE_HEVC;
 	case V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME:
 		return REQUEST_SYNC_FRAME;
+	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE:
+		return DISPLAY_DELAY_ENABLE;
+	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY:
+		return DISPLAY_DELAY;
 	default:
 		return INST_FW_CAP_MAX;
 	}
@@ -301,6 +305,10 @@ static u32 iris_get_v4l2_id(enum platform_inst_fw_cap_type cap_id)
 		return V4L2_CID_MPEG_VIDEO_HEVC_HIER_CODING_L5_BR;
 	case REQUEST_SYNC_FRAME:
 		return V4L2_CID_MPEG_VIDEO_FORCE_KEY_FRAME;
+	case DISPLAY_DELAY_ENABLE:
+		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE;
+	case DISPLAY_DELAY:
+		return V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY;
 	default:
 		return 0;
 	}
@@ -312,21 +320,6 @@ static int iris_op_s_ctrl(struct v4l2_ctrl *ctrl)
 	enum platform_inst_fw_cap_type cap_id;
 	struct platform_inst_fw_cap *cap;
 	struct vb2_queue *q;
-
-	switch (ctrl->id) {
-	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY:
-	case V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE:
-		q = v4l2_m2m_get_src_vq(inst->m2m_ctx);
-		if (inst->domain != DECODER || vb2_is_streaming(q))
-			return -EINVAL;
-		if (ctrl->id == V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY)
-			inst->display_delay = ctrl->val;
-		else
-			inst->display_delay_enable = ctrl->val;
-		return 0;
-	default:
-		break;
-	}
 
 	cap = &inst->fw_caps[0];
 	cap_id = iris_get_cap_id(ctrl->id);
@@ -371,7 +364,7 @@ int iris_ctrls_init(struct iris_inst *inst)
 	 * V4L2_CID_MIN_BUFFERS_FOR_OUTPUT for encoder
 	 */
 
-	ret = v4l2_ctrl_handler_init(&inst->ctrl_handler, num_ctrls + 3);
+	ret = v4l2_ctrl_handler_init(&inst->ctrl_handler, num_ctrls + 1);
 	if (ret)
 		return ret;
 
@@ -414,14 +407,7 @@ int iris_ctrls_init(struct iris_inst *inst)
 	if (inst->domain == DECODER) {
 		v4l2_ctrl_new_std(&inst->ctrl_handler, NULL,
 				  V4L2_CID_MIN_BUFFERS_FOR_CAPTURE, 1, 32, 1, 4);
-		/* decode-order output for clients that synchronously wait on
-		 * the current render target (e.g. the iris-vaapi driver) */
-		v4l2_ctrl_new_std(&inst->ctrl_handler, &iris_ctrl_ops,
-				  V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY,
-				  0, 16383, 1, 0);
-		v4l2_ctrl_new_std(&inst->ctrl_handler, &iris_ctrl_ops,
-				  V4L2_CID_MPEG_VIDEO_DEC_DISPLAY_DELAY_ENABLE,
-				  0, 1, 1, 0);
+
 	} else {
 		v4l2_ctrl_new_std(&inst->ctrl_handler, NULL,
 				  V4L2_CID_MIN_BUFFERS_FOR_OUTPUT, 1, 32, 1, 4);
