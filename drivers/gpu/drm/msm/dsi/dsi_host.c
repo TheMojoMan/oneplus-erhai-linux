@@ -137,7 +137,7 @@ struct msm_dsi_host {
 	struct clk *dsi_pll_pixel_clk;
 
 	unsigned long byte_clk_rate;
-	bool byte_intf_clk_div_2;
+	unsigned long byte_intf_clk_rate;
 	unsigned long pixel_clk_rate;
 	unsigned long esc_clk_rate;
 
@@ -390,19 +390,7 @@ int msm_dsi_runtime_resume(struct device *dev)
 
 int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)
 {
-	unsigned long byte_intf_clk_rate;
-	long rounded_byte_clk_rate;
 	int ret;
-
-	rounded_byte_clk_rate = clk_round_rate(msm_host->byte_clk,
-					       msm_host->byte_clk_rate);
-	if (rounded_byte_clk_rate < 0) {
-		pr_err("%s: failed to round byte clock rate, %ld\n",
-		       __func__, rounded_byte_clk_rate);
-		return rounded_byte_clk_rate;
-	}
-
-	msm_host->byte_clk_rate = rounded_byte_clk_rate;
 
 	DBG("Set clk rates: pclk=%lu, byteclk=%lu",
 	    msm_host->pixel_clk_rate, msm_host->byte_clk_rate);
@@ -421,11 +409,7 @@ int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)
 	}
 
 	if (msm_host->byte_intf_clk) {
-		byte_intf_clk_rate = msm_host->byte_clk_rate;
-		if (msm_host->byte_intf_clk_div_2)
-			byte_intf_clk_rate /= 2;
-
-		ret = clk_set_rate(msm_host->byte_intf_clk, byte_intf_clk_rate);
+		ret = clk_set_rate(msm_host->byte_intf_clk, msm_host->byte_intf_clk_rate);
 		if (ret) {
 			pr_err("%s: Failed to set rate byte intf clk, %d\n",
 			       __func__, ret);
@@ -954,6 +938,7 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 	u32 pkt_per_line;
 	u32 eol_byte_num;
 	u32 bytes_per_pkt;
+	u32 slice_per_pkt = msm_host->dsc_slice_per_pkt ?: 1;
 
 	/* first calculate dsc parameters and then program
 	 * compress mode registers
@@ -961,10 +946,18 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 	slice_per_intf = dsc->slice_count;
 
 	total_bytes_per_intf = dsc->slice_chunk_size * slice_per_intf;
-bytes_per_pkt = dsc->slice_chunk_size * msm_host->dsc_slice_per_pkt;
+	if (slice_per_pkt > slice_per_intf ||
+	    slice_per_intf % slice_per_pkt) {
+		drm_warn_once(msm_host->dev,
+			      "invalid DSC slices per packet: %u/%u\n",
+			      slice_per_pkt, slice_per_intf);
+		slice_per_pkt = 1;
+	}
+
+	bytes_per_pkt = dsc->slice_chunk_size * slice_per_pkt;
 
 	eol_byte_num = total_bytes_per_intf % 3;
-	pkt_per_line = slice_per_intf / msm_host->dsc_slice_per_pkt;
+	pkt_per_line = slice_per_intf / slice_per_pkt;
 
 	if (is_cmd_mode) /* packet data type */
 		reg = DSI_COMMAND_COMPRESSION_MODE_CTRL_STREAM0_DATATYPE(MIPI_DSI_DCS_LONG_WRITE);
@@ -1118,10 +1111,9 @@ static void dsi_timing_setup(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 		if (!msm_host->dsc)
 			wc = hdisplay * mipi_dsi_pixel_format_to_bpp(msm_host->format) / 8 + 1;
 		else
-			/*
-			 * When DSC is enabled, WC = slice_chunk_size * slice_per_pkt + 1.
-			 */
-			wc = msm_host->dsc->slice_chunk_size * msm_host->dsc_slice_per_pkt + 1;
+			/* WC = slice_chunk_size * slice_per_pkt + 1 */
+			wc = msm_host->dsc->slice_chunk_size *
+			     (msm_host->dsc_slice_per_pkt ?: 1) + 1;
 
 		dsi_write(msm_host, REG_DSI_CMD_MDP_STREAM0_CTRL,
 			DSI_CMD_MDP_STREAM0_CTRL_WORD_COUNT(wc) |
@@ -2537,7 +2529,9 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 		goto unlock_ret;
 	}
 
-	msm_host->byte_intf_clk_div_2 = phy_shared_timings->byte_intf_clk_div_2;
+	msm_host->byte_intf_clk_rate = msm_host->byte_clk_rate;
+	if (phy_shared_timings->byte_intf_clk_div_2)
+		msm_host->byte_intf_clk_rate /= 2;
 
 	msm_dsi_sfpb_config(msm_host, true);
 
