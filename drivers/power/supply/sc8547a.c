@@ -808,6 +808,23 @@ static int sc8547_reset_voocphy(struct sc8547a_device *sc)
 	return 0;
 }
 
+/*
+ * VOOC protocol teardown only: TX/IRQ/D+/VOOC-enable/predata, leaving the CP
+ * (REG_07/09), its OVP/OCP profile and the ADC alone.  For the VOOC paths
+ * that run while the PPS host engine owns the CP (a bench or desktop "vooc"
+ * restart re-identifies and declines a PPS adapter mid-session).
+ */
+static void sc8547_reset_vooc_protocol(struct sc8547a_device *sc)
+{
+	sc8547_write_byte(sc, SC8547_REG_2C, 0x00);	/* clear tx */
+	sc8547_write_byte(sc, SC8547_REG_2D, 0x00);
+	sc8547_write_byte(sc, SC8547_REG_30, 0x7f);	/* mask vooc irq */
+	sc8547_write_byte(sc, SC8547_REG_21, 0xc0);	/* D+ HiZ */
+	sc8547_write_byte(sc, SC8547_REG_2B, 0x00);	/* VOOC disable */
+	sc8547_write_word(sc, SC8547_REG_31, 0x0);	/* predata */
+	sc8547_write_byte(sc, SC8547_REG_10, 0x02);	/* mask insert irq */
+}
+
 /* ------------------ PPS host-engine CP API (erhai_pps) ------------------ *
  * The serial VOOC ladder correctly refuses PD/PPS-only adapters, so the PPS
  * engine negotiates a high-V PPS contract through the ADSP itself.  These
@@ -1957,7 +1974,9 @@ static void sc8547_vooc_arm_hw(struct sc8547a_device *sc)
 	 * doing it here (before any frame) avoids disturbing the D+/D- servo,
 	 * and it is harmless if the adapter is later declined (CP never closes).
 	 */
-	if (sc->fastchg_deliver || sc->fastchg_auto) {
+	/* not while the PPS engine runs the CP: the slave pre-arm writes its
+	 * REG_07 off and would open a closed parallel pump */
+	if ((sc->fastchg_deliver || sc->fastchg_auto) && !pps_cp_engaged) {
 		sc8547_svooc_hw_setting(sc);
 		sc->hw_profile_set = true;
 		sc8547_slave_hw_setting(sc);	/* pre-arm parallel CP (stays off) */
@@ -1975,8 +1994,18 @@ static void sc8547_vooc_arm_hw(struct sc8547a_device *sc)
  */
 static void sc8547_auto_decline(struct sc8547a_device *sc, const char *why)
 {
-	sc8547_slave_reset();			/* drop parallel CP */
-	sc8547_reset_voocphy(sc);		/* stop VOOC frames, CP off */
+	/*
+	 * A PPS adapter declined while the PPS engine already runs the CP (a
+	 * bench/desktop "vooc" restart mid-session): stop the VOOC protocol
+	 * only.  The full reset turned both pumps off under the engine
+	 * (lab, bypass off -> VOOC re-identify -> "declined" -> feed drop).
+	 */
+	if (pps_cp_engaged) {
+		sc8547_reset_vooc_protocol(sc);
+	} else {
+		sc8547_slave_reset();		/* drop parallel CP */
+		sc8547_reset_voocphy(sc);	/* stop VOOC frames, CP off */
+	}
 	wcd939x_usbss_dpdm_switch_fast_charge(false);	/* D+/D- back to SoC */
 	sc8547_set_adc_enable(sc, true);
 	sc->fastchg_enable = false;
@@ -2545,8 +2574,12 @@ static void sc8547_vooc_stop(struct sc8547a_device *sc)
 {
 	sc->vooc_started = false;
 	cancel_delayed_work_sync(&sc->attach_work);
-	sc8547_slave_reset();		/* drop parallel CP */
-	sc8547_reset_voocphy(sc);	/* CP off */
+	if (pps_cp_engaged) {
+		sc8547_reset_vooc_protocol(sc);	/* the PPS engine owns the CP */
+	} else {
+		sc8547_slave_reset();		/* drop parallel CP */
+		sc8547_reset_voocphy(sc);	/* CP off */
+	}
 	/* Return the D+/D- crossbar to the normal USB path. */
 	wcd939x_usbss_dpdm_switch_fast_charge(false);
 	sc->auto_armed = false;
