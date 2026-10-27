@@ -48,6 +48,11 @@ void sc8547a_pps_cp_disengage(void);
 /* Keep the master ADC on for a whole PPS session (on) / release it (off). */
 void sc8547a_pps_adc_hold(bool on);
 
+/* Second pump (slave SC8547A) for the PPS path; see sc8547a.c. */
+int sc8547a_pps_slave_engage(void);
+void sc8547a_pps_slave_disengage(void);
+bool sc8547a_pps_slave_state(int *ibus_ma);
+
 /* Raw master REG_06 / REG_07 for the erhai_pps trace (read-only). */
 int sc8547a_pps_regs(u8 *r06, u8 *r07);
 
