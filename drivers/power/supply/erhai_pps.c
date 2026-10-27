@@ -1266,8 +1266,9 @@ fail:
 		/*
 		 * current servo: the ADSP fills the pack up to the ICL/FCC
 		 * grant; we nudge PPS curr to the input target, never yank.
+		 * Not in TAPER: that state only sheds current until the exit.
 		 */
-		if (p->set_curr_ma < p->target_curr_ma) {
+		if (charging && p->set_curr_ma < p->target_curr_ma) {
 			unsigned int n = min(p->set_curr_ma + 250U,
 					     p->target_curr_ma);
 
@@ -1279,7 +1280,10 @@ fail:
 		 * CP 2:1 direct-charge: the vendor's PPS + virtual_cp recipe
 		 * (pps_cp_step()).  The engine's collapse/soc/temp/vbat exits drop
 		 * the pump via pps_exit BEFORE the 5 V revert.  Pump off at runtime
-		 * (pps_cp_enable=0) or the API gone: hand back to the buck.
+		 * (pps_cp_enable=0) or the API gone: hand back to the buck.  TAPER
+		 * stays on the buck: once vbat has reached CV the pump is not
+		 * re-entered, or it re-lifts every time the pack dips below CV
+		 * (lab, full charge: 473 of 537 taper polls with the pump on).
 		 */
 		if (erhai_otg_charge_inhibited()) {
 			/* bypass / max_soc: the pump would charge straight
@@ -1288,13 +1292,13 @@ fail:
 				pr_info("erhai_pps: charging inhibited by policy - pump off, buck holds the pack\n");
 			p->inhibit_held = true;
 			rc = pps_cp_release(p, "inhibited", false);
-		} else if (pps_cp_enable) {
+		} else if (pps_cp_enable && charging) {
 			if (p->inhibit_held)
 				pr_info("erhai_pps: charge inhibit released - pump allowed\n");
 			p->inhibit_held = false;
 			rc = pps_cp_step(p);
 		} else {
-			rc = pps_cp_release(p, "disabled", false);
+			rc = pps_cp_release(p, charging ? "disabled" : "taper", false);
 		}
 		if (rc) {
 			pps_exit(p, PPS_EXIT_REASON_SET_FAIL);
