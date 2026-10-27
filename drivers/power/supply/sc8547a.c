@@ -824,7 +824,10 @@ static int sc8547_reset_voocphy(struct sc8547a_device *sc)
  */
 static bool pps_cp_engaged;
 static bool pps_adc_hold;	/* keep the ADC on across drops (PPS session) */
+static bool pps_slave_engaged;	/* PPS path asked the slave CP to close */
 static bool sc8547_slave_is_on(void);	/* defined in the slave section below */
+static void sc8547_slave_feed_wd(void);
+static void sc8547_slave_reset(void);
 
 void sc8547a_pps_cp_disengage(void);	/* defined below, called by feed()'s drop path */
 
@@ -947,6 +950,8 @@ int sc8547a_pps_cp_feed(int *vbus_mv, int *vbat_mv)
 		goto drop;
 	sc8547_write_byte(sc, SC8547_REG_09, 0x13);
 	sc8547_set_chg_enable(sc, true);
+	if (pps_slave_engaged)
+		sc8547_slave_feed_wd();
 	return 0;
 drop:
 	sc8547a_pps_cp_disengage();
@@ -958,6 +963,11 @@ void sc8547a_pps_cp_disengage(void)
 {
 	struct sc8547a_device *sc = sc8547_master_dev;
 
+	/* never leave the slave switching without the master */
+	if (pps_slave_engaged) {
+		pps_slave_engaged = false;
+		sc8547_slave_reset();
+	}
 	pps_cp_engaged = false;
 	if (!sc)
 		return;
@@ -1093,6 +1103,52 @@ static void sc8547_slave_reset(void)
 			   SC8547_WATCHDOG_DIS);
 	sc8547_write_byte(sc, SC8547_REG_11, 0x00);			/* ADC off */
 }
+
+/*
+ * Second pump for the PPS path.  The vendor's virtual_cp runs both SC8547A
+ * in parallel; one pump alone needs vbus - 2*vbat near its 700 mV ceiling at
+ * ~3.8 A (lab c3 run 2b).  The slave only latches CHG_EN inside its 2:1
+ * window, which holds once the master carries real current, so the engine
+ * closes it under load (the same threshold engage as the VOOC path) and calls
+ * this again until sc8547a_pps_slave_state() reports it latched.  The
+ * non-VOOC decline path reset the slave, so re-apply its parallel profile
+ * on the first close.
+ */
+int sc8547a_pps_slave_engage(void)
+{
+	struct sc8547a_device *sc = sc8547_master_dev;
+
+	if (!sc || !sc8547_slave_dev)
+		return -ENODEV;
+	if (!pps_cp_engaged || sc8547a_fastchg_delivering())
+		return -EBUSY;
+	if (!pps_slave_engaged)
+		sc8547_slave_hw_setting(sc);
+	sc8547_slave_cp_enable(sc, true);
+	pps_slave_engaged = true;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_slave_engage);
+
+void sc8547a_pps_slave_disengage(void)
+{
+	if (!pps_slave_engaged)
+		return;
+	pps_slave_engaged = false;
+	sc8547_slave_reset();
+	if (sc8547_master_dev)
+		dev_info(sc8547_master_dev->dev, "PPS CP: slave disengaged\n");
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_slave_disengage);
+
+/* true while the slave's CHG_EN is latched; *ibus_ma = its bus current */
+bool sc8547a_pps_slave_state(int *ibus_ma)
+{
+	if (ibus_ma)
+		*ibus_ma = pps_slave_engaged ? sc8547_slave_ibus() : 0;
+	return pps_slave_engaged && sc8547_slave_is_on();
+}
+EXPORT_SYMBOL_GPL(sc8547a_pps_slave_state);
 
 /* ==================== VOOC protocol state machine ===================== *
  * Ported from the OnePlus vendor engine (oplus_ap_voocphy.c), reduced to the
