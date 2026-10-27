@@ -183,7 +183,7 @@
 			link-name = "WCD Capture";
 
 			codec {
-				sound-dai = <&wcd939x 1>, <&swr2 0>, <&lpass_txmacro 0>;
+				sound-dai = <&wcd939x 1>, <&swr2 1>, <&lpass_txmacro 0>;
 			};
 
 			cpu {
@@ -1950,6 +1950,28 @@
 
 &remoteproc_mpss {
 	status = "disabled";
+};
+
+&swr2 {
+	status = "okay";
+
+	/* The TX controller has one output port before its four input ports. */
+	qcom,dout-ports = <1>;
+	qcom,ports-sinterval-low =	/bits/ 8 <0x00 0x01 0x01 0x03 0x03>;
+	qcom,ports-offset1 =		/bits/ 8 <0x00 0x00 0x00 0x01 0x01>;
+	qcom,ports-offset2 =		/bits/ 8 <0x00 0x00 0x00 0x00 0x00>;
+	qcom,ports-hstart =		/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-hstop =		/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-word-length =	/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-block-pack-mode =	/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-block-group-count =	/bits/ 8 <0xff 0xff 0xff 0xff 0xff>;
+	qcom,ports-lane-control =	/bits/ 8 <0xff 0x01 0x02 0x00 0x00>;
+
+	wcd_tx: codec@0,3 {
+		compatible = "sdw20217010e00";
+		reg = <0 3>;
+		qcom,tx-port-mapping = <2 2 3 4>;
+	};
 };
 
 &tlmm {
