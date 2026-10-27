@@ -206,13 +206,13 @@ static unsigned int pps_start_curr_ma = 1000;
 module_param(pps_start_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_start_curr_ma, "PPS entry current (mA)");
 
-static unsigned int pps_target_curr_ma = 4000;
+static unsigned int pps_target_curr_ma = 5000;
 module_param(pps_target_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_target_curr_ma,
 		 "PPS input current target (mA), capped per plug by the adapter's own PPS max "
-		 "current - lab-validated 4000 through the pump (~39 W, 32-34 C)");
+		 "current - lab-validated 5000 through both pumps (~50 W, 32-33 C)");
 
-static unsigned int pps_max_curr_ma = 4000;
+static unsigned int pps_max_curr_ma = 5000;
 module_param(pps_max_curr_ma, uint, 0644);
 MODULE_PARM_DESC(pps_max_curr_ma, "hard PPS input current ceiling (mA)");
 
@@ -341,9 +341,11 @@ MODULE_PARM_DESC(pps_cp_diff_max_mv,
 		 "never step VBUS up while vbus - 2*vbat at the chip is at or above this (mV; "
 		 "the pump drops at 700)");
 
-static unsigned int pps_cp_ibat_max_ma = 9000;
+static unsigned int pps_cp_ibat_max_ma = 11400;
 module_param(pps_cp_ibat_max_ma, uint, 0644);
-MODULE_PARM_DESC(pps_cp_ibat_max_ma, "pump ibus servo: step VBUS down while the pack takes more than this (mA)");
+MODULE_PARM_DESC(pps_cp_ibat_max_ma,
+		 "pump ibus servo: step VBUS down while the pack takes more than this (mA; "
+		 "vendor pps_ibat_over 11400 at 55 W)");
 
 static unsigned int pps_cp_min_ibus_ma = 300;
 module_param(pps_cp_min_ibus_ma, uint, 0644);
@@ -387,11 +389,12 @@ module_param(pps_cp_slave_drop_ticks, uint, 0644);
 MODULE_PARM_DESC(pps_cp_slave_drop_ticks,
 		 "consecutive low or unlatched polls before dropping the second pump (VOOC path 3)");
 
-static unsigned int pps_cp_max_volt_mv = 9900;
+static unsigned int pps_cp_max_volt_mv = 10500;
 module_param(pps_cp_max_volt_mv, uint, 0644);
 MODULE_PARM_DESC(pps_cp_max_volt_mv,
-		 "pump PPS VBUS ceiling (mV); 9900 keeps the engaged chip under its 10 V VBUS_OVP "
-		 "(lab: 9.17 V max at 4 A), vendor 10500");
+		 "pump PPS VBUS request ceiling (mV; vendor 11000 - 500). The cable drop keeps the "
+		 "engaged chip under its 10 V VBUS_OVP (lab: 9.32 V max at 4.85 A), and "
+		 "pps_cp_diff_max_mv stops step-ups near the pump window");
 
 static unsigned int pps_cp_feed_ms = 300;
 module_param(pps_cp_feed_ms, uint, 0644);
