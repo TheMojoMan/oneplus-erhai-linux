@@ -320,7 +320,15 @@ MODULE_PARM_DESC(pps_cp_rearm_ms, "hold-off after a pump drop or a failed entry 
 
 static unsigned int pps_cp_rearm_max = 5;
 module_param(pps_cp_rearm_max, uint, 0644);
-MODULE_PARM_DESC(pps_cp_rearm_max, "pump attempts per plug-in; then buck path for the rest of it");
+MODULE_PARM_DESC(pps_cp_rearm_max,
+		 "pump attempts per plug-in, refilled after pps_cp_rearm_refill_ms of steady pumping; "
+		 "then buck path for the rest of the plug-in");
+
+static unsigned int pps_cp_rearm_refill_ms = 60000;
+module_param(pps_cp_rearm_refill_ms, uint, 0644);
+MODULE_PARM_DESC(pps_cp_rearm_refill_ms,
+		 "a pump that has run this long refills the per-plug attempt budget (ms; 0 = never), "
+		 "so isolated adapter sags over a long charge do not end fast charging");
 
 static unsigned int pps_cp_vstep_mv = 40;
 module_param(pps_cp_vstep_mv, uint, 0644);
@@ -954,6 +962,17 @@ static int pps_cp_step(struct erhai_pps *p)
 			return pps_cp_release(p, "drop", true);
 		}
 		p->cp_fed_at = jiffies;
+		/* steady pumping earns the attempts back: the budget is there to
+		 * stop thrashing, not to count isolated drops over an hour (lab:
+		 * 5 drops in 6 min, two bypass-off restarts and three adapter
+		 * sags, each after minutes of steady 5 A, ended fast charging) */
+		if (p->cp_rearms && pps_cp_rearm_refill_ms &&
+		    time_after_eq(jiffies, p->cp_engaged_since +
+				  msecs_to_jiffies(pps_cp_rearm_refill_ms))) {
+			pr_info("erhai_pps: CP steady for %u ms - attempts refilled (%u used)\n",
+				pps_cp_rearm_refill_ms, p->cp_rearms);
+			p->cp_rearms = 0;
+		}
 		/* from here on cibus is both pumps together */
 		cibus += pps_cp_slave_step(p, cibus, diff);
 		/* switching but carrying nothing: with the buck suspended the
