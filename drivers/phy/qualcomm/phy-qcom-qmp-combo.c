@@ -4182,6 +4182,16 @@ static int qmp_combo_dp_exit(struct phy *phy)
 
 	qmp->dp_init_count--;
 
+	/*
+	 * erhai: the DP PHY can exit without a power_off (sink unplugged).
+	 * Leaving dp_powered_on set blocks every later typec_mux_set with
+	 * "DP PHY is still in use" and the switch back to USB3 is then never
+	 * performed (2026-10-28: drive after a monitor stayed dark because
+	 * the COM block was still in DP-only mode).
+	 */
+	if (!qmp->dp_init_count)
+		qmp->dp_powered_on = false;
+
 	mutex_unlock(&qmp->phy_mutex);
 
 	return 0;
@@ -5345,6 +5355,91 @@ bool qmp_combo_dp_active(void)
 	return qmp && smp_load_acquire(&qmp->dp_init_count) > 0;
 }
 EXPORT_SYMBOL_GPL(qmp_combo_dp_active);
+
+/*
+ * erhai: take the shared COM block back for USB3.
+ *
+ * The typec mux defers the switch back to USB3 while the DP PHY is still
+ * marked powered (qmp->dp_powered_on) and never retries it, so after a
+ * DP-alt-mode session the COM block can keep PHY_MODE_CTRL=DP_MODE with
+ * SW_USB3PHY_RESET asserted. Every dwc3 entry that follows then fails:
+ * the device path times out in dwc3_core_soft_reset (-110, GRXFIFOSIZ(0)
+ * reads 0 even though GHWPARAMS0 is fine) and the host path fails in the
+ * xHCI setup with the same -110 - the revive ladder cannot help because
+ * the island is not dead (2026-10-28, monitor session then drive).
+ *
+ * Called from the dwc3 role entries, i.e. while dwc3 holds no xhci/gadget
+ * on the pipe clock. No-op when the COM block already runs USB3 and no DP
+ * client is active, so it costs one register read on the normal path.
+ */
+int qmp_combo_usb3_rearm(void)
+{
+	struct qmp_combo *qmp = erhai_qmp_instance;
+	u32 hw_mode, rst_ovrd;
+	int ret = 0;
+
+	if (!qmp)
+		return -ENODEV;
+
+	pm_runtime_resume_and_get(qmp->dev);
+
+	mutex_lock(&qmp->phy_mutex);
+
+	if (qmp->dp_init_count || qmp->dp_powered_on) {
+		ret = -EBUSY;
+		goto out_unlock;
+	}
+
+	/*
+	 * Nothing to repair while the block is down: the dwc3 phy_init that
+	 * follows programs it from scratch, and forcing a tear-down first
+	 * would only unbalance the clock/regulator refcounts (2026-10-28,
+	 * first boot of the test kernel: mode=0 hw_mode=0x03030303).
+	 */
+	if (!qmp->init_count) {
+		ret = -EAGAIN;
+		goto out_unlock;
+	}
+
+	hw_mode = readl(qmp->com + QPHY_V3_DP_COM_PHY_MODE_CTRL);
+	rst_ovrd = readl(qmp->com + QPHY_V3_DP_COM_RESET_OVRD_CTRL);
+	if (qmp->qmpphy_mode == QMPPHY_MODE_USB3_ONLY &&
+	    (hw_mode & USB3_MODE) && !(rst_ovrd & SW_USB3PHY_RESET))
+		goto out_unlock;
+
+	dev_info(qmp->dev,
+		 "erhai qmp: re-arm USB3 (mode=%d hw_mode=%#x rst_ovrd=%#x usb=%u)\n",
+		 qmp->qmpphy_mode, hw_mode, rst_ovrd, qmp->usb_init_count);
+
+	/* Same sequence the typec mux uses for a mode switch, minus DP: the
+	 * counts are only touched by the refcounted calls, and the two force
+	 * calls keep init_count unchanged. */
+	if (qmp->usb_init_count)
+		qmp_combo_usb_power_off(qmp->usb_phy);
+
+	qmp->qmpphy_mode = QMPPHY_MODE_USB3_ONLY;
+	qmp_combo_com_exit(qmp, true);
+	ret = qmp_combo_com_init(qmp, true);
+	if (ret) {
+		dev_err(qmp->dev,
+			"erhai qmp: USB3 re-arm com_init failed %d\n", ret);
+		goto out_unlock;
+	}
+
+	if (qmp->usb_init_count) {
+		ret = qmp_combo_usb_power_on(qmp->usb_phy);
+		if (ret)
+			dev_err(qmp->dev,
+				"erhai qmp: USB3 re-arm power_on failed %d\n",
+				ret);
+	}
+
+out_unlock:
+	mutex_unlock(&qmp->phy_mutex);
+	pm_runtime_put_sync(qmp->dev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(qmp_combo_usb3_rearm);
 
 static int qmp_combo_probe(struct platform_device *pdev)
 {
