@@ -2690,6 +2690,10 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 	 * crash
 	 */
 	gmu->gxpd = dev_pm_domain_attach_by_name(gmu->dev, "gx");
+	if (adreno_is_a8xx(adreno_gpu) && IS_ERR(gmu->gxpd))
+		dev_warn(gmu->dev,
+			 "GX power domain not available (%pe): hang recovery cannot collapse GX\n",
+			 gmu->gxpd);
 
 	/* Get the power levels for the GMU and GPU */
 	a6xx_gmu_pwrlevels_probe(gmu);
