@@ -1368,23 +1368,7 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 	enable_irq(gmu->gmu_irq);
 
 	/* Check to see if we are doing a cold or warm boot */
-	if (adreno_is_a8xx(adreno_gpu)) {
-		/*
-		 * erhai: always cold-boot the GMU on a8xx. The warm-boot path
-		 * (TCM_RET_CNTL==1 -> skip the firmware reload) assumes the GMU
-		 * firmware is still resident in DTCM across the runtime-PM
-		 * suspend, but the driver only programs TCM retention for a7xx
-		 * (a6xx_gmu_fw_start), so on a8xx the DTCM is not guaranteed to
-		 * survive and the warm boot occasionally runs garbage -> the CM3
-		 * never sets FW_INIT_RESULT and a6xx_gmu_start times out
-		 * ("GMU firmware initialization timed out" + GMU OOB GPU_SET
-		 * storm -> hangcheck -> frozen display; first spontaneous hang
-		 * with the GPU at runtime-PM auto, 2026-09-12). Reloading the
-		 * firmware on every resume is deterministic and removes the
-		 * DTCM-retention dependence entirely.
-		 */
-		status = GMU_COLD_BOOT;
-	} else if (adreno_is_a7xx(adreno_gpu)) {
+	if (adreno_is_a7xx(adreno_gpu) || adreno_is_a8xx(adreno_gpu)) {
 		status = a6xx_cx_misc_read(a6xx_gpu, REG_A7XX_CX_MISC_TCM_RET_CNTL) == 1 ?
 			GMU_WARM_BOOT : GMU_COLD_BOOT;
 	} else if (gmu->legacy) {
