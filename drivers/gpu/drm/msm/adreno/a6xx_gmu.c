@@ -791,22 +791,6 @@ static void a6xx_rpmh_stop(struct a6xx_gmu *gmu)
 	if (!test_and_clear_bit(GMU_STATUS_FW_START, &gmu->status))
 		return;
 
-	/*
-	 * erhai (Adreno 830 / a8xx): the GPU RSS/RSCC register region is
-	 * unclocked in this low-power state on this board ("dead GX genpd" —
-	 * no gx gdsc, gxclkctl unclaimed), so touching GMU_RSCC_CONTROL_REQ /
-	 * GPU_RSCC_RSC_STATUS0_DRV0 raises an unrecoverable synchronous external
-	 * abort (0x96000007). That Oopses pm_runtime_work (observed on every b10
-	 * boot, incl. healthy ones). The pre-release 7.2 path (before this hunk's
-	 * inversion) never reached the RSCC code for a booted GMU — it cleared
-	 * FW_START and returned. Keep that behavior on a8xx: the GPU is pinned
-	 * always-on on erhai (erhai-gpu-pin), so a runtime suspend should not
-	 * happen at all; if the boot-time race does trigger one, skip the RSCC
-	 * stop instead of faulting.
-	 */
-	if (adreno_is_a8xx(adreno_gpu))
-		return;
-
 	if (adreno_is_a840(adreno_gpu))
 		bitmask = BIT(30);
 
