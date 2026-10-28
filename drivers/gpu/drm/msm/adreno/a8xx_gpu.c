@@ -938,6 +938,8 @@ void a8xx_recover(struct msm_gpu *gpu)
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
 	struct a6xx_gmu *gmu = &a6xx_gpu->gmu;
+	struct device *dev = &gpu->pdev->dev;
+	bool rpm_forbidden;
 	int active_submits;
 
 	adreno_dump_info(gpu);
@@ -960,6 +962,17 @@ void a8xx_recover(struct msm_gpu *gpu)
 	}
 
 	pm_runtime_dont_use_autosuspend(&gpu->pdev->dev);
+
+	/*
+	 * Recovery resets the GPU by letting it runtime-suspend so that the CX
+	 * GDSC collapses. With power/control set to "on" runtime suspend is
+	 * forbidden: the final put below would never suspend the device, CX
+	 * would stay up, the hang would survive and recovery would loop.
+	 * Lift the restriction for the reset and restore it afterwards.
+	 */
+	rpm_forbidden = !dev->power.runtime_auto;
+	if (rpm_forbidden)
+		pm_runtime_allow(dev);
 
 	/* active_submit won't change until we make a submission */
 	mutex_lock(&gpu->active_lock);
@@ -993,6 +1006,9 @@ void a8xx_recover(struct msm_gpu *gpu)
 		pm_runtime_get(&gpu->pdev->dev);
 
 	pm_runtime_get_sync(&gpu->pdev->dev);
+
+	if (rpm_forbidden)
+		pm_runtime_forbid(dev);
 
 	gpu->active_submits = active_submits;
 	mutex_unlock(&gpu->active_lock);
