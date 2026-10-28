@@ -190,6 +190,19 @@ EXPORT_SYMBOL_GPL(erhai_dwc3_host_active);
 
 bool erhai_dwc3_revive(struct dwc3 *dwc);
 
+/*
+ * erhai: shared QMP combo PHY helper (drivers/phy/qualcomm/phy-qcom-qmp-combo.c).
+ * Returns -ENODEV when this board's combo PHY is not there and -EBUSY while a DP
+ * client still owns it, so calling it unconditionally is safe.
+ */
+int qmp_combo_usb3_rearm(void);
+
+static void erhai_qmp_rearm(struct dwc3 *dwc)
+{
+	if (dwc->usb3_generic_phy[0] && !IS_ERR(dwc->usb3_generic_phy[0]))
+		qmp_combo_usb3_rearm();
+}
+
 static void __dwc3_set_mode(struct work_struct *work)
 {
 	struct dwc3 *dwc = work_to_dwc(work);
@@ -338,6 +351,10 @@ static void __dwc3_set_mode(struct work_struct *work)
 				dev_err(dwc->dev,
 					"erhai phy: usb2 recycle failed %d\n", ret);
 		}
+		/* erhai: a finished DP session may have left the shared COM
+		 * block in DP-only mode (USB3 PHY in reset); the xHCI setup
+		 * then times out with -110. Runs while dwc3 is quiescent. */
+		erhai_qmp_rearm(dwc);
 		if (erhai_session_sync)
 			erhai_session_sync(true);
 		ret = dwc3_host_init(dwc);
@@ -361,6 +378,9 @@ static void __dwc3_set_mode(struct work_struct *work)
 		}
 		break;
 	case DWC3_GCTL_PRTCAP_DEVICE:
+		/* erhai: same COM block repair as in the host path - a stale
+		 * DP-only mode makes this soft reset time out (-110). */
+		erhai_qmp_rearm(dwc);
 		ret = dwc3_core_soft_reset(dwc);
 		dev_info(dwc->dev,
 			 "erhai drd: dev entry: soft_reset=%d GHWPARAMS0=%#x RXFIFOSIZ0=%#x TXFIFOSIZ1=%#x\n",
