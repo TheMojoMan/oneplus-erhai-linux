@@ -55,16 +55,7 @@ static const struct of_device_id gx_clkctl_kaanapali_match_table[] = {
 	{ .compatible = "qcom,glymur-gxclkctl" },
 	{ .compatible = "qcom,kaanapali-gxclkctl" },
 	{ .compatible = "qcom,milos-gxclkctl" },
-	/* "qcom,sm8750-gxclkctl" is deliberately NOT matched: the sm8750 DT
-	 * node (clock-controller@3d68000) declares only a 4 KiB reg window,
-	 * while this driver registers its GX GDSC at offset 0x4024
-	 * (max_register 0x4038).  Probing it faults with a translation Oops
-	 * inside gdsc_register(), which kills the deferred_probe_work_func
-	 * kworker while it holds the deferred-probe mutex -- freezing every
-	 * pending deferred probe on the device (PCIe RC / WCN7880 bring-up,
-	 * ASoC card assembly).  Nothing on sm8750 needs this driver:
-	 * gpucc-sm8750 registers its own CX/GX GDSCs and clocks.
-	 */
+	{ .compatible = "qcom,sm8750-gxclkctl" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, gx_clkctl_kaanapali_match_table);
