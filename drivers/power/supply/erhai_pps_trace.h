@@ -34,6 +34,8 @@ struct erhai_pps_trace_sample {
 	int		chip_ibus_ma;
 	int		r06;		/* master converter status */
 	int		r07;		/* master CHG_EN (bit 7) */
+	bool		slave_on;	/* second pump's CHG_EN latched */
+	int		slave_ibus_ma;	/* second pump's bus current */
 };
 #endif
 
@@ -59,6 +61,8 @@ TRACE_EVENT(erhai_pps_sample,
 		__field(int, chip_ibus_ma)
 		__field(int, r06)
 		__field(int, r07)
+		__field(bool, slave_on)
+		__field(int, slave_ibus_ma)
 	),
 
 	TP_fast_assign(
@@ -77,16 +81,19 @@ TRACE_EVENT(erhai_pps_sample,
 		__entry->chip_ibus_ma = s->chip_ibus_ma;
 		__entry->r06 = s->r06;
 		__entry->r07 = s->r07;
+		__entry->slave_on = s->slave_on;
+		__entry->slave_ibus_ma = s->slave_ibus_ma;
 	),
 
-	TP_printk("%s vbus=%d set=%u/%u vbat=%d ibat=%d soc=%d t=%d cp=%d buck_off=%d chip_vbus=%d chip_vbat=%d diff=%d ibus=%d r06=%d r07=%d",
+	TP_printk("%s vbus=%d set=%u/%u vbat=%d ibat=%d soc=%d t=%d cp=%d buck_off=%d chip_vbus=%d chip_vbat=%d diff=%d ibus=%d r06=%d r07=%d slave=%d sibus=%d",
 		  __get_str(state), __entry->adsp_vbus_mv,
 		  __entry->set_volt_mv, __entry->set_curr_ma,
 		  __entry->vbat_mv, __entry->ibat_ma, __entry->soc,
 		  __entry->temp_c, __entry->cp, __entry->buck_off,
 		  __entry->chip_vbus_mv, __entry->chip_vbat_mv,
 		  __entry->chip_vbus_mv - 2 * __entry->chip_vbat_mv,
-		  __entry->chip_ibus_ma, __entry->r06, __entry->r07)
+		  __entry->chip_ibus_ma, __entry->r06, __entry->r07,
+		  __entry->slave_on, __entry->slave_ibus_ma)
 );
 
 TRACE_EVENT(erhai_pps_cp_event,
