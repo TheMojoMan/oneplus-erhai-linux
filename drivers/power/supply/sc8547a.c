@@ -494,6 +494,7 @@ struct sc8547a_device {
 	int			auto_reservo_cnt;	/* consecutive adapter-reset re-servos */
 	int			auto_ident_retries;	/* identify re-arms on this plug */
 	bool			vooc_saw_any;	/* any decodable VOOC frame this attempt */
+	bool			svooc_seen;	/* this plug already delivered SVOOC */
 	unsigned long		auto_deliver_since;	/* jiffies of last (re)escalation */
 	/* --- dual-CP slave load-sharing state --- */
 	unsigned long		slave_on_since;	/* jiffies the slave last engaged (0 = n/a) */
@@ -2013,6 +2014,7 @@ static void sc8547_auto_decline(struct sc8547a_device *sc, const char *why)
 	sc->cp_enabled = false;
 	sc->hw_profile_set = false;
 	sc->auto_state = SC_AUTO_DECLINED;
+	sc->svooc_seen = false;
 	dev_info(sc->dev, "auto fast-charge declined (%s) — normal charging\n", why);
 }
 
@@ -2036,6 +2038,7 @@ static void sc8547_auto_finish(struct sc8547a_device *sc, const char *why)
 	sc->cp_enabled = false;
 	sc->hw_profile_set = false;
 	sc->auto_state = SC_AUTO_DONE;
+	sc->svooc_seen = false;
 	dev_info(sc->dev, "auto fast-charge ended (%s) — normal charging\n", why);
 }
 
@@ -2105,12 +2108,16 @@ static bool sc8547_auto_identify_retry(struct sc8547a_device *sc)
 
 	/*
 	 * Only keep the ladder alive on VOOC evidence: an ADSP VOOC-family
-	 * verdict (Android's is_pd_svooc_adapter / sid_power) or actual VOOC
-	 * serial frames.  A plain PD/5 V charger has neither and declines on
-	 * the FIRST window — identical to the old single-shot behaviour, so
-	 * D+/D- and normal charging are not held hostage by the retry loop.
+	 * verdict (Android's is_pd_svooc_adapter / sid_power), actual VOOC
+	 * serial frames, or SVOOC already delivered on this plug (a keep-alive
+	 * reset of an adapter we were charging from seconds ago: the vendor
+	 * engine retries those, and the ADSP verdict is 0 right after a reset
+	 * because the adapter is still coming back).  A plain PD/5 V charger
+	 * has none of the three and declines on the FIRST window — identical to
+	 * the old single-shot behaviour, so D+/D- and normal charging are not
+	 * held hostage by the retry loop.
 	 */
-	if (!adsp_vooc && !sc->vooc_saw_any) {
+	if (!adsp_vooc && !sc->vooc_saw_any && !sc->svooc_seen) {
 		dev_info(sc->dev,
 			 "no VOOC evidence (adsp %d, frames %d) — declining\n",
 			 ft, sc->vooc_saw_any);
@@ -2119,7 +2126,8 @@ static bool sc8547_auto_identify_retry(struct sc8547a_device *sc)
 
 	dev_info(sc->dev, "slow adapter%s: re-arming identify %d/%u\n",
 		 adsp_vooc ? " (ADSP VOOC)" :
-		 (sc->vooc_saw_any ? " (serial frames)" : ""),
+		 (sc->vooc_saw_any ? " (serial frames)" :
+		  " (SVOOC delivered on this plug)"),
 		 sc->auto_ident_retries + 1, identify_retries);
 
 	sc->auto_ident_retries++;
@@ -2206,6 +2214,7 @@ static void sc8547_auto_identify_tick(struct sc8547a_device *sc)
 	sc->fastchg_enable = true;
 	sc->fastchg_deliver = true;
 	sc->fastchg_auto = false;	/* one-shot per arm consumed */
+	sc->svooc_seen = true;		/* a keep-alive reset may retry now */
 	sc->auto_state = SC_AUTO_DELIVER;
 	sc->auto_deliver_since = jiffies;	/* for re-servo sustained-CC refill */
 	dev_info(sc->dev,
@@ -2322,6 +2331,7 @@ static void sc8547_attach_work(struct work_struct *work)
 			sc->auto_step_cnt = 0;
 			sc->auto_reservo_cnt = 0;	/* fresh plug: full budget */
 			sc->auto_ident_retries = 0;	/* fresh plug: full retry budget */
+			sc->svooc_seen = false;		/* fresh plug: no delivery yet */
 			dev_info(sc->dev,
 				 "auto fast-charge: attach, identifying adapter\n");
 		}
@@ -2336,6 +2346,7 @@ static void sc8547_attach_work(struct work_struct *work)
 		sc->hw_profile_set = false;
 		sc->auto_state = SC_AUTO_OFF;
 		sc->auto_reservo_cnt = 0;
+		sc->svooc_seen = false;
 		sc->vbus_absent_since = 0;
 		dev_info(sc->dev, "charger removed, USB route restored\n");
 	}
@@ -2589,6 +2600,7 @@ static void sc8547_vooc_stop(struct sc8547a_device *sc)
 	sc->auto_reservo_cnt = 0;
 	sc->fastchg_auto = false;
 	sc->fastchg_deliver = false;	/* full disarm: re-arm needs explicit re-enable */
+	sc->svooc_seen = false;
 	dev_info(sc->dev, "VOOC PHY stopped\n");
 }
 
