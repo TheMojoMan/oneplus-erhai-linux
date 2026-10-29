@@ -2497,7 +2497,10 @@ detach_gxpd:
 	if (!IS_ERR_OR_NULL(gmu->qmp))
 		qmp_put(gmu->qmp);
 
-	device_link_del(link);
+	/*
+	 * The cxpd link is a managed one and cannot be dropped while the GMU is
+	 * registered; it is purged when cxpd, a virt device, is detached below.
+	 */
 
 detach_cxpd:
 	dev_pm_domain_detach(gmu->cxpd, false);
@@ -2510,6 +2513,9 @@ err_mmio:
 err_memory:
 	a6xx_gmu_memory_free(gmu);
 err_put_device:
+	/* Every error above happens after pm_runtime_enable() */
+	pm_runtime_disable(gmu->dev);
+
 	/* Drop reference taken in of_find_device_by_node */
 	put_device(gmu->dev);
 
