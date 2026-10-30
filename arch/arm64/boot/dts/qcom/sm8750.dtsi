@@ -8,9 +8,9 @@
 #include <dt-bindings/clock/qcom,sm8750-cambistmclkcc.h>
 #include <dt-bindings/clock/qcom,sm8750-camcc.h>
 #include <dt-bindings/clock/qcom,sm8750-dispcc.h>
+#include <dt-bindings/clock/qcom,kaanapali-gxclkctl.h>
 #include <dt-bindings/clock/qcom,sm8750-gcc.h>
 #include <dt-bindings/clock/qcom,sm8750-gpucc.h>
-#include <dt-bindings/clock/qcom,kaanapali-gxclkctl.h>
 #include <dt-bindings/clock/qcom,sm8750-tcsr.h>
 #include <dt-bindings/clock/qcom,sm8750-videocc.h>
 #include <dt-bindings/dma/qcom-gpi.h>
@@ -683,218 +683,6 @@
 		#size-cells = <2>;
 		dma-ranges = <0 0 0 0 0x10 0>;
 		ranges = <0 0 0 0 0x10 0>;
-
-		gpu: gpu@3d00000 {
-			/* erhai is gen8-0-1 / Adreno830v2 (Android qcom,chipid 0x44050001),
-			 * not the gen80200 (0x44050a01) we forced earlier. Catalog has a
-			 * matching 0x44050001 entry (gen80000 fw, gmu_chipid 0x8000100). */
-			compatible = "qcom,adreno-44050001", "qcom,adreno";
-			reg = <0x0 0x03d00000 0x0 0x40000>,
-			      <0x0 0x03d9e000 0x0 0x2000>,
-			      <0x0 0x03d61000 0x0 0x3000>;
-			reg-names = "kgsl_3d0_reg_memory", "cx_mem", "cx_dbgc";
-
-			interrupts = <GIC_SPI 300 IRQ_TYPE_LEVEL_HIGH>;
-
-			iommus = <&adreno_smmu 0 0x0>,
-				 <&adreno_smmu 1 0x0>;
-
-			operating-points-v2 = <&gpu_opp_table>;
-
-			qcom,gmu = <&gmu>;
-			#cooling-cells = <2>;
-
-			interconnects = <&gem_noc MASTER_GFX3D 0 &mc_virt SLAVE_EBI1 0>;
-			interconnect-names = "gfx-mem";
-
-			status = "disabled";
-
-			zap-shader {
-				memory-region = <&gpu_micro_code_mem>;
-				/* Match every working upstream GPU (nabu/pipa/x1e80100): use the
-				 * device-specific signed zap via firmware-name (request_firmware_direct)
-				 * instead of the catalog .zapfw fallback. File on sda17 at
-				 * /lib/firmware/qcom/gen80000_zap.mbn (the OnePlus TZ-trusted image). */
-				firmware-name = "qcom/gen80000_zap.mbn";
-			};
-
-			gpu_opp_table: opp-table {
-				compatible = "operating-points-v2-adreno",
-					     "operating-points-v2";
-
-				/*
-				 * Full 14-level table mirroring Android ground truth for
-				 * this chip (Adreno830v2/gen8_0_1, speed-bin 0xe8): exact
-				 * freq<->RPMh-level pairing + per-level qcom,opp-acd-level
-				 * (Adaptive Clock Distribution / voltage-droop comp). ACD is
-				 * what keeps the GPU stable under sustained load -- the old
-				 * 5-level, no-ACD, mis-paired table hung under load. ACD
-				 * control values are the downstream ACD_LEVEL_* constants
-				 * (sun-v2-gpu-pwrlevels.dtsi); D1/D2/D3 have none upstream.
-				 */
-				opp-1100000000 {
-					opp-hz = /bits/ 64 <1100000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L3>;
-					opp-peak-kBps = <16500000>;
-					qcom,opp-acd-level = <0x88295ffd>;
-				};
-
-				opp-1050000000 {
-					opp-hz = /bits/ 64 <1050000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L1>;
-					opp-peak-kBps = <16500000>;
-					qcom,opp-acd-level = <0xa8295ffd>;
-				};
-
-				opp-967000000 {
-					opp-hz = /bits/ 64 <967000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_NOM_L1>;
-					opp-peak-kBps = <16500000>;
-					qcom,opp-acd-level = <0x882a5ffd>;
-				};
-
-				opp-900000000 {
-					opp-hz = /bits/ 64 <900000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
-					opp-peak-kBps = <14398438>;
-					qcom,opp-acd-level = <0x882a5ffd>;
-				};
-
-				opp-832000000 {
-					opp-hz = /bits/ 64 <832000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L2>;
-					opp-peak-kBps = <14398438>;
-					qcom,opp-acd-level = <0x882a5ffd>;
-				};
-
-				opp-734000000 {
-					opp-hz = /bits/ 64 <734000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
-					opp-peak-kBps = <10687500>;
-					qcom,opp-acd-level = <0xa82a5ffd>;
-				};
-
-				opp-660000000 {
-					opp-hz = /bits/ 64 <660000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L0>;
-					opp-peak-kBps = <8000000>;
-					qcom,opp-acd-level = <0x882c5ffd>;
-				};
-
-				opp-607000000 {
-					opp-hz = /bits/ 64 <607000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
-					opp-peak-kBps = <8000000>;
-					qcom,opp-acd-level = <0xa82e5ffd>;
-				};
-
-				opp-525000000 {
-					opp-hz = /bits/ 64 <525000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_L1>;
-					opp-peak-kBps = <6800000>;
-					qcom,opp-acd-level = <0xc02e5ffd>;
-				};
-
-				opp-443000000 {
-					opp-hz = /bits/ 64 <443000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
-					opp-peak-kBps = <6800000>;
-					qcom,opp-acd-level = <0xc02e5ffd>;
-				};
-
-				opp-389000000 {
-					opp-hz = /bits/ 64 <389000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D0>;
-					opp-peak-kBps = <6800000>;
-					qcom,opp-acd-level = <0xc8285ffd>;
-				};
-
-				opp-342000000 {
-					opp-hz = /bits/ 64 <342000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D1>;
-					opp-peak-kBps = <4500000>;
-				};
-
-				opp-222000000 {
-					opp-hz = /bits/ 64 <222000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D2>;
-					opp-peak-kBps = <2400000>;
-				};
-
-				opp-160000000 {
-					opp-hz = /bits/ 64 <160000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D3>;
-					opp-peak-kBps = <2400000>;
-				};
-			};
-		};
-
-		gmu: gmu@3d6a000 {
-			compatible = "qcom,adreno-gmu-840.1", "qcom,adreno-gmu";
-			reg = <0x0 0x03d6a000 0x0 0x35000>,
-			      <0x0 0x03d50000 0x0 0x10000>,
-			      <0x0 0x0b280000 0x0 0x10000>;
-			reg-names = "gmu", "rscc", "gmu_pdc";
-
-			interrupts = <GIC_SPI 304 IRQ_TYPE_LEVEL_HIGH>,
-				     <GIC_SPI 305 IRQ_TYPE_LEVEL_HIGH>;
-			interrupt-names = "hfi", "gmu";
-
-			clocks = <&gpucc GPU_CC_AHB_CLK>,
-				 <&gpucc GPU_CC_CX_GMU_CLK>,
-				 <&gpucc GPU_CC_CXO_CLK>,
-				 <&gcc GCC_DDRSS_GPU_AXI_CLK>,
-				 <&gcc GCC_GPU_GEMNOC_GFX_CLK>,
-				 <&gpucc GPU_CC_HUB_CX_INT_CLK>,
-				 <&gpucc GPU_CC_DEMET_CLK>;
-			clock-names = "ahb", "gmu", "cxo", "axi",
-				      "memnoc", "hub", "demet";
-
-			power-domains = <&gpucc GPU_CC_CX_GDSC>,
-					<&gx_clkctl GX_CLKCTL_GX_GDSC>;
-			power-domain-names = "cx", "gx";
-
-			iommus = <&adreno_smmu 5 0x0>;
-
-			qcom,qmp = <&aoss_qmp>;
-
-			operating-points-v2 = <&gmu_opp_table>;
-
-			gmu_opp_table: opp-table {
-				compatible = "operating-points-v2";
-
-				opp-550000000 {
-					opp-hz = /bits/ 64 <550000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
-				};
-
-				opp-220000000 {
-					opp-hz = /bits/ 64 <220000000>;
-					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
-				};
-			};
-		};
-
-		gpucc: clock-controller@3d90000 {
-			compatible = "qcom,sm8750-gpucc";
-			reg = <0x0 0x03d90000 0x0 0xa000>;
-			clocks = <&bi_tcxo_div2>,
-				 <&gcc GCC_GPU_GPLL0_CLK_SRC>,
-				 <&gcc GCC_GPU_GPLL0_DIV_CLK_SRC>;
-			#clock-cells = <1>;
-			#reset-cells = <1>;
-			#power-domain-cells = <1>;
-		};
-
-		gx_clkctl: clock-controller@3d68000 {
-			compatible = "qcom,sm8750-gxclkctl";
-			reg = <0x0 0x03d68000 0x0 0x1000>;
-			clocks = <&gpucc GPU_CC_CX_GMU_CLK>;
-			#clock-cells = <1>;
-			#reset-cells = <1>;
-			#power-domain-cells = <1>;
-			power-domains = <&gpucc GPU_CC_CX_GDSC>;
-		};
 
 		adreno_smmu: iommu@3da0000 {
 			compatible = "qcom,sm8750-smmu-500", "qcom,adreno-smmu",
@@ -3756,6 +3544,254 @@
 			#power-domain-cells = <1>;
 		};
 
+		gpu: gpu@3d00000 {
+			compatible = "qcom,adreno-44050001", "qcom,adreno";
+			reg = <0x0 0x03d00000 0x0 0x6d000>,
+			      <0x0 0x03d9e000 0x0 0x2000>;
+			reg-names = "kgsl_3d0_reg_memory",
+				    "cx_mem";
+
+			interrupts = <GIC_SPI 300 IRQ_TYPE_LEVEL_HIGH>;
+
+			iommus = <&adreno_smmu 0 0x0>,
+				 <&adreno_smmu 1 0x0>;
+
+			operating-points-v2 = <&gpu_opp_table>;
+
+			nvmem-cells = <&gpu_speed_bin>;
+			nvmem-cell-names = "speed_bin";
+
+			qcom,gmu = <&gmu>;
+			#cooling-cells = <2>;
+
+			interconnects = <&gem_noc MASTER_GFX3D QCOM_ICC_TAG_ALWAYS
+					 &mc_virt SLAVE_EBI1 QCOM_ICC_TAG_ALWAYS>;
+			interconnect-names = "gfx-mem";
+
+			status = "disabled";
+
+			gpu_zap_shader: zap-shader {
+				memory-region = <&gpu_micro_code_mem>;
+				firmware-name = "qcom/gen80000_zap.mbn";
+			};
+
+			gpu_opp_table: opp-table {
+				compatible = "operating-points-v2-adreno",
+					     "operating-points-v2";
+
+				opp-160000000 {
+					opp-hz = /bits/ 64 <160000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D3>;
+					opp-peak-kBps = <2136718>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-222000000 {
+					opp-hz = /bits/ 64 <222000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D2>;
+					opp-peak-kBps = <2136718>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-342000000 {
+					opp-hz = /bits/ 64 <342000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D1>;
+					opp-peak-kBps = <5285156>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-389000000 {
+					opp-hz = /bits/ 64 <389000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_D0>;
+					opp-peak-kBps = <6074218>;
+					qcom,opp-acd-level = <0xc8285ffd>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-443000000 {
+					opp-hz = /bits/ 64 <443000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
+					opp-peak-kBps = <6074218>;
+					qcom,opp-acd-level = <0xc02e5ffd>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-525000000 {
+					opp-hz = /bits/ 64 <525000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS_L1>;
+					opp-peak-kBps = <6074218>;
+					qcom,opp-acd-level = <0xc02e5ffd>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-607000000 {
+					opp-hz = /bits/ 64 <607000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
+					opp-peak-kBps = <8171875>;
+					qcom,opp-acd-level = <0xa82e5ffd>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-660000000 {
+					opp-hz = /bits/ 64 <660000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L0>;
+					opp-peak-kBps = <8171875>;
+					qcom,opp-acd-level = <0x882c5ffd>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-734000000 {
+					opp-hz = /bits/ 64 <734000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L1>;
+					opp-peak-kBps = <12449218>;
+					qcom,opp-acd-level = <0xa82a5ffd>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-832000000 {
+					opp-hz = /bits/ 64 <832000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_SVS_L2>;
+					opp-peak-kBps = <16500000>;
+					qcom,opp-acd-level = <0x882a5ffd>;
+					opp-supported-hw = <0x1f>;
+				};
+
+				opp-900000000-0 {
+					opp-hz = /bits/ 64 <900000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
+					opp-peak-kBps = <16500000>;
+					qcom,opp-acd-level = <0x882a5ffd>;
+					opp-supported-hw = <0x0f>;
+				};
+
+				/* Only applicable for SKUs which has 900Mhz as Fmax */
+				opp-900000000-1 {
+					opp-hz = /bits/ 64 <900000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_NOM>;
+					opp-peak-kBps = <18597656>;
+					qcom,opp-acd-level = <0x882a5ffd>;
+					opp-supported-hw = <0x10>;
+				};
+
+				opp-967000000 {
+					opp-hz = /bits/ 64 <967000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_NOM_L1>;
+					opp-peak-kBps = <18597656>;
+					qcom,opp-acd-level = <0x882a5ffd>;
+					opp-supported-hw = <0x0f>;
+				};
+
+				opp-1050000000 {
+					opp-hz = /bits/ 64 <1050000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L1>;
+					opp-peak-kBps = <18597656>;
+					qcom,opp-acd-level = <0xa8295ffd>;
+					opp-supported-hw = <0x0f>;
+				};
+
+				opp-1100000000 {
+					opp-hz = /bits/ 64 <1100000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L3>;
+					opp-peak-kBps = <18597656>;
+					qcom,opp-acd-level = <0x88295ffd>;
+					opp-supported-hw = <0x05>;
+				};
+
+				opp-1150000000 {
+					opp-hz = /bits/ 64 <1150000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L3>;
+					opp-peak-kBps = <18597656>;
+					qcom,opp-acd-level = <0x88295ffd>;
+					opp-supported-hw = <0x02>;
+				};
+
+				opp-1200000000 {
+					opp-hz = /bits/ 64 <1200000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_TURBO_L4>;
+					opp-peak-kBps = <18597656>;
+					qcom,opp-acd-level = <0x88295ffd>;
+					opp-supported-hw = <0x01>;
+				};
+			};
+		};
+
+		gxclkctl: clock-controller@3d64000 {
+			compatible = "qcom,sm8750-gxclkctl";
+			reg = <0x0 0x03d64000 0x0 0x6000>;
+
+			power-domains = <&rpmhpd RPMHPD_GFX>,
+					<&rpmhpd RPMHPD_GMXC>,
+					<&gpucc GPU_CC_CX_GDSC>;
+
+			#power-domain-cells = <1>;
+		};
+
+		gmu: gmu@3d37000 {
+			compatible = "qcom,adreno-gmu-830.1", "qcom,adreno-gmu";
+
+			reg = <0x0 0x03d37000 0x0 0x68000>;
+			reg-names = "gmu";
+
+			interrupts = <GIC_SPI 304 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 305 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "hfi", "gmu";
+
+			clocks = <&gpucc GPU_CC_AHB_CLK>,
+				 <&gpucc GPU_CC_CX_GMU_CLK>,
+				 <&gpucc GPU_CC_CXO_CLK>,
+				 <&gcc GCC_DDRSS_GPU_AXI_CLK>,
+				 <&gcc GCC_GPU_GEMNOC_GFX_CLK>,
+				 <&gpucc GPU_CC_HUB_CX_INT_CLK>;
+			clock-names = "ahb",
+				      "gmu",
+				      "cxo",
+				      "axi",
+				      "memnoc",
+				      "hub";
+
+			power-domains = <&gpucc GPU_CC_CX_GDSC>,
+					<&gxclkctl GX_CLKCTL_GX_GDSC>;
+			power-domain-names = "cx",
+					     "gx";
+
+			iommus = <&adreno_smmu 5 0x0>;
+
+			qcom,qmp = <&aoss_qmp>;
+
+			operating-points-v2 = <&gmu_opp_table>;
+
+			gmu_opp_table: opp-table {
+				compatible = "operating-points-v2";
+
+				opp-500000000 {
+					opp-hz = /bits/ 64 <500000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
+				};
+
+				opp-650000000 {
+					opp-hz = /bits/ 64 <650000000>;
+					opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
+				};
+			};
+		};
+
+		gpucc: clock-controller@3d90000 {
+			compatible = "qcom,sm8750-gpucc";
+			reg = <0x0 0x03d90000 0x0 0x9800>;
+
+			clocks = <&bi_tcxo_div2>,
+				 <&gcc GCC_GPU_GPLL0_CLK_SRC>,
+				 <&gcc GCC_GPU_GPLL0_DIV_CLK_SRC>;
+
+			power-domains = <&rpmhpd RPMHPD_MX>,
+					<&rpmhpd RPMHPD_CX>;
+			required-opps = <&rpmhpd_opp_low_svs>,
+					<&rpmhpd_opp_low_svs>;
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+			#power-domain-cells = <1>;
+		};
+
 		pdc: interrupt-controller@b220000 {
 			compatible = "qcom,sm8750-pdc", "qcom,pdc";
 			reg = <0x0 0x0b220000 0x0 0x10000>, <0x0 0x164400f0 0x0 0x64>;
@@ -6003,6 +6039,18 @@
 			cpu_scp_lpri1: scp-sram-section@200 {
 				compatible = "arm,scmi-shmem";
 				reg = <0x200 0x200>;
+			};
+		};
+
+		qfprom: efuse@221c8000 {
+			compatible = "qcom,sm8750-qfprom", "qcom,qfprom";
+			reg = <0x0 0x221c8000 0x0 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			gpu_speed_bin: gpu-speed-bin@138 {
+				reg = <0x138 0x2>;
+				bits = <0 9>;
 			};
 		};
 

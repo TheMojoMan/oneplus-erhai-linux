@@ -225,7 +225,7 @@ static void a8xx_set_hwcg(struct msm_gpu *gpu, bool state)
 	u32 val;
 
 	{
-		if (adreno_is_x285(adreno_gpu) && state)
+		if ((adreno_is_x285(adreno_gpu) || adreno_is_a830(adreno_gpu)) && state)
 			gpu_write(gpu, REG_A8XX_RBBM_CGC_0_PC, 0x00000702);
 
 		gmu_write(gmu, REG_A6XX_GPU_GMU_AO_GMU_CGC_MODE_CNTL,
@@ -938,8 +938,9 @@ void a8xx_recover(struct msm_gpu *gpu)
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
 	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
 	struct a6xx_gmu *gmu = &a6xx_gpu->gmu;
+	struct device *dev = &gpu->pdev->dev;
+	bool rpm_forbidden;
 	int active_submits;
-	bool pinned;
 
 	adreno_dump_info(gpu);
 
@@ -962,6 +963,17 @@ void a8xx_recover(struct msm_gpu *gpu)
 
 	pm_runtime_dont_use_autosuspend(&gpu->pdev->dev);
 
+	/*
+	 * Recovery resets the GPU by letting it runtime-suspend so that the CX
+	 * GDSC collapses. With power/control set to "on" runtime suspend is
+	 * forbidden: the final put below would never suspend the device, CX
+	 * would stay up, the hang would survive and recovery would loop.
+	 * Lift the restriction for the reset and restore it afterwards.
+	 */
+	rpm_forbidden = !dev->power.runtime_auto;
+	if (rpm_forbidden)
+		pm_runtime_allow(dev);
+
 	/* active_submit won't change until we make a submission */
 	mutex_lock(&gpu->active_lock);
 	active_submits = gpu->active_submits;
@@ -971,34 +983,6 @@ void a8xx_recover(struct msm_gpu *gpu)
 	 * runtime suspend cb
 	 */
 	gpu->active_submits = 0;
-
-	/*
-	 * erhai: this pad runs the Adreno PINNED always-active -- erhai-gpu-pin.sh
-	 * writes "on" to /sys/devices/platform/soc@0/3d00000.gpu/power/control,
-	 * which is pm_runtime_forbid(): runtime_auto becomes false and one extra
-	 * usage_count is taken.
-	 *
-	 * While that block is in force the pm_runtime_put_sync() below CANNOT
-	 * suspend the GPU, so a6xx_gmu_pm_suspend() -> a6xx_gmu_stop() never runs,
-	 * the GMU is never torn down, the CX genpd therefore never powers off and
-	 * the pd_gate completion never fires -- recovery then "finishes" without
-	 * having reset anything ("cx gdsc didn't collapse"), the GMU stays wedged
-	 * and every later hangcheck recover repeats the same no-op forever.  That
-	 * is why the pinned GPU cannot be recovered from a hang (gpu-MEMORY
-	 * 2026-09-22 §1: endless "hangcheck recover!" / "preemption timed out"
-	 * until a hard reset).
-	 *
-	 * Lift the pin for the teardown and put it back after the resume, so the
-	 * driver runs its normal, tested suspend/resume recovery (GMU force-off,
-	 * CX/GX collapse, CM3 re-boot via a6xx_gmu_start()).  A device that is not
-	 * pinned (runtime_auto already true) is left completely alone.
-	 */
-	pinned = !gpu->pdev->dev.power.runtime_auto;
-	if (pinned) {
-		DRM_DEV_INFO(&gpu->pdev->dev,
-			"erhai: GPU is PINNED (power/control=on), lifting runtime-PM block for the recover teardown\n");
-		pm_runtime_allow(&gpu->pdev->dev);
-	}
 
 	reinit_completion(&gmu->pd_gate);
 	dev_pm_genpd_add_notifier(gmu->cxpd, &gmu->pd_nb);
@@ -1012,9 +996,7 @@ void a8xx_recover(struct msm_gpu *gpu)
 	pm_runtime_put_sync(&gpu->pdev->dev);
 
 	if (!wait_for_completion_timeout(&gmu->pd_gate, msecs_to_jiffies(1000)))
-		DRM_DEV_ERROR(&gpu->pdev->dev,
-			"cx gdsc didn't collapse (runtime PM %s) -- GMU NOT reset\n",
-			pinned ? "was pinned, lifted" : "was already allowed");
+		DRM_DEV_ERROR(&gpu->pdev->dev, "cx gdsc didn't collapse\n");
 
 	dev_pm_genpd_remove_notifier(gmu->cxpd);
 
@@ -1025,13 +1007,8 @@ void a8xx_recover(struct msm_gpu *gpu)
 
 	pm_runtime_get_sync(&gpu->pdev->dev);
 
-	/*
-	 * Restore the always-active pin this pad boots with (see above).  The
-	 * device is active again by now, so pm_runtime_forbid() only re-takes the
-	 * pin's usage_count and flips runtime_auto back off.
-	 */
-	if (pinned)
-		pm_runtime_forbid(&gpu->pdev->dev);
+	if (rpm_forbidden)
+		pm_runtime_forbid(dev);
 
 	gpu->active_submits = active_submits;
 	mutex_unlock(&gpu->active_lock);
