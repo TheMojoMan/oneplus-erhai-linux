@@ -2560,27 +2560,6 @@
 };
 
 /*
- * The generic sm8750 GMU frequencies (550MHz@SVS / 220MHz@LOW_SVS) do not
- * apply to this variant: 220MHz is below the floor its GMU supports, which
- * makes the CX level vote marginal and the bring-up reset non-deterministic.
- * This part runs 500MHz@LOW_SVS / 650MHz@SVS.
- */
-&gmu_opp_table {
-	/delete-node/ opp-550000000;
-	/delete-node/ opp-220000000;
-
-	opp-650000000 {
-		opp-hz = /bits/ 64 <650000000>;
-		opp-level = <RPMH_REGULATOR_LEVEL_SVS>;
-	};
-
-	opp-500000000 {
-		opp-hz = /bits/ 64 <500000000>;
-		opp-level = <RPMH_REGULATOR_LEVEL_LOW_SVS>;
-	};
-};
-
-/*
  * v449: enable the iris3 HW video codec (decode/encode). Node fully defined in
  * sm8750.dtsi but kept status=disabled upstream because the iris fw is vendor-
  * signed. We stage the device's own signed blob (/vendor/firmware/vpu35_4v.mbn)
