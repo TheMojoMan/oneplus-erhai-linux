@@ -265,6 +265,14 @@ struct msm_gpu {
 	struct work_struct crashstate_free_work;
 
 	/**
+	 * @crashstate_show_lock: serializes rendering of @crashstate for the
+	 * devcoredump.  The show functions convert captured buffers to ascii85
+	 * in place on first use (see adreno_show_object()), so concurrent
+	 * readers of the same dump must not render it at the same time.
+	 */
+	struct mutex crashstate_show_lock;
+
+	/**
 	 * @recovery_in_progress: true while recover_worker() holds @lock, so
 	 * that fault capture and GMU waits don't wait on a fault devcoredump
 	 * that can't complete while recovery holds @lock.  Written with

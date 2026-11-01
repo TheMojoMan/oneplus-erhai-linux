@@ -191,10 +191,17 @@ static ssize_t msm_gpu_devcoredump_read(char *buffer, loff_t offset,
 	struct drm_print_iterator iter;
 	struct drm_printer p;
 	struct msm_gpu_state *state;
+	int ret;
 
 	state = msm_gpu_crashstate_get(gpu);
 	if (!state)
 		return 0;
+
+	ret = mutex_lock_interruptible(&gpu->crashstate_show_lock);
+	if (ret) {
+		msm_gpu_crashstate_put(gpu);
+		return ret;
+	}
 
 	iter.data = buffer;
 	iter.offset = 0;
@@ -213,6 +220,8 @@ static ssize_t msm_gpu_devcoredump_read(char *buffer, loff_t offset,
 		drm_printf(&p, "cmdline: %s\n", state->cmd);
 
 	gpu->funcs->show(gpu, state, &p);
+
+	mutex_unlock(&gpu->crashstate_show_lock);
 
 	msm_gpu_crashstate_put(gpu);
 
@@ -914,6 +923,7 @@ int msm_gpu_init(struct drm_device *drm, struct platform_device *pdev,
 	gpu->funcs = funcs;
 	gpu->name = name;
 	INIT_WORK(&gpu->crashstate_free_work, msm_gpu_crashstate_free_worker);
+	mutex_init(&gpu->crashstate_show_lock);
 
 	gpu->worker = kthread_run_worker(0, "gpu-worker");
 	if (IS_ERR(gpu->worker)) {
