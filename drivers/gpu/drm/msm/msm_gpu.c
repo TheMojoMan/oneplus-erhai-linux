@@ -474,6 +474,7 @@ static void recover_worker(struct kthread_work *work)
 	int i;
 
 	mutex_lock(&gpu->lock);
+	WRITE_ONCE(gpu->recovery_in_progress, true);
 
 	DRM_DEV_ERROR(dev->dev, "%s: hangcheck recover!\n", gpu->name);
 
@@ -585,6 +586,7 @@ static void recover_worker(struct kthread_work *work)
 	pm_runtime_put(&gpu->pdev->dev);
 
 out_unlock:
+	WRITE_ONCE(gpu->recovery_in_progress, false);
 	mutex_unlock(&gpu->lock);
 
 	msm_gpu_retire(gpu);
