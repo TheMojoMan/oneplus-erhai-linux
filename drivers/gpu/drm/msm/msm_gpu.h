@@ -258,6 +258,15 @@ struct msm_gpu {
 
 	struct msm_gpu_state *crashstate;
 
+	/**
+	 * @recovery_in_progress: true while recover_worker() holds @lock, so
+	 * that fault capture and GMU waits don't wait on a fault devcoredump
+	 * that can't complete while recovery holds @lock.  Written with
+	 * WRITE_ONCE() under @lock; readers (the fault handler, GMU wait
+	 * loops) don't hold @lock and use READ_ONCE().
+	 */
+	bool recovery_in_progress;
+
 	/* True if the hardware supports expanded apriv (a650 and newer) */
 	bool hw_apriv;
 
