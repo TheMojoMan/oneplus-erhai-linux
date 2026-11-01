@@ -259,6 +259,12 @@ struct msm_gpu {
 	struct msm_gpu_state *crashstate;
 
 	/**
+	 * @crashstate_free_work: drops the devcoredump's crashstate reference
+	 * outside of @lock, see msm_gpu_devcoredump_free().
+	 */
+	struct work_struct crashstate_free_work;
+
+	/**
 	 * @recovery_in_progress: true while recover_worker() holds @lock, so
 	 * that fault capture and GMU waits don't wait on a fault devcoredump
 	 * that can't complete while recovery holds @lock.  Written with

@@ -175,6 +175,14 @@ int msm_gpu_hw_init(struct msm_gpu *gpu)
 	return ret;
 }
 
+static void msm_gpu_crashstate_free_worker(struct work_struct *work)
+{
+	struct msm_gpu *gpu = container_of(work, struct msm_gpu,
+					   crashstate_free_work);
+
+	msm_gpu_crashstate_put(gpu);
+}
+
 #ifdef CONFIG_DEV_COREDUMP
 static ssize_t msm_gpu_devcoredump_read(char *buffer, loff_t offset,
 		size_t count, void *data, size_t datalen)
@@ -215,7 +223,13 @@ static void msm_gpu_devcoredump_free(void *data)
 {
 	struct msm_gpu *gpu = data;
 
-	msm_gpu_crashstate_put(gpu);
+	/*
+	 * dev_coredumpm() calls this synchronously when it can't keep the
+	 * dump (devcoredump disabled, or out of memory), while
+	 * msm_gpu_crashstate_capture() holds gpu->lock, which
+	 * msm_gpu_crashstate_put() also takes.  Defer the put to a worker.
+	 */
+	queue_work(system_dfl_wq, &gpu->crashstate_free_work);
 }
 
 static void msm_gpu_crashstate_get_bo(struct msm_gpu_state *state,
@@ -899,6 +913,7 @@ int msm_gpu_init(struct drm_device *drm, struct platform_device *pdev,
 	gpu->dev = drm;
 	gpu->funcs = funcs;
 	gpu->name = name;
+	INIT_WORK(&gpu->crashstate_free_work, msm_gpu_crashstate_free_worker);
 
 	gpu->worker = kthread_run_worker(0, "gpu-worker");
 	if (IS_ERR(gpu->worker)) {
@@ -1046,6 +1061,10 @@ void msm_gpu_cleanup(struct msm_gpu *gpu)
 	int i;
 
 	DBG("%s", gpu->name);
+
+	/* May be unset if probe failed before msm_gpu_init() */
+	if (gpu->crashstate_free_work.func)
+		flush_work(&gpu->crashstate_free_work);
 
 	for (i = 0; i < ARRAY_SIZE(gpu->rb); i++) {
 		msm_ringbuffer_destroy(gpu->rb[i]);
