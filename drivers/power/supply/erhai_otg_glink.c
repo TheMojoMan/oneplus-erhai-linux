@@ -113,6 +113,9 @@
 #define BC_BATT_TEMP			12
 #define BC_USB_ONLINE			0
 
+#define ERHAI_BATTERY_DESIGN_CAPACITY_UAH	12140000 /* 12140 mAh nominal */
+#define ERHAI_BATTERY_DESIGN_ENERGY_UWH		47103200 /* 12140 mAh * 3.88V nominal = 47.10 Wh */
+
 /* battery notification values (BC_NOTIFY_IND payload). */
 #define BC_NOTIF_BAT_PROPERTY		0x30
 #define BC_NOTIF_BAT_STATUS		0x80
@@ -1276,6 +1279,34 @@ static int erhai_otg_bat_get_property(struct power_supply *psy,
 		/* sm8350 family: raw is centi-degrees; psy wants tenths. */
 		val->intval = DIV_ROUND_CLOSEST(ret, 10);
 		return 0;
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+		val->intval = ERHAI_BATTERY_DESIGN_CAPACITY_UAH;
+		return 0;
+	case POWER_SUPPLY_PROP_CHARGE_NOW: {
+		int soc = erhai_otg_adsp_soc(otg);
+		if (soc < 0)
+			return soc;
+		val->intval = (int)(((s64)erhai_otg_soc_pct(soc) * ERHAI_BATTERY_DESIGN_CAPACITY_UAH) / 100);
+		return 0;
+	}
+	case POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN:
+	case POWER_SUPPLY_PROP_ENERGY_FULL:
+		val->intval = ERHAI_BATTERY_DESIGN_ENERGY_UWH;
+		return 0;
+	case POWER_SUPPLY_PROP_ENERGY_NOW: {
+		int soc = erhai_otg_adsp_soc(otg);
+		if (soc < 0)
+			return soc;
+		val->intval = (int)(((s64)erhai_otg_soc_pct(soc) * ERHAI_BATTERY_DESIGN_ENERGY_UWH) / 100);
+		return 0;
+	}
+	case POWER_SUPPLY_PROP_HEALTH:
+		val->intval = POWER_SUPPLY_HEALTH_GOOD;
+		return 0;
+	case POWER_SUPPLY_PROP_TECHNOLOGY:
+		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
+		return 0;
 	default:
 		return -EINVAL;
 	}
@@ -1287,6 +1318,14 @@ static const enum power_supply_property erhai_adsp_bat_props[] = {
 	POWER_SUPPLY_PROP_CAPACITY,
 	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
+	POWER_SUPPLY_PROP_CHARGE_FULL,
+	POWER_SUPPLY_PROP_CHARGE_NOW,
+	POWER_SUPPLY_PROP_ENERGY_FULL_DESIGN,
+	POWER_SUPPLY_PROP_ENERGY_FULL,
+	POWER_SUPPLY_PROP_ENERGY_NOW,
+	POWER_SUPPLY_PROP_HEALTH,
+	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_TEMP,
 };
 
