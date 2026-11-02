@@ -45,7 +45,7 @@
 #define SC1320CS_REG_SW_RESET		CCI_REG8(0x0103)
 #define SC1320CS_REG_STREAM		CCI_REG8(0x0100)
 
-#define SC1320CS_MCLK_RATE		19200000UL
+#define SC1320CS_MCLK_RATE		24000000UL
 
 #define SC1320CS_DATA_LANES		4
 #define SC1320CS_RAW10_BPP		10
@@ -721,6 +721,7 @@ static const struct dev_pm_ops sc1320cs_pm_ops = {
 
 static const struct of_device_id sc1320cs_of_match[] = {
 	{ .compatible = "smartsens,sc1320cs" },
+	{ .compatible = "smartsens,sc1300cs" },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, sc1320cs_of_match);
