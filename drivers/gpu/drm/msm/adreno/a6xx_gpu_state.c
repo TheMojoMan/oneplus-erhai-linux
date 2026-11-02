@@ -1629,11 +1629,32 @@ static void a7xx_get_indexed_registers(struct msm_gpu *gpu,
 	return;
 }
 
+static void a6xx_gpu_state_get_gmu(struct msm_gpu *gpu,
+				   struct a6xx_gpu_state *a6xx_state, bool gmu_regs)
+{
+	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
+	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
+
+	/* Get the generic state from the adreno core */
+	adreno_gpu_state_get(gpu, &a6xx_state->base);
+
+	if (!adreno_has_gmu_wrapper(adreno_gpu) &&
+	    !adreno_has_rgmu(adreno_gpu)) {
+		if (gmu_regs)
+			a6xx_get_gmu_registers(gpu, a6xx_state);
+
+		a6xx_state->gmu_log = a6xx_snapshot_gmu_bo(a6xx_state, &a6xx_gpu->gmu.log);
+		a6xx_state->gmu_hfi = a6xx_snapshot_gmu_bo(a6xx_state, &a6xx_gpu->gmu.hfi);
+		a6xx_state->gmu_debug = a6xx_snapshot_gmu_bo(a6xx_state, &a6xx_gpu->gmu.debug);
+
+		a6xx_snapshot_gmu_hfi_history(gpu, a6xx_state);
+	}
+}
+
 struct msm_gpu_state *a6xx_gpu_state_get(struct msm_gpu *gpu)
 {
 	struct a6xx_crashdumper _dumper = { 0 }, *dumper = NULL;
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
-	struct a6xx_gpu *a6xx_gpu = to_a6xx_gpu(adreno_gpu);
 	struct a6xx_gpu_state *a6xx_state = kzalloc_obj(*a6xx_state);
 	bool stalled;
 
@@ -1642,19 +1663,7 @@ struct msm_gpu_state *a6xx_gpu_state_get(struct msm_gpu *gpu)
 
 	INIT_LIST_HEAD(&a6xx_state->objs);
 
-	/* Get the generic state from the adreno core */
-	adreno_gpu_state_get(gpu, &a6xx_state->base);
-
-	if (!adreno_has_gmu_wrapper(adreno_gpu) &&
-	    !adreno_has_rgmu(adreno_gpu)) {
-		a6xx_get_gmu_registers(gpu, a6xx_state);
-
-		a6xx_state->gmu_log = a6xx_snapshot_gmu_bo(a6xx_state, &a6xx_gpu->gmu.log);
-		a6xx_state->gmu_hfi = a6xx_snapshot_gmu_bo(a6xx_state, &a6xx_gpu->gmu.hfi);
-		a6xx_state->gmu_debug = a6xx_snapshot_gmu_bo(a6xx_state, &a6xx_gpu->gmu.debug);
-
-		a6xx_snapshot_gmu_hfi_history(gpu, a6xx_state);
-	}
+	a6xx_gpu_state_get_gmu(gpu, a6xx_state, true);
 
 	/* If GX isn't on the rest of the data isn't going to be accessible */
 	if (!adreno_gpu->funcs->gx_is_on(adreno_gpu))
@@ -1712,6 +1721,24 @@ struct msm_gpu_state *a6xx_gpu_state_get(struct msm_gpu *gpu)
 	a6xx_state->gpu_initialized = !gpu->needs_hw_init;
 
 	return  &a6xx_state->base;
+}
+
+/*
+ * Memory-only snapshot for a8xx: no register is read, as the GMU may be
+ * wedged and GX powered off by the time this runs.
+ */
+struct msm_gpu_state *a8xx_gpu_state_get(struct msm_gpu *gpu)
+{
+	struct a6xx_gpu_state *a6xx_state = kzalloc_obj(*a6xx_state);
+
+	if (!a6xx_state)
+		return ERR_PTR(-ENOMEM);
+
+	INIT_LIST_HEAD(&a6xx_state->objs);
+
+	a6xx_gpu_state_get_gmu(gpu, a6xx_state, false);
+
+	return &a6xx_state->base;
 }
 
 static void a6xx_gpu_state_destroy(struct kref *kref)

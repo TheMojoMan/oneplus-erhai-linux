@@ -289,7 +289,8 @@ int adreno_fault_handler(struct msm_gpu *gpu, unsigned long iova, int flags,
 	struct msm_mmu *mmu = to_msm_vm(gpu->vm)->mmu;
 	const char *type = "UNKNOWN";
 	bool do_devcoredump = info && (info->fsr & ARM_SMMU_FSR_SS) &&
-		!READ_ONCE(gpu->crashstate);
+		!READ_ONCE(gpu->crashstate) &&
+		!READ_ONCE(gpu->recovery_in_progress);
 	unsigned long irq_flags;
 
 	/*
