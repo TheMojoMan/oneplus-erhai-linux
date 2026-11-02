@@ -64,7 +64,13 @@ static irqreturn_t a6xx_hfi_irq(int irq, void *data)
 	struct a6xx_gmu *gmu = data;
 	u32 status;
 
-	status = gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO);
+	/*
+	 * Only clear what this handler deals with: the HFI response (MSGQ) and
+	 * OOB ack bits are polled for, and clearing them here loses the GMU's
+	 * answer to whoever is waiting for it.
+	 */
+	status = gmu_read(gmu, REG_A6XX_GMU_GMU2HOST_INTR_INFO) &
+		 A6XX_GMU_GMU2HOST_INTR_INFO_CM3_FAULT;
 	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_CLR, status);
 
 	if (status & A6XX_GMU_GMU2HOST_INTR_INFO_CM3_FAULT) {
@@ -220,9 +226,12 @@ void a6xx_gmu_set_freq(struct msm_gpu *gpu, struct dev_pm_opp *opp,
 
 	if (!gmu->legacy) {
 		a6xx_hfi_set_freq(gmu, perf_index, bw_index);
-		/* With Bandwidth voting, we now vote for all resources, so skip OPP set */
-		if (!bw_index)
-			dev_pm_opp_set_opp(&gpu->pdev->dev, opp);
+		/*
+		 * With Bandwidth voting the GMU votes for all resources: remove the bus
+		 * quota a6xx_gmu_set_initial_bw() set for boot, or it holds DDR at the
+		 * boot frequency's bandwidth for as long as the GPU stays powered
+		 */
+		dev_pm_opp_set_opp(&gpu->pdev->dev, bw_index ? NULL : opp);
 		return;
 	}
 
@@ -442,7 +451,9 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
 		 * cannot complete while recovery holds gpu->lock, so don't
 		 * wait for one then.
 		 */
-		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
+		if (!wait_for_completion_timeout(&a6xx_gpu->base.fault_coredump_done,
+						 msecs_to_jiffies(2000)))
+			break;
 	} while (true);
 
 	if (ret)
@@ -1354,6 +1365,9 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 	/* Set the bus quota to a reasonable value for boot */
 	a6xx_gmu_set_initial_bw(gpu, gmu);
 
+	/* The mask resets to 0 with the GMU: keep HFI replies off the irq line */
+	gmu_write(gmu, REG_A6XX_GMU_GMU2HOST_INTR_MASK, ~0);
+
 	/* Enable the GMU interrupt */
 	gmu_write(gmu, REG_A6XX_GMU_AO_HOST_INTERRUPT_CLR, ~0);
 	gmu_write(gmu, REG_A6XX_GMU_AO_HOST_INTERRUPT_MASK, ~A6XX_GMU_IRQ_MASK);
@@ -1874,12 +1888,12 @@ static int a6xx_gmu_rpmh_votes_init(struct a6xx_gmu *gmu)
 	ret = a6xx_gmu_rpmh_arc_votes_init(&gpu->pdev->dev, gmu->gx_arc_votes,
 		gmu->gpu_freqs, gmu->nr_gpu_freqs, "gfx.lvl", sec_id);
 
+	ret |= a6xx_gmu_rpmh_dep_votes_init(&gpu->pdev->dev, gmu->dep_arc_votes,
+		gmu->gpu_freqs, gmu->nr_gpu_freqs);
+
 	/* Build the CX votes */
 	ret |= a6xx_gmu_rpmh_arc_votes_init(gmu->dev, gmu->cx_arc_votes,
 		gmu->gmu_freqs, gmu->nr_gmu_freqs, "cx.lvl", "mx.lvl");
-
-	ret |= a6xx_gmu_rpmh_dep_votes_init(gmu->dev, gmu->dep_arc_votes,
-		gmu->gpu_freqs, gmu->nr_gpu_freqs);
 
 	/* Build the interconnect votes */
 	if (info->bcms && gmu->nr_gpu_bws > 1)
