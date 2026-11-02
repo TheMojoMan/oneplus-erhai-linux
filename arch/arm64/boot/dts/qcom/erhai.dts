@@ -1,0 +1,2 @@
+/dts-v1/;
+#include "sm8750-erhai.dts"
