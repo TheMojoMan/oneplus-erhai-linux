@@ -175,6 +175,14 @@ int msm_gpu_hw_init(struct msm_gpu *gpu)
 	return ret;
 }
 
+static void msm_gpu_crashstate_free_worker(struct work_struct *work)
+{
+	struct msm_gpu *gpu = container_of(work, struct msm_gpu,
+					   crashstate_free_work);
+
+	msm_gpu_crashstate_put(gpu);
+}
+
 #ifdef CONFIG_DEV_COREDUMP
 static ssize_t msm_gpu_devcoredump_read(char *buffer, loff_t offset,
 		size_t count, void *data, size_t datalen)
@@ -183,10 +191,17 @@ static ssize_t msm_gpu_devcoredump_read(char *buffer, loff_t offset,
 	struct drm_print_iterator iter;
 	struct drm_printer p;
 	struct msm_gpu_state *state;
+	int ret;
 
 	state = msm_gpu_crashstate_get(gpu);
 	if (!state)
 		return 0;
+
+	ret = mutex_lock_interruptible(&gpu->crashstate_show_lock);
+	if (ret) {
+		msm_gpu_crashstate_put(gpu);
+		return ret;
+	}
 
 	iter.data = buffer;
 	iter.offset = 0;
@@ -206,6 +221,8 @@ static ssize_t msm_gpu_devcoredump_read(char *buffer, loff_t offset,
 
 	gpu->funcs->show(gpu, state, &p);
 
+	mutex_unlock(&gpu->crashstate_show_lock);
+
 	msm_gpu_crashstate_put(gpu);
 
 	return count - iter.remain;
@@ -215,7 +232,13 @@ static void msm_gpu_devcoredump_free(void *data)
 {
 	struct msm_gpu *gpu = data;
 
-	msm_gpu_crashstate_put(gpu);
+	/*
+	 * dev_coredumpm() calls this synchronously when it can't keep the
+	 * dump (devcoredump disabled, or out of memory), while
+	 * msm_gpu_crashstate_capture() holds gpu->lock, which
+	 * msm_gpu_crashstate_put() also takes.  Defer the put to a worker.
+	 */
+	queue_work(system_dfl_wq, &gpu->crashstate_free_work);
 }
 
 static void msm_gpu_crashstate_get_bo(struct msm_gpu_state *state,
@@ -474,6 +497,7 @@ static void recover_worker(struct kthread_work *work)
 	int i;
 
 	mutex_lock(&gpu->lock);
+	WRITE_ONCE(gpu->recovery_in_progress, true);
 
 	DRM_DEV_ERROR(dev->dev, "%s: hangcheck recover!\n", gpu->name);
 
@@ -585,6 +609,7 @@ static void recover_worker(struct kthread_work *work)
 	pm_runtime_put(&gpu->pdev->dev);
 
 out_unlock:
+	WRITE_ONCE(gpu->recovery_in_progress, false);
 	mutex_unlock(&gpu->lock);
 
 	msm_gpu_retire(gpu);
@@ -897,6 +922,8 @@ int msm_gpu_init(struct drm_device *drm, struct platform_device *pdev,
 	gpu->dev = drm;
 	gpu->funcs = funcs;
 	gpu->name = name;
+	INIT_WORK(&gpu->crashstate_free_work, msm_gpu_crashstate_free_worker);
+	mutex_init(&gpu->crashstate_show_lock);
 
 	gpu->worker = kthread_run_worker(0, "gpu-worker");
 	if (IS_ERR(gpu->worker)) {
@@ -1044,6 +1071,10 @@ void msm_gpu_cleanup(struct msm_gpu *gpu)
 	int i;
 
 	DBG("%s", gpu->name);
+
+	/* May be unset if probe failed before msm_gpu_init() */
+	if (gpu->crashstate_free_work.func)
+		flush_work(&gpu->crashstate_free_work);
 
 	for (i = 0; i < ARRAY_SIZE(gpu->rb); i++) {
 		msm_ringbuffer_destroy(gpu->rb[i]);

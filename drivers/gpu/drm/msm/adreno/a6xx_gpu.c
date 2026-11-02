@@ -2944,9 +2944,16 @@ const struct adreno_gpu_funcs a8xx_gpu_funcs = {
 		.active_ring = a6xx_active_ring,
 		.irq = a8xx_irq,
 		.destroy = a6xx_destroy,
+#if defined(CONFIG_DRM_MSM_GPU_STATE)
+		.show = a6xx_show,
+#endif
 		.gpu_busy = a8xx_gpu_busy,
 		.gpu_get_freq = a6xx_gmu_get_freq,
 		.gpu_set_freq = a6xx_gpu_set_freq,
+#if defined(CONFIG_DRM_MSM_GPU_STATE)
+		.gpu_state_get = a8xx_gpu_state_get,
+		.gpu_state_put = a6xx_gpu_state_put,
+#endif
 		.create_vm = a6xx_create_vm,
 		.create_private_vm = a6xx_create_private_vm,
 		.get_rptr = a6xx_get_rptr,
