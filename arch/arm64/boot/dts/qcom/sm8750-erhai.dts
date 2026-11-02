@@ -3200,7 +3200,7 @@ pinctrl-names = "wls_charge_int_active", "wls_charge_int_sleep",
 				clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK1_CLK>;
 				clock-names = "cam_clk";
 				assigned-clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK1_CLK>;
-				assigned-clock-rates = <19200000>;
+				assigned-clock-rates = <24000000>;
 
 				pinctrl-names = "default";
 				pinctrl-0 = <&cam_rear_mclk_default>;
@@ -3212,7 +3212,7 @@ pinctrl-names = "wls_charge_int_active", "wls_charge_int_sleep",
 				 * reports location=back and GNOME Snapshot stops
 				 * mirroring the captured picture. */
 				orientation = <1>;
-				rotation = <0>;
+				rotation = <180>;
 
 				cam_vana-supply = <&vreg_l16b_2p8>;
 				cam_vio-supply  = <&vreg_l4b_1p8>;
@@ -3288,7 +3288,7 @@ pinctrl-names = "wls_charge_int_active", "wls_charge_int_sleep",
 		clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK4_CLK>;
 		clock-names = "cam_clk";
 		assigned-clocks = <&cambistmclkcc CAM_BIST_MCLK_CC_MCLK4_CLK>;
-		assigned-clock-rates = <19200000>;
+		assigned-clock-rates = <24000000>;
 
 		pinctrl-names = "default";
 		pinctrl-0 = <&cam_front_mclk_default>;
@@ -3302,7 +3302,7 @@ pinctrl-names = "wls_charge_int_active", "wls_charge_int_sleep",
 		 * sc820cs.c, so raw frames — preview, capture and video —
 		 * are un-mirrored). */
 		orientation = <0>;
-		rotation = <0>;
+		rotation = <180>;
 
 		cam_vana-supply = <&vreg_l16b_2p8>;
 		cam_vio-supply  = <&vreg_l4b_1p8>;
