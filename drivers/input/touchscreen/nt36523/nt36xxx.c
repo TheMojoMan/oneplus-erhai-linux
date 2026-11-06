@@ -2272,6 +2272,45 @@ static void nvt_ts_shutdown(struct spi_device *client)
 #endif /* #if NVT_TOUCH_ESD_PROTECT */
 }
 
+/*
+ * erhai: tell every open client (libinput/mutter) that nothing is down.
+ *
+ * The panel-power path re-initialises the IC (firmware download in
+ * nvt_ts_resume), so every finger the controller tracked before is gone.
+ * Userspace keeps its own slot state, and it only learns about the reset from
+ * the release events this driver sends -- if one of those is lost, the slot
+ * stays "down" forever.  That is not hypothetical: the folio-fold watcher
+ * holds an EVIOCGRAB on this node while the folio is closed, so the release
+ * sent by nvt_ts_suspend() never reached libinput; after the unfold libinput
+ * logged "double tracking ID 3450 in slot 0" (2026-11-06 16:55:53) and turned
+ * every later finger into TOUCH_MOTION without TOUCH_DOWN: the shell showed
+ * tooltips but never accepted a tap, and an app could not be opened by touch
+ * until the compositor was restarted.
+ */
+static void nvt_ts_release_all_touches(struct nvt_ts_data *ts)
+{
+#if MT_PROTOCOL_B
+	uint32_t i = 0;
+#endif
+
+	if (!ts->input_dev)
+		return;
+
+#if MT_PROTOCOL_B
+	for (i = 0; i < ts->max_touch_num; i++) {
+		input_mt_slot(ts->input_dev, i);
+		input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0);
+		input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 0);
+		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, 0);
+	}
+#endif
+	input_report_key(ts->input_dev, BTN_TOUCH, 0);
+#if !MT_PROTOCOL_B
+	input_mt_sync(ts->input_dev);
+#endif
+	input_sync(ts->input_dev);
+}
+
 /*******************************************************
 Description:
 	Novatek touchscreen driver suspend function.
@@ -2282,9 +2321,6 @@ return:
 static int32_t nvt_ts_suspend(struct device *dev)
 {
 	uint8_t buf[4] = {0};
-#if MT_PROTOCOL_B
-	uint32_t i = 0;
-#endif
 
 	if (!bTouchIsAwake) {
 		NVT_LOG("Touch is already suspend\n");
@@ -2339,19 +2375,7 @@ static int32_t nvt_ts_suspend(struct device *dev)
 	mutex_unlock(&ts->lock);
 
 	/* release all touches */
-#if MT_PROTOCOL_B
-	for (i = 0; i < ts->max_touch_num; i++) {
-		input_mt_slot(ts->input_dev, i);
-		input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0);
-		input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 0);
-		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, 0);
-	}
-#endif
-	input_report_key(ts->input_dev, BTN_TOUCH, 0);
-#if !MT_PROTOCOL_B
-	input_mt_sync(ts->input_dev);
-#endif
-	input_sync(ts->input_dev);
+	nvt_ts_release_all_touches(ts);
 
 	msleep(50);
 	/* release pen event */
@@ -2398,6 +2422,16 @@ static int32_t nvt_ts_resume(struct device *dev)
 		NVT_ERR("download firmware failed\n");
 
 	nvt_check_fw_reset_state(RESET_STATE_REK);
+
+	/*
+	 * erhai: the IC was just re-initialised, so clear any touch state that
+	 * userspace still holds from before the reset.  This MUST happen before
+	 * the IRQ is re-armed so that a finger arriving now is never ended by
+	 * the release we are about to send -- and it covers the case where the
+	 * release sent by nvt_ts_suspend() was swallowed by an EVIOCGRAB (the
+	 * folio-fold watcher grabs this node while the folio is folded).
+	 */
+	nvt_ts_release_all_touches(ts);
 
 	if (!ts->db_wakeup && !ts->irq_enabled) {
 		nvt_irq_enable(true);
