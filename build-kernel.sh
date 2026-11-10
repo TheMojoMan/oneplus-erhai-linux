@@ -6,7 +6,7 @@
 #
 # Environment:
 #   KERNEL_REPO   git URL of the kernel source   (default: the erhai kernel repo)
-#   BRANCH        branch to build                (default: master, or $1)
+#   BRANCH        branch to build                (default: erhai/7.3.4, or $1)
 #   KERNEL_DIR    where to clone/build           (default: this tree)
 #   PKG_SUFFIX    appended to CONFIG_LOCALVERSION and the package/tar names
 #   JOBS          make -j                        (default: nproc)
@@ -22,7 +22,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
 KERNEL_REPO="${KERNEL_REPO:-https://github.com/themojoman/oneplus-erhai-linux.git}"
-BRANCH="${BRANCH:-${1:-master}}"
+BRANCH="${BRANCH:-${1:-erhai/7.3.4}}"
 KERNEL_DIR="${KERNEL_DIR:-$HERE}"
 DEFCONFIG="erhai_defconfig"
 DTB="erhai.dtb"
