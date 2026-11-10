@@ -1113,15 +1113,26 @@ static int a6xx_ucode_load(struct msm_gpu *gpu)
 		msm_gem_object_set_name(a6xx_gpu->shadow_bo, "shadow");
 	}
 
-	a6xx_gpu->pwrup_reglist_ptr = msm_gem_kernel_new(gpu->dev, PWRUP_REGLIST_SIZE,
-							 MSM_BO_WC  | MSM_BO_MAP_PRIV,
-							 gpu->vm, &a6xx_gpu->pwrup_reglist_bo,
-							 &a6xx_gpu->pwrup_reglist_iova);
+	/*
+	 * a6xx_ucode_load() may run more than once (e.g. on a GPU recovery
+	 * reload), so only allocate the pwrup reglist once - otherwise the
+	 * previous object is overwritten and its pin/iova/refcount leak.
+	 */
+	if (!a6xx_gpu->pwrup_reglist_bo) {
+		a6xx_gpu->pwrup_reglist_ptr = msm_gem_kernel_new(gpu->dev, PWRUP_REGLIST_SIZE,
+								 MSM_BO_WC  | MSM_BO_MAP_PRIV,
+								 gpu->vm, &a6xx_gpu->pwrup_reglist_bo,
+								 &a6xx_gpu->pwrup_reglist_iova);
 
-	if (IS_ERR(a6xx_gpu->pwrup_reglist_ptr))
-		return PTR_ERR(a6xx_gpu->pwrup_reglist_ptr);
+		if (IS_ERR(a6xx_gpu->pwrup_reglist_ptr)) {
+			int ret = PTR_ERR(a6xx_gpu->pwrup_reglist_ptr);
 
-	msm_gem_object_set_name(a6xx_gpu->pwrup_reglist_bo, "pwrup_reglist");
+			a6xx_gpu->pwrup_reglist_ptr = NULL;
+			return ret;
+		}
+
+		msm_gem_object_set_name(a6xx_gpu->pwrup_reglist_bo, "pwrup_reglist");
+	}
 
 	return 0;
 }
@@ -1573,6 +1584,7 @@ static void a6xx_recover(struct msm_gpu *gpu)
 	struct a6xx_gmu *gmu = &a6xx_gpu->gmu;
 	int active_submits;
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 1 (dump)\n");
 	adreno_dump_info(gpu);
 
 	if (adreno_gpu->funcs->gx_is_on(adreno_gpu)) {
@@ -1596,6 +1608,7 @@ static void a6xx_recover(struct msm_gpu *gpu)
 	/* active_submit won't change until we make a submission */
 	mutex_lock(&gpu->active_lock);
 	active_submits = gpu->active_submits;
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 2 (active=%d)\n", active_submits);
 
 	/*
 	 * Temporarily clear active_submits count to silence a WARN() in the
@@ -1612,9 +1625,11 @@ static void a6xx_recover(struct msm_gpu *gpu)
 		a6xx_gpu_sw_reset(gpu, false);
 	}
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 3 (notifier+synced poweroff)\n");
 	reinit_completion(&gmu->pd_gate);
 	dev_pm_genpd_add_notifier(gmu->cxpd, &gmu->pd_nb);
 	dev_pm_genpd_synced_poweroff(gmu->cxpd);
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 4 (pm put)\n");
 
 	/* Drop the rpm refcount from active submits */
 	if (active_submits)
@@ -1622,9 +1637,11 @@ static void a6xx_recover(struct msm_gpu *gpu)
 
 	/* And the final one from recover worker */
 	pm_runtime_put_sync(&gpu->pdev->dev);
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 5 (pd_gate wait)\n");
 
 	if (!wait_for_completion_timeout(&gmu->pd_gate, msecs_to_jiffies(1000)))
-		DRM_DEV_ERROR(&gpu->pdev->dev, "cx gdsc didn't collapse\n");
+		DRM_DEV_ERROR(&gpu->pdev->dev, "erhai: recover step 5T - cx gdsc didn't collapse\n");
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 6 (notifier out)\n");
 
 	dev_pm_genpd_remove_notifier(gmu->cxpd);
 
@@ -1633,13 +1650,16 @@ static void a6xx_recover(struct msm_gpu *gpu)
 	if (active_submits)
 		pm_runtime_get(&gpu->pdev->dev);
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 7 (resume)\n");
 	pm_runtime_get_sync(&gpu->pdev->dev);
 
 	gpu->active_submits = active_submits;
 	mutex_unlock(&gpu->active_lock);
 
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover step 8 (hw init)\n");
 	msm_gpu_hw_init(gpu);
 	a6xx_gpu->hung = false;
+	DRM_DEV_INFO(&gpu->pdev->dev, "erhai: recover COMPLETED\n");
 }
 
 static const char *a6xx_uche_fault_block(struct msm_gpu *gpu, u32 mid)
@@ -2321,6 +2341,16 @@ static void a6xx_destroy(struct msm_gpu *gpu)
 		drm_gem_object_put(a6xx_gpu->shadow_bo);
 	}
 
+	/*
+	 * msm_gem_kernel_new() holds a vaddr reference too, so the full
+	 * teardown is msm_gem_kernel_put() (put_vaddr + unpin + put).
+	 */
+	if (a6xx_gpu->pwrup_reglist_bo) {
+		msm_gem_kernel_put(a6xx_gpu->pwrup_reglist_bo, gpu->vm);
+		a6xx_gpu->pwrup_reglist_bo = NULL;
+		a6xx_gpu->pwrup_reglist_ptr = NULL;
+	}
+
 	a6xx_llc_slices_destroy(a6xx_gpu);
 
 	a6xx_gmu_remove(a6xx_gpu);
@@ -2914,9 +2944,16 @@ const struct adreno_gpu_funcs a8xx_gpu_funcs = {
 		.active_ring = a6xx_active_ring,
 		.irq = a8xx_irq,
 		.destroy = a6xx_destroy,
+#if defined(CONFIG_DRM_MSM_GPU_STATE)
+		.show = a6xx_show,
+#endif
 		.gpu_busy = a8xx_gpu_busy,
 		.gpu_get_freq = a6xx_gmu_get_freq,
 		.gpu_set_freq = a6xx_gpu_set_freq,
+#if defined(CONFIG_DRM_MSM_GPU_STATE)
+		.gpu_state_get = a8xx_gpu_state_get,
+		.gpu_state_put = a6xx_gpu_state_put,
+#endif
 		.create_vm = a6xx_create_vm,
 		.create_private_vm = a6xx_create_private_vm,
 		.get_rptr = a6xx_get_rptr,

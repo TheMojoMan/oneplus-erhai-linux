@@ -50,7 +50,15 @@
 #define CTL_MIXER_BORDER_OUT            BIT(24)
 #define CTL_FLUSH_MASK_CTL              BIT(17)
 
-#define DPU_REG_RESET_TIMEOUT_US        2000
+#define DPU_REG_RESET_TIMEOUT_US        3000
+/*
+ * A hw-initiated CTL reset (video mode, e.g. SM8750 DP) self-completes but can
+ * take far longer than one scanline to quiesce -- the 2ms reset timeout above is
+ * too short and makes wait_reset_status give up (-EINVAL) on the first flip,
+ * cascading into a frozen output. The downstream SDE driver polls up to 2s here;
+ * match it so the hw reset is allowed to finish.
+ */
+#define DPU_REG_WAIT_RESET_TIMEOUT_US   2000000
 #define  MERGE_3D_IDX   23
 #define  DSC_IDX        22
 #define CDM_IDX         26
@@ -455,7 +463,7 @@ static int dpu_hw_ctl_wait_reset_status(struct dpu_hw_ctl *ctx)
 		return 0;
 
 	pr_debug("hw ctl reset is set for ctl:%d\n", ctx->idx);
-	if (dpu_hw_ctl_poll_reset_status(ctx, DPU_REG_RESET_TIMEOUT_US)) {
+	if (dpu_hw_ctl_poll_reset_status(ctx, DPU_REG_WAIT_RESET_TIMEOUT_US)) {
 		pr_err("hw recovery is not complete for ctl:%d\n", ctx->idx);
 		return -EINVAL;
 	}

@@ -39,6 +39,8 @@ void msm_dp_display_atomic_pre_enable(struct msm_dp *dp_display,
 				      struct drm_atomic_commit *state);
 void msm_dp_display_atomic_enable(struct msm_dp *dp_display,
 				  struct drm_atomic_commit *state);
+bool msm_dp_mode_is_virtual(const struct drm_display_mode *mode);
+
 enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
 					       const struct drm_display_info *info,
 					       const struct drm_display_mode *mode);

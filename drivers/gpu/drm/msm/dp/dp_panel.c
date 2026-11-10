@@ -18,6 +18,9 @@
 
 #define DP_INTF_CONFIG_DATABUS_WIDEN     BIT(4)
 
+/* erhai: lane count the current Type-C pin assignment provides (phy driver). */
+unsigned int qmp_combo_dp_lanes(void);
+
 struct msm_dp_panel_private {
 	struct device *dev;
 	struct drm_device *drm_dev;
@@ -192,6 +195,21 @@ static int msm_dp_panel_read_dpcd(struct msm_dp_panel *msm_dp_panel)
 	/* Limit data lanes from data-lanes of endpoint property of dtsi */
 	if (link_info->num_lanes > link->max_dp_lanes)
 		link_info->num_lanes = link->max_dp_lanes;
+
+	/*
+	 * erhai: data-lanes only describes what the port can drive; the Type-C
+	 * pin assignment decided by the PD/alt-mode negotiation limits it
+	 * further.  Pin assignment C (DP only) wires all four lanes, D/F
+	 * (USB3 + DP) only two.  Using two lanes on a C assignment makes clock
+	 * recovery fail on the sink (it is set up for four), while asking for
+	 * four on a D/F assignment cannot work either.
+	 */
+	if (link_info->num_lanes > 2) {
+		unsigned int altmode_lanes = qmp_combo_dp_lanes();
+
+		if (link_info->num_lanes > altmode_lanes)
+			link_info->num_lanes = altmode_lanes;
+	}
 
 	/* Limit data lanes from LTTPR capabilities, if any */
 	if (max_lttpr_lanes && max_lttpr_lanes < link_info->num_lanes)

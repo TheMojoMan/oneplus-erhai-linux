@@ -462,6 +462,16 @@ static int dpu_kms_check_mode_changed(struct msm_kms *kms, struct drm_atomic_com
 	return 0;
 }
 
+static void dpu_kms_seamless_dfps_update(struct msm_kms *kms,
+					 struct drm_crtc *crtc,
+					 const struct drm_display_mode *mode)
+{
+	struct drm_encoder *encoder;
+
+	drm_for_each_encoder_mask(encoder, crtc->dev, crtc->state->encoder_mask)
+		dpu_encoder_seamless_dfps_update(encoder, mode);
+}
+
 static void dpu_kms_flush_commit(struct msm_kms *kms, unsigned crtc_mask)
 {
 	struct dpu_kms *dpu_kms = to_dpu_kms(kms);
@@ -838,24 +848,41 @@ static int _dpu_kms_drm_obj_init(struct dpu_kms *dpu_kms)
 	/* Create the planes, keeping track of one primary/cursor per crtc */
 	for (i = 0; i < catalog->sspp_count; i++) {
 		enum drm_plane_type type;
+		unsigned long possible_crtcs;
 
+		/*
+		 * erhai: a primary/cursor plane is created for one CRTC and
+		 * paired with it below, so only advertise that CRTC.  With the
+		 * upstream "all CRTCs" mask a compositor that assigns planes by
+		 * walking its monitor list (mutter: the first monitor of a
+		 * mirrored logical monitor defines the CRTC order, but the plane
+		 * list is in CRTC order) can hand the DSI's primary plane to the
+		 * DP CRTC and vice versa.  The core then refuses the commit with
+		 * "switching CRTC directly" (-EINVAL), and since mutter does not
+		 * revert a failed config both outputs stay dark (2026-11-07).
+		 * Overlay planes stay usable with every CRTC.
+		 */
 		if ((catalog->sspp[i].features & BIT(DPU_SSPP_CURSOR))
-			&& cursor_planes_idx < max_crtc_count)
+		    && cursor_planes_idx < max_crtc_count) {
 			type = DRM_PLANE_TYPE_CURSOR;
-		else if (primary_planes_idx < max_crtc_count)
+			possible_crtcs = BIT(cursor_planes_idx);
+		} else if (primary_planes_idx < max_crtc_count) {
 			type = DRM_PLANE_TYPE_PRIMARY;
-		else
+			possible_crtcs = BIT(primary_planes_idx);
+		} else {
 			type = DRM_PLANE_TYPE_OVERLAY;
+			possible_crtcs = (1UL << max_crtc_count) - 1;
+		}
 
 		DPU_DEBUG("Create plane type %d with features %lx (cur %lx)\n",
 			  type, catalog->sspp[i].features,
 			  catalog->sspp[i].features & BIT(DPU_SSPP_CURSOR));
 
 		if (dpu_use_virtual_planes)
-			plane = dpu_plane_init_virtual(dev, type, (1UL << max_crtc_count) - 1);
+			plane = dpu_plane_init_virtual(dev, type, possible_crtcs);
 		else
 			plane = dpu_plane_init(dev, catalog->sspp[i].id, type,
-					       (1UL << max_crtc_count) - 1);
+					       possible_crtcs);
 		if (IS_ERR(plane)) {
 			DPU_ERROR("dpu_plane_init failed\n");
 			ret = PTR_ERR(plane);
@@ -1075,6 +1102,7 @@ static const struct msm_kms_funcs kms_funcs = {
 	.enable_commit   = dpu_kms_enable_commit,
 	.disable_commit  = dpu_kms_disable_commit,
 	.check_mode_changed = dpu_kms_check_mode_changed,
+	.seamless_dfps_update = dpu_kms_seamless_dfps_update,
 	.flush_commit    = dpu_kms_flush_commit,
 	.wait_flush      = dpu_kms_wait_flush,
 	.complete_commit = dpu_kms_complete_commit,
@@ -1438,6 +1466,12 @@ static int __maybe_unused dpu_runtime_suspend(struct device *dev)
 	struct msm_drm_private *priv = platform_get_drvdata(pdev);
 	struct dpu_kms *dpu_kms = to_dpu_kms(priv->kms);
 
+	/*
+	 * The MDSS power domain may collapse as soon as the clocks are gone;
+	 * halt the VBIF AXI ports first where the hardware asks for it.
+	 */
+	dpu_vbif_axi_halt_request(dpu_kms);
+
 	clk_bulk_disable_unprepare(dpu_kms->num_clocks, dpu_kms->clocks);
 
 	for (i = 0; i < dpu_kms->num_paths; i++)
@@ -1463,6 +1497,7 @@ static int __maybe_unused dpu_runtime_resume(struct device *dev)
 		return rc;
 	}
 
+	dpu_vbif_axi_halt_release(dpu_kms);
 	dpu_vbif_init_memtypes(dpu_kms);
 
 	drm_for_each_encoder(encoder, ddev)

@@ -9,6 +9,7 @@
 #include <linux/err.h>
 #include <linux/interrupt.h>
 #include <linux/mfd/syscon.h>
+#include <linux/module.h>
 #include <linux/of.h>
 #include <linux/of_graph.h>
 #include <linux/of_irq.h>
@@ -33,6 +34,13 @@
 #include "phy/dsi_phy.h"
 
 #define DSI_RESET_TOGGLE_DELAY_MS 20
+
+/*
+ * The XN242 packs 2 DSC slices into one MIPI compressed packet (Android
+ * qcom,mdss-dsc-slice-per-pkt=2). In 7.3 this is expressed with the
+ * MIPI_DSI_MODE_DSC_ALL_SLICES_IN_PKT mode flag (set in
+ * panel-oneplus-xn242.c), which programs msm_host->dsc_slice_per_pkt.
+ */
 
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc);
 
@@ -129,7 +137,7 @@ struct msm_dsi_host {
 	struct clk *dsi_pll_pixel_clk;
 
 	unsigned long byte_clk_rate;
-	bool byte_intf_clk_div_2;
+	unsigned long byte_intf_clk_rate;
 	unsigned long pixel_clk_rate;
 	unsigned long esc_clk_rate;
 
@@ -382,19 +390,7 @@ int msm_dsi_runtime_resume(struct device *dev)
 
 int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)
 {
-	unsigned long byte_intf_clk_rate;
-	long rounded_byte_clk_rate;
 	int ret;
-
-	rounded_byte_clk_rate = clk_round_rate(msm_host->byte_clk,
-					       msm_host->byte_clk_rate);
-	if (rounded_byte_clk_rate < 0) {
-		pr_err("%s: failed to round byte clock rate, %ld\n",
-		       __func__, rounded_byte_clk_rate);
-		return rounded_byte_clk_rate;
-	}
-
-	msm_host->byte_clk_rate = rounded_byte_clk_rate;
 
 	DBG("Set clk rates: pclk=%lu, byteclk=%lu",
 	    msm_host->pixel_clk_rate, msm_host->byte_clk_rate);
@@ -413,11 +409,7 @@ int dsi_link_clk_set_rate_6g(struct msm_dsi_host *msm_host)
 	}
 
 	if (msm_host->byte_intf_clk) {
-		byte_intf_clk_rate = msm_host->byte_clk_rate;
-		if (msm_host->byte_intf_clk_div_2)
-			byte_intf_clk_rate /= 2;
-
-		ret = clk_set_rate(msm_host->byte_intf_clk, byte_intf_clk_rate);
+		ret = clk_set_rate(msm_host->byte_intf_clk, msm_host->byte_intf_clk_rate);
 		if (ret) {
 			pr_err("%s: Failed to set rate byte intf clk, %d\n",
 			       __func__, ret);
@@ -946,6 +938,7 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 	u32 pkt_per_line;
 	u32 eol_byte_num;
 	u32 bytes_per_pkt;
+	u32 slice_per_pkt = msm_host->dsc_slice_per_pkt ?: 1;
 
 	/* first calculate dsc parameters and then program
 	 * compress mode registers
@@ -953,10 +946,18 @@ static void dsi_update_dsc_timing(struct msm_dsi_host *msm_host, bool is_cmd_mod
 	slice_per_intf = dsc->slice_count;
 
 	total_bytes_per_intf = dsc->slice_chunk_size * slice_per_intf;
-	bytes_per_pkt = dsc->slice_chunk_size * msm_host->dsc_slice_per_pkt;
+	if (slice_per_pkt > slice_per_intf ||
+	    slice_per_intf % slice_per_pkt) {
+		drm_warn_once(msm_host->dev,
+			      "invalid DSC slices per packet: %u/%u\n",
+			      slice_per_pkt, slice_per_intf);
+		slice_per_pkt = 1;
+	}
+
+	bytes_per_pkt = dsc->slice_chunk_size * slice_per_pkt;
 
 	eol_byte_num = total_bytes_per_intf % 3;
-	pkt_per_line = slice_per_intf / msm_host->dsc_slice_per_pkt;
+	pkt_per_line = slice_per_intf / slice_per_pkt;
 
 	if (is_cmd_mode) /* packet data type */
 		reg = DSI_COMMAND_COMPRESSION_MODE_CTRL_STREAM0_DATATYPE(MIPI_DSI_DCS_LONG_WRITE);
@@ -1110,10 +1111,9 @@ static void dsi_timing_setup(struct msm_dsi_host *msm_host, bool is_bonded_dsi)
 		if (!msm_host->dsc)
 			wc = hdisplay * mipi_dsi_pixel_format_to_bpp(msm_host->format) / 8 + 1;
 		else
-			/*
-			 * When DSC is enabled, WC = slice_chunk_size * slice_per_pkt + 1.
-			 */
-			wc = msm_host->dsc->slice_chunk_size * msm_host->dsc_slice_per_pkt + 1;
+			/* WC = slice_chunk_size * slice_per_pkt + 1 */
+			wc = msm_host->dsc->slice_chunk_size *
+			     (msm_host->dsc_slice_per_pkt ?: 1) + 1;
 
 		dsi_write(msm_host, REG_DSI_CMD_MDP_STREAM0_CTRL,
 			DSI_CMD_MDP_STREAM0_CTRL_WORD_COUNT(wc) |
@@ -1879,7 +1879,16 @@ static int dsi_host_parse_lane_data(struct msm_dsi_host *msm_host,
 
 static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc_config *dsc)
 {
-	int ret;
+	/*
+	 * A panel may carry OTP-calibrated RC values that differ from the
+	 * generic drm_dsc tables; drm_dsc_setup_rc_params() would clobber them,
+	 * so snapshot what the panel supplied and put it back afterwards.
+	 */
+	struct drm_dsc_rc_range_parameters panel_rc_range[DSC_NUM_BUF_RANGES];
+	u8 panel_first_line_bpg_offset = dsc->first_line_bpg_offset;
+	int ret, i;
+
+	memcpy(panel_rc_range, dsc->rc_range_params, sizeof(panel_rc_range));
 
 	if (dsc->bits_per_pixel & 0xf) {
 		DRM_DEV_ERROR(&msm_host->pdev->dev, "DSI does not support fractional bits_per_pixel\n");
@@ -1917,10 +1926,31 @@ static int dsi_populate_dsc_params(struct msm_dsi_host *msm_host, struct drm_dsc
 		return ret;
 	}
 
+	/*
+	 * Restore the panel's own QP limits where it supplied them. They feed
+	 * drm_dsc_compute_rc_parameters() below, so this has to happen first.
+	 */
+	for (i = 0; i < DSC_NUM_BUF_RANGES; i++) {
+		if (!panel_rc_range[i].range_min_qp &&
+		    !panel_rc_range[i].range_max_qp)
+			continue;
+		dsc->rc_range_params[i].range_min_qp =
+			panel_rc_range[i].range_min_qp;
+		dsc->rc_range_params[i].range_max_qp =
+			panel_rc_range[i].range_max_qp;
+	}
+
 	dsc->initial_scale_value = drm_dsc_initial_scale_value(dsc);
 	dsc->line_buf_depth = dsc->bits_per_component + 1;
 
-	return drm_dsc_compute_rc_parameters(dsc);
+	if (panel_first_line_bpg_offset)
+		dsc->first_line_bpg_offset = panel_first_line_bpg_offset;
+
+	ret = drm_dsc_compute_rc_parameters(dsc);
+	if (ret)
+		return ret;
+
+	return 0;
 }
 
 static int dsi_host_parse_dt(struct msm_dsi_host *msm_host)
@@ -2501,7 +2531,9 @@ int msm_dsi_host_power_on(struct mipi_dsi_host *host,
 		goto unlock_ret;
 	}
 
-	msm_host->byte_intf_clk_div_2 = phy_shared_timings->byte_intf_clk_div_2;
+	msm_host->byte_intf_clk_rate = msm_host->byte_clk_rate;
+	if (phy_shared_timings->byte_intf_clk_div_2)
+		msm_host->byte_intf_clk_rate /= 2;
 
 	msm_dsi_sfpb_config(msm_host, true);
 
@@ -2599,6 +2631,25 @@ int msm_dsi_host_set_display_mode(struct mipi_dsi_host *host,
 	}
 
 	return 0;
+}
+
+/*
+ * Seamless dfps (dynamic refresh-rate) timing update. Re-runs dsi_timing_setup()
+ * on a host that is already powered and streaming, so the new mode's porches take
+ * effect WITHOUT a power_off/power_on cycle (no PLL re-lock, no clock gating, no
+ * PHY teardown). The byte/pixel clocks are left exactly as-is — the panel runs one
+ * constant DSI bit clock across all refresh rates and the rate is changed purely by
+ * reprogramming porches (matches the panel's "dfps_immediate_porch_mode" design).
+ * msm_dsi_host_set_display_mode() must be called first to update msm_host->mode.
+ */
+void msm_dsi_host_seamless_timing(struct mipi_dsi_host *host, bool is_bonded_dsi)
+{
+	struct msm_dsi_host *msm_host = to_msm_dsi_host(host);
+
+	mutex_lock(&msm_host->dev_mutex);
+	if (msm_host->power_on && msm_host->mode)
+		dsi_timing_setup(msm_host, is_bonded_dsi);
+	mutex_unlock(&msm_host->dev_mutex);
 }
 
 enum drm_mode_status msm_dsi_host_check_dsc(struct mipi_dsi_host *host,

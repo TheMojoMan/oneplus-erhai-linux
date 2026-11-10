@@ -69,6 +69,16 @@ struct msm_kms_funcs {
 	int (*check_mode_changed)(struct msm_kms *kms, struct drm_atomic_commit *state);
 
 	/**
+	 * @seamless_dfps_update:
+	 *
+	 * Reprogram a running CRTC's interface timing generator (porches only)
+	 * for a new refresh rate without a full modeset. Used by the seamless
+	 * dynamic-fps path; no clock/PLL/PHY change.
+	 */
+	void (*seamless_dfps_update)(struct msm_kms *kms, struct drm_crtc *crtc,
+				     const struct drm_display_mode *mode);
+
+	/**
 	 * Prepare for atomic commit.  This is called after any previous
 	 * (async or otherwise) commit has completed.
 	 */

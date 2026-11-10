@@ -32,6 +32,77 @@ static bool psr_enabled = false;
 module_param(psr_enabled, bool, 0);
 MODULE_PARM_DESC(psr_enabled, "enable PSR for eDP and DP displays");
 
+/*
+ * erhai: virtual mode for mirroring the internal panel.
+ *
+ * A mirrored logical monitor needs one mode size both outputs have, and the
+ * internal XN242 is a fixed 3392x2400 panel.  Advertising that size on the DP
+ * connector lets stock mutter + gnome-control-center mirror at the panel's
+ * native size: DSI-1 keeps running its real 3392x2400 timing unchanged (no
+ * modeset, no scaling on the tablet), while this mode is never sent to the
+ * sink - msm_dp_bridge_atomic_check() replaces it with the sink's own
+ * preferred EDID mode (2560x1080@60 on the LG 34") and the DPU scales the
+ * 3392x2400 framebuffer down to it.
+ *
+ * Sending a real 3392x2400 timing instead is not an option: it is outside the
+ * EDID range limits of ordinary monitors (the LG: 56-75 Hz, 240 MHz max pixel
+ * clock) and the sink overlays its "out of specification" OSD on the picture.
+ *
+ * DRM_MODE_TYPE_USERDEF marks the mode; it is the only spare bit in
+ * drm_display_mode.type that drm_mode_validate_basic() accepts, and
+ * compositors ignore it.
+ */
+#define ERHAI_DP_MODE_TYPE_VIRTUAL	DRM_MODE_TYPE_USERDEF
+
+static const struct drm_display_mode erhai_dp_3392x2400_virtual = {
+	.clock = 1175048,
+	.hdisplay = 3392,
+	.hsync_start = 3392 + 100,
+	.hsync_end = 3392 + 100 + 64,
+	.htotal = 3684,
+	.vdisplay = 2400,
+	.vsync_start = 2400 + 26,
+	.vsync_end = 2400 + 26 + 2,
+	.vtotal = 2658,
+	.type = DRM_MODE_TYPE_DRIVER | ERHAI_DP_MODE_TYPE_VIRTUAL,
+};
+
+static bool erhai_dp_add_native_mode = true;
+module_param_named(add_native_panel_mode, erhai_dp_add_native_mode, bool, 0644);
+MODULE_PARM_DESC(add_native_panel_mode,
+		 "advertise the internal panel's 3392x2400 size on external DP outputs so a mirror can run at the panel's native size (the sink gets its own EDID mode, scaled by the DPU)");
+
+bool msm_dp_mode_is_virtual(const struct drm_display_mode *mode)
+{
+	return !!(mode->type & ERHAI_DP_MODE_TYPE_VIRTUAL);
+}
+
+static int msm_dp_add_native_panel_mode(struct drm_connector *connector)
+{
+	struct drm_display_mode *mode;
+
+	if (!erhai_dp_add_native_mode)
+		return 0;
+
+	mode = drm_mode_duplicate(connector->dev, &erhai_dp_3392x2400_virtual);
+	if (!mode)
+		return 0;
+
+	drm_mode_set_name(mode);
+	drm_mode_probed_add(connector, mode);
+
+	return 1;
+}
+
+/*
+ * In the reverse Type-C orientation a DP-altmode entry makes the USB hub
+ * re-attach its upstream link, blacking out the AUX channel for a few hundred
+ * ms exactly while we read sink caps / EDID. The hub keeps DP-HPD asserted, so
+ * no fresh plug event follows -- retry the sink-caps read until AUX recovers.
+ */
+#define DP_HPD_EDID_RETRIES	15
+#define DP_HPD_EDID_RETRY_MS	150
+
 #define HPD_STRING_SIZE 30
 
 enum {
@@ -269,16 +340,31 @@ static int msm_dp_display_process_hpd_high(struct msm_dp_display_private *dp)
 	int rc = 0;
 	u8 dpcd[DP_RECEIVER_CAP_SIZE];
 	const struct drm_edid *drm_edid = NULL;
+	int tries = 0;
 
+read_caps:
 	rc = drm_dp_read_dpcd_caps(dp->aux, dpcd);
 	if (rc)
-		goto end;
+		goto retry;
 
 	dp->link->lttpr_count = msm_dp_display_lttpr_init(dp, dpcd);
 
 	rc = msm_dp_panel_read_link_caps(dp->panel, connector);
-	if (rc)
+retry:
+	if (rc) {
+		/*
+		 * AUX may be transiently down due to a reverse-orientation USB
+		 * re-attach; retry until the link recovers.
+		 */
+		if (tries++ < DP_HPD_EDID_RETRIES) {
+			drm_dbg_dp(dp->drm_dev,
+				   "sink-caps read failed (%d), retry %d/%d\n",
+				   rc, tries, DP_HPD_EDID_RETRIES);
+			msleep(DP_HPD_EDID_RETRY_MS);
+			goto read_caps;
+		}
 		goto end;
+	}
 
 	drm_edid = drm_edid_read_ddc(connector, &dp->aux->ddc);
 	drm_edid_connector_update(connector, drm_edid);
@@ -764,6 +850,15 @@ enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
 		return -EINVAL;
 	}
 
+	/*
+	 * A virtual mode (see erhai_dp_3392x2400_virtual below) never reaches
+	 * this link: msm_dp_bridge_atomic_check() swaps in the sink's own
+	 * preferred mode before the link is configured, so the pixel clock and
+	 * EDID range checks of the virtual size would wrongly reject it.
+	 */
+	if (msm_dp_mode_is_virtual(mode))
+		return MODE_OK;
+
 	msm_dp_display = container_of(dp, struct msm_dp_display_private, msm_dp_display);
 	link_info = &msm_dp_display->panel->link_info;
 
@@ -803,6 +898,7 @@ enum drm_mode_status msm_dp_display_mode_valid(struct msm_dp *dp,
 int msm_dp_display_get_modes(struct msm_dp *dp)
 {
 	struct msm_dp_display_private *msm_dp_display;
+	int count;
 
 	if (!dp) {
 		DRM_ERROR("invalid params\n");
@@ -811,7 +907,12 @@ int msm_dp_display_get_modes(struct msm_dp *dp)
 
 	msm_dp_display = container_of(dp, struct msm_dp_display_private, msm_dp_display);
 
-	return drm_edid_connector_add_modes(msm_dp_display->panel->connector);
+	count = drm_edid_connector_add_modes(msm_dp_display->panel->connector);
+
+	if (count > 0 && erhai_dp_add_native_mode)
+		count += msm_dp_add_native_panel_mode(msm_dp_display->panel->connector);
+
+	return count;
 }
 
 bool msm_dp_display_check_video_test(struct msm_dp *dp)

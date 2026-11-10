@@ -115,6 +115,12 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 
 	data |= (num_active_slice_per_enc & 0x3) << 7;
 
+	/*
+	 * DSC_CMN_MAIN_CNF lives at offset 0x00 and is SHARED between the two
+	 * DSC engines inside one DCE (e.g. DSC_0 and DSC_1 both at MMIO base
+	 * 0x80000). Both engines compute identical mode/slice_count, so writing
+	 * the same value twice from both engines is safe — no RMW needed.
+	 */
 	DPU_REG_WRITE(hw, DSC_CMN_MAIN_CNF, data);
 
 	data = (initial_lines & 0xff);
@@ -154,8 +160,28 @@ static void dpu_hw_dsc_config_1_2(struct dpu_hw_dsc *hw_dsc,
 
 	DPU_REG_WRITE(hw, sblk->enc.base + DSC_MAIN_CONF, data);
 
-	data = (dsc->pic_width & 0xffff) |
-		((dsc->pic_height & 0xffff) << 16);
+	/*
+	 * v147: match the vendor sde_hw_dsc_1_2.c register layout exactly.
+	 * The vendor pre-divides `dsc->config.pic_width` to roi/2 only when
+	 * num_dsc > 2 (= 4-DSC DCE-pair multiplex) in sde_encoder_dce.c, and
+	 * writes raw `dsc->config.pic_width` here without further division.
+	 *
+	 * Equivalent in linux-7 mode bits:
+	 *  - 2-DSC (SPLIT_PANEL, !MULTIPLEX) → vendor writes 3392 to DSC engine
+	 *  - 4-DSC (SPLIT_PANEL + MULTIPLEX) → vendor writes 1696 to DSC engine
+	 *
+	 * The previous code was halving on SPLIT_PANEL AND on MULTIPLEX which
+	 * gave 1696 / 848 — both off by /2 vs Android. Only divide on
+	 * MULTIPLEX (the DCE-pair case), matching the vendor semantic.
+	 *
+	 * Android dump confirms 4-DSC: DCE_0e0+0x34 = 0x096006a0 (pic_w=1696).
+	 */
+	{
+		u32 pic_width = dsc->pic_width;
+		if (mode & DSC_MODE_MULTIPLEX)
+			pic_width /= 2;
+		data = (pic_width & 0xffff) | ((dsc->pic_height & 0xffff) << 16);
+	}
 
 	DPU_REG_WRITE(hw, sblk->enc.base + DSC_PICTURE_SIZE, data);
 

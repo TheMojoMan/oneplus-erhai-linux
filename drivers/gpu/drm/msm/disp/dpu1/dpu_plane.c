@@ -20,6 +20,7 @@
 #include <linux/soc/qcom/ubwc.h>
 
 #include "msm_drv.h"
+#include "msm_gem.h"
 #include "dpu_kms.h"
 #include "dpu_hw_sspp.h"
 #include "dpu_hw_util.h"
@@ -88,8 +89,19 @@ struct dpu_plane {
 	const struct dpu_mdss_cfg *catalog;
 };
 
+/*
+ * LINEAR only, no QCOM_COMPRESSED. A panel wide enough to need four mixers is
+ * scanned out as two half-width SSPP rects of one framebuffer (see the
+ * multirect split in dpu_plane_atomic_check_sspp()), and the second rect starts
+ * in the middle of the buffer. That works for a linear buffer, but a UBWC one
+ * also carries a meta plane whose per-tile offsets the split does not
+ * recompute, so the right-hand rect decodes its compression metadata from the
+ * wrong place and its tile edges come out visibly wrong (a bright bevel along
+ * the top, right and bottom of that half). Advertising LINEAR only makes
+ * userspace negotiate an uncompressed scanout buffer, at the cost of the
+ * bandwidth UBWC would have saved.
+ */
 static const uint64_t supported_format_modifiers[] = {
-	DRM_FORMAT_MOD_QCOM_COMPRESSED,
 	DRM_FORMAT_MOD_LINEAR,
 	DRM_FORMAT_MOD_INVALID
 };
@@ -812,6 +824,96 @@ static int dpu_plane_atomic_check_pipe(struct dpu_plane *pdpu,
 #define MAX_UPSCALE_RATIO	20
 #define MAX_DOWNSCALE_RATIO	4
 
+/*
+ * erhai: virtual scaled panel modes.
+ *
+ * The internal panel advertises desktop sizes it cannot scan out (the DSI
+ * bridge swaps adjusted_mode back to the panel's native timing for them, see
+ * dsi_manager.c), so the plane rectangles userspace sends are in the virtual
+ * mode's coordinate space while the CRTC runs the native mode.  Map them over:
+ * aspect-fit the virtual desktop into the native CRTC and scale every plane by
+ * that factor, so the image keeps its aspect ratio and the uncovered area of
+ * the panel stays black.  The cursor pipe is a DMA pipe without a scaler, so
+ * only its position is mapped (it stays 1:1 in native pixels).
+ */
+static bool dpu_crtc_state_is_rescaled(const struct drm_crtc_state *crtc_state)
+{
+	return crtc_state->enable &&
+	       (crtc_state->mode.hdisplay != crtc_state->adjusted_mode.hdisplay ||
+		crtc_state->mode.vdisplay != crtc_state->adjusted_mode.vdisplay);
+}
+
+static int dpu_plane_rescale_value(int value, u64 scale, int offset)
+{
+	return offset + (int) (((s64) value * scale) >> 16);
+}
+
+static void dpu_plane_rescale_state(struct drm_plane_state *new_plane_state,
+				    const struct drm_crtc_state *crtc_state)
+{
+	const struct drm_display_mode *mode = &crtc_state->mode;
+	const struct drm_display_mode *native_mode = &crtc_state->adjusted_mode;
+	u64 hscale, vscale, scale;
+	int width, height, off_x, off_y;
+
+	if (!mode->hdisplay || !mode->vdisplay)
+		return;
+
+	hscale = ((u64) native_mode->hdisplay << 16) / mode->hdisplay;
+	vscale = ((u64) native_mode->vdisplay << 16) / mode->vdisplay;
+	scale = min(hscale, vscale);
+
+	width = dpu_plane_rescale_value(mode->hdisplay, scale, 0);
+	height = dpu_plane_rescale_value(mode->vdisplay, scale, 0);
+	off_x = (native_mode->hdisplay - width) / 2;
+	off_y = (native_mode->vdisplay - height) / 2;
+
+	DRM_DEBUG("erhai: %dx%d -> %dx%d (x%d.%03d), offset %d,%d\n",
+		  mode->hdisplay, mode->vdisplay, width, height,
+		  (int) (scale >> 16), (int) ((scale * 1000 >> 16) % 1000),
+		  off_x, off_y);
+
+	new_plane_state->crtc_x =
+		dpu_plane_rescale_value(new_plane_state->crtc_x, scale, off_x);
+	new_plane_state->crtc_y =
+		dpu_plane_rescale_value(new_plane_state->crtc_y, scale, off_y);
+
+	if (new_plane_state->plane->type == DRM_PLANE_TYPE_CURSOR)
+		return;
+
+	new_plane_state->crtc_w =
+		dpu_plane_rescale_value(new_plane_state->crtc_w, scale, 0);
+	new_plane_state->crtc_h =
+		dpu_plane_rescale_value(new_plane_state->crtc_h, scale, 0);
+}
+
+static int dpu_plane_check_plane_state(struct drm_plane_state *new_plane_state,
+				       const struct drm_crtc_state *crtc_state,
+				       int min_scale, int max_scale)
+{
+	struct drm_crtc_state rescaled_crtc_state;
+
+	if (!crtc_state || !dpu_crtc_state_is_rescaled(crtc_state))
+		return drm_atomic_helper_check_plane_state(new_plane_state,
+							   crtc_state,
+							   min_scale, max_scale,
+							   true, true);
+
+	dpu_plane_rescale_state(new_plane_state, crtc_state);
+
+	/*
+	 * Clip against the native mode: the helper clips to crtc_state->mode,
+	 * which is the (smaller) virtual size here.
+	 */
+	rescaled_crtc_state = *crtc_state;
+	rescaled_crtc_state.mode = crtc_state->adjusted_mode;
+
+	return drm_atomic_helper_check_plane_state(new_plane_state,
+						   &rescaled_crtc_state,
+						   min_scale, max_scale,
+						   true, true);
+}
+
 static int dpu_plane_atomic_check_nosspp(struct drm_plane *plane,
 					 struct drm_plane_state *new_plane_state,
 					 const struct drm_crtc_state *crtc_state)
@@ -824,10 +926,8 @@ static int dpu_plane_atomic_check_nosspp(struct drm_plane *plane,
 	min_scale = FRAC_16_16(1, MAX_UPSCALE_RATIO);
 	max_scale = MAX_DOWNSCALE_RATIO << 16;
 
-	ret = drm_atomic_helper_check_plane_state(new_plane_state, crtc_state,
-						  min_scale,
-						  max_scale,
-						  true, true);
+	ret = dpu_plane_check_plane_state(new_plane_state, crtc_state,
+					  min_scale, max_scale);
 	if (ret) {
 		DPU_DEBUG_PLANE(pdpu, "Check plane state failed (%d)\n", ret);
 		return ret;
@@ -967,6 +1067,14 @@ static int dpu_plane_split(struct drm_plane *plane,
 					DRM_RECT_FMT " and " DRM_RECT_FMT "\n",
 					DRM_RECT_ARG(&pipe_cfg->src_rect),
 					DRM_RECT_ARG(&r_pipe_cfg->src_rect));
+		} else if (num_stages > 1) {
+			/* 4-LM: force parallel split even within each half so
+			 * each stage gets its own 848px SSPP rect. */
+			memcpy(r_pipe_cfg, pipe_cfg, sizeof(struct dpu_sw_pipe_cfg));
+			pipe_cfg->src_rect.x2 = (pipe_cfg->src_rect.x1 + pipe_cfg->src_rect.x2) >> 1;
+			pipe_cfg->dst_rect.x2 = (pipe_cfg->dst_rect.x1 + pipe_cfg->dst_rect.x2) >> 1;
+			r_pipe_cfg->src_rect.x1 = pipe_cfg->src_rect.x2;
+			r_pipe_cfg->dst_rect.x1 = pipe_cfg->dst_rect.x2;
 		} else {
 			memset(r_pipe_cfg, 0, sizeof(struct dpu_sw_pipe_cfg));
 		}
@@ -1066,6 +1174,25 @@ static int dpu_plane_atomic_check_sspp(struct drm_plane *plane,
 		pipe_cfg = &pstate->pipe_cfg[i];
 		if (!drm_rect_width(&pipe_cfg->src_rect))
 			continue;
+		/*
+		 * A pipe can carry a non-zero src rect yet have no SSPP
+		 * assigned: in the forced 4-LM / 2-stage (num_stages>1) virtual-
+		 * plane split, a small plane (e.g. the GNOME HW cursor) that
+		 * clips into a second stage can fall through the multirect-shared
+		 * path without reserving an SSPP for that stage's pipe. Such a
+		 * pipe must not reach any consumer that derefs pipe->sspp
+		 * (check_pipe here, dpu_plane_sspp_update_pipe at commit) -> NULL
+		 * Oops, freezing the display. check_sspp is the last code to
+		 * touch this (already-swapped-in) state before commit, so zero
+		 * the cfg: downstream loops key off EITHER src_rect width
+		 * (update, bw/clk) OR pipe->sspp (flush, disable), and a zeroed
+		 * unassigned pipe is uniformly skipped by both.
+		 */
+		if (!pipe->sspp) {
+			DPU_DEBUG_PLANE(pdpu, "pipe %d has src rect but no SSPP, releasing\n", i);
+			memset(pipe_cfg, 0, sizeof(*pipe_cfg));
+			continue;
+		}
 		DPU_DEBUG_PLANE(pdpu, "pipe %d is in use, validate it\n", i);
 		ret = dpu_plane_atomic_check_pipe(pdpu, pipe, pipe_cfg,
 						  &crtc_state->adjusted_mode,
@@ -1834,9 +1961,10 @@ static struct drm_plane *dpu_plane_init_common(struct drm_device *dev,
 	int ret;
 
 	pdpu = drmm_universal_plane_alloc(dev, struct dpu_plane, base,
-				0xff, &dpu_plane_funcs,
+				possible_crtcs, &dpu_plane_funcs,
 				format_list, num_formats,
-				supported_format_modifiers, type, NULL);
+				supported_format_modifiers,
+				type, NULL);
 	if (IS_ERR(pdpu))
 		return ERR_CAST(pdpu);
 

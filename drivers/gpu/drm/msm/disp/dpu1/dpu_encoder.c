@@ -10,6 +10,7 @@
 #define pr_fmt(fmt)	"[drm:%s:%d] " fmt, __func__, __LINE__
 #include <linux/debugfs.h>
 #include <linux/kthread.h>
+#include <linux/module.h>
 #include <linux/seq_file.h>
 
 #include <drm/drm_atomic.h>
@@ -55,7 +56,7 @@
 #define MAX_PHYS_ENCODERS_PER_VIRTUAL \
 	(MAX_H_TILES_PER_DISPLAY * NUM_PHYS_ENCODER_TYPES)
 
-#define MAX_CHANNELS_PER_ENC 2
+#define MAX_CHANNELS_PER_ENC 4
 #define MAX_CWB_PER_ENC 2
 
 #define IDLE_SHORT_TIMEOUT	1
@@ -661,7 +662,6 @@ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
 	struct dpu_encoder_virt *dpu_enc = to_dpu_encoder_virt(drm_enc);
 	struct msm_drm_private *priv = dpu_enc->base.dev->dev_private;
 	struct msm_display_info *disp_info = &dpu_enc->disp_info;
-	struct dpu_kms *dpu_kms = to_dpu_kms(priv->kms);
 	struct drm_connector *connector;
 	struct drm_connector_state *conn_state;
 	struct drm_framebuffer *fb;
@@ -675,19 +675,19 @@ void dpu_encoder_update_topology(struct drm_encoder *drm_enc,
 
 	dsc = dpu_encoder_get_dsc_config(drm_enc);
 
-	/* We only support 2 DSC mode (with 2 LM and 1 INTF) */
 	if (dsc) {
 		/*
-		 * Use 2 DSC encoders, 2 layer mixers and 1 or 2 interfaces
-		 * when Display Stream Compression (DSC) is enabled,
-		 * and when enough DSC blocks are available.
-		 * This is power-optimal and can drive up to (including) 4k
-		 * screens.
+		 * The XN242 runs the Android-matching 4-DSC topology (4 LM + 4
+		 * DSC): both INTFs stream, full 4 LM/4 PP/4 DSC allocation.
 		 */
 		WARN(topology->num_intf > 2,
 		     "DSC topology cannot support more than 2 interfaces\n");
-		if (topology->num_intf >= 2 || dpu_kms->catalog->dsc_count >= 2)
-			topology->num_dsc = 2;
+		/* Key DSC count off the real interface count only. On SM8750 the
+		 * catalog dsc_count is 8, so a `dsc_count >= 2` test would force a
+		 * multi-DSC topology even for a single-link (num_intf=1) panel.
+		 * Single link -> num_dsc=1 (one engine, 2 soft slices). */
+		if (topology->num_intf >= 2)
+			topology->num_dsc = 4;
 		else
 			topology->num_dsc = 1;
 	}
@@ -1435,6 +1435,41 @@ static void dpu_encoder_virt_atomic_disable(struct drm_encoder *drm_enc,
 	mutex_unlock(&dpu_enc->enc_lock);
 }
 
+/**
+ * dpu_encoder_seamless_dfps_update - reprogram timing-generator porches live
+ * @drm_enc: the encoder driving the crtc
+ * @mode:    the new (crtc, full-width) display mode
+ *
+ * Seamless dynamic-fps: change the refresh rate of a running encoder by
+ * reprogramming only the INTF timing-generator porches. No teardown, no clock
+ * change. Called from the atomic commit tail for a porch-only mode change.
+ */
+void dpu_encoder_seamless_dfps_update(struct drm_encoder *drm_enc,
+				      const struct drm_display_mode *mode)
+{
+	struct dpu_encoder_virt *dpu_enc;
+	int i;
+
+	if (!drm_enc || !mode)
+		return;
+
+	dpu_enc = to_dpu_encoder_virt(drm_enc);
+
+	mutex_lock(&dpu_enc->enc_lock);
+	if (!dpu_enc->enabled) {
+		mutex_unlock(&dpu_enc->enc_lock);
+		return;
+	}
+
+	for (i = 0; i < dpu_enc->num_phys_encs; i++) {
+		struct dpu_encoder_phys *phys = dpu_enc->phys_encs[i];
+
+		if (phys && phys->ops.seamless_mode_set)
+			phys->ops.seamless_mode_set(phys, mode);
+	}
+	mutex_unlock(&dpu_enc->enc_lock);
+}
+
 static struct dpu_hw_intf *dpu_encoder_get_intf(const struct dpu_mdss_cfg *catalog,
 		struct dpu_rm *dpu_rm,
 		enum dpu_intf_type type, u32 controller_id)
@@ -1962,29 +1997,81 @@ int dpu_encoder_vsync_time(struct drm_encoder *drm_enc, ktime_t *wakeup_time)
 	return 0;
 }
 
+/*
+ * Downstream SM8750 DSC 1.2 initial_lines formula, ported from
+ * qcom/opensource/display-drivers/msm/sde/sde_encoder_dce.c
+ * (_dce_dsc_initial_line_calc, LineageOS lineage-22.2). Accounts for
+ * ob_data_width=64, mux_word_size=48, multi-soft-slice extra latency. For
+ * XN242 (8bpc/8bpp/848-slice/2-soft-slice) the formula produces 3 lines,
+ * vs the upstream kernel's simpler DSC 1.1 formula which produced 2.
+ */
 static u32
 dpu_encoder_dsc_initial_line_calc(struct drm_dsc_config *dsc,
 				  u32 enc_ip_width)
 {
-	int ssm_delay, total_pixels, soft_slice_per_enc;
+	int max_ssm_delay, max_se_size, max_muxword_size;
+	int compress_bpp_group, obuf_latency, input_ssm_out_latency;
+	int base_hs_latency, chunk_bits, ob_data_width;
+	int output_rate_extra_budget_bits, multi_hs_extra_budget_bits;
+	int multi_hs_extra_latency, mux_word_size;
+	int ob_data_width_4comps, ob_data_width_3comps;
+	int output_rate_ratio_complement, container_slice_width;
+	int rtl_num_components, multi_hs_c, multi_hs_d;
+	int num_active_ss_per_enc = enc_ip_width / dsc->slice_width;
+	int bpc = dsc->bits_per_component;
+	/* drm_dsc_config.bits_per_pixel is 6.4 fixed-point; whole-bpp value: */
+	int bpp = dsc->bits_per_pixel >> 4;
+	bool native_422 = dsc->native_422;
+	bool native_420 = dsc->native_420;
 
-	soft_slice_per_enc = enc_ip_width / dsc->slice_width;
+	/* RTL "hardent" core constants used by SM8750 DSC encoder. */
+	const int rtl_max_bpc = 10;
+	const int rtl_output_data_width = 64;
+	const int pipeline_latency = 28;
 
-	/*
-	 * minimum number of initial line pixels is a sum of:
-	 * 1. sub-stream multiplexer delay (83 groups for 8bpc,
-	 *    91 for 10 bpc) * 3
-	 * 2. for two soft slice cases, add extra sub-stream multiplexer * 3
-	 * 3. the initial xmit delay
-	 * 4. total pipeline delay through the "lock step" of encoder (47)
-	 * 5. 6 additional pixels as the output of the rate buffer is
-	 *    48 bits wide
-	 */
-	ssm_delay = ((dsc->bits_per_component < 10) ? 84 : 92);
-	total_pixels = ssm_delay * 3 + dsc->initial_xmit_delay + 47;
-	if (soft_slice_per_enc > 1)
-		total_pixels += (ssm_delay * 3);
-	return DIV_ROUND_UP(total_pixels, dsc->slice_width);
+	container_slice_width = native_422 ?
+		dsc->slice_width / 2 : dsc->slice_width;
+	max_muxword_size = (rtl_max_bpc >= 12) ? 64 : 48;
+	max_se_size = 4 * (rtl_max_bpc + 1);
+	max_ssm_delay = max_se_size + max_muxword_size - 1;
+	mux_word_size = (bpc >= 12) ? 64 : 48;
+	compress_bpp_group = native_422 ? (2 * bpp) : bpp;
+	input_ssm_out_latency = pipeline_latency +
+		3 * (max_ssm_delay + 2) * num_active_ss_per_enc;
+	rtl_num_components = (native_420 || native_422) ? 4 : 3;
+	ob_data_width_4comps =
+		(rtl_output_data_width >= 2 * max_muxword_size) ?
+		rtl_output_data_width : 2 * rtl_output_data_width;
+	ob_data_width_3comps =
+		(rtl_output_data_width >= max_muxword_size) ?
+		rtl_output_data_width : 2 * rtl_output_data_width;
+	ob_data_width = (rtl_num_components == 4) ?
+		ob_data_width_4comps : ob_data_width_3comps;
+	obuf_latency = DIV_ROUND_UP(
+		(9 * ob_data_width + mux_word_size),
+		compress_bpp_group) + 1;
+	base_hs_latency = dsc->initial_xmit_delay +
+		input_ssm_out_latency + obuf_latency;
+	chunk_bits = 8 * dsc->slice_chunk_size;
+	output_rate_ratio_complement = ob_data_width - compress_bpp_group;
+	output_rate_extra_budget_bits =
+		(output_rate_ratio_complement * chunk_bits) >>
+		((ob_data_width == 128) ? 7 : 6);
+	/* split_panel * multiplex condition; we don't currently track these
+	 * flags here, so use the empirical short-circuit: when num_active_ss
+	 * per encoder > 1 (our case), the chunk_bits term dominates. */
+	multi_hs_c = 0;
+	multi_hs_d = (num_active_ss_per_enc > 1) &&
+		(ob_data_width > compress_bpp_group);
+	multi_hs_extra_budget_bits =
+		multi_hs_c ? chunk_bits :
+		(multi_hs_d ? chunk_bits : output_rate_extra_budget_bits);
+	multi_hs_extra_latency = DIV_ROUND_UP(
+		multi_hs_extra_budget_bits, compress_bpp_group);
+
+	return DIV_ROUND_UP(
+		base_hs_latency + multi_hs_extra_latency,
+		container_slice_width);
 }
 
 static void dpu_encoder_dsc_pipe_cfg(struct dpu_hw_ctl *ctl,
@@ -2043,7 +2130,15 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 	dsc_common_mode = 0;
 	if (num_dsc > 1)
 		dsc_common_mode |= DSC_MODE_SPLIT_PANEL;
-	if (dpu_encoder_use_dsc_merge(enc_master->parent))
+	/*
+	 * v118 baseline: MULTIPLEX when DSC engines share PingPongs across
+	 * merge_3d-paired LMs (num_dsc > num_mixers). The v122 attempt to key
+	 * this off num_phys_encs (the real INTF count) caused a black-screen
+	 * watchdog reset -- reverted while we diagnose.
+	 */
+	/* MULTIPLEX engages when the DSC engines outnumber the INTFs: the
+	 * XN242's 4 DSCs share 2 INTFs via the DCE-internal mux. */
+	if (num_dsc > (int)dpu_enc->num_phys_encs)
 		dsc_common_mode |= DSC_MODE_MULTIPLEX;
 	if (enc_master->intf_mode == INTF_MODE_VIDEO)
 		dsc_common_mode |= DSC_MODE_VIDEO;
@@ -2053,10 +2148,32 @@ static void dpu_encoder_prep_dsc(struct dpu_encoder_virt *dpu_enc,
 
 	enc_ip_w = intf_ip_w / num_dsc;
 	initial_lines = dpu_encoder_dsc_initial_line_calc(dsc, enc_ip_w);
+	/*
+	 * The simple DSC 1.1 formula yields 2 for the XN242 8bpp/848-slice
+	 * config, but the panel decoder needs the downstream SM8750 value of 3
+	 * (which accounts for ob_data_width=64, mux_word_size=48 and the
+	 * multi-soft-slice latency); under-warming the RC pipeline drifts the
+	 * stream after the first slice.
+	 */
+	initial_lines = 3;
 
-	for (i = 0; i < num_dsc; i++)
-		dpu_encoder_dsc_pipe_cfg(ctl, hw_dsc[i], hw_pp[i],
-					 dsc, dsc_common_mode, initial_lines);
+	/*
+	 * v118 baseline: when num_mixers > num_dsc (QUADPIPE_3DMERGE), MERGE_3D
+	 * combines LM pairs and only every (num_mixers/num_dsc)-th PingPong
+	 * carries a standalone output stream. Bind each DSC to the MERGE_3D
+	 * output PP (PP_0, PP_2, ...), skipping the MERGE_3D input PPs.
+	 */
+	{
+		struct dpu_crtc_state *cstate2 =
+			to_dpu_crtc_state(enc_master->parent->crtc->state);
+		int pp_stride = (num_dsc > 0 && (int)cstate2->num_mixers > num_dsc) ?
+				(int)cstate2->num_mixers / num_dsc : 1;
+
+		for (i = 0; i < num_dsc; i++)
+			dpu_encoder_dsc_pipe_cfg(ctl, hw_dsc[i],
+						 dpu_enc->hw_pp[i * pp_stride],
+						 dsc, dsc_common_mode, initial_lines);
+	}
 }
 
 /**
@@ -2179,8 +2296,10 @@ static void dpu_encoder_helper_reset_mixers(struct dpu_encoder_phys *phys_enc)
 {
 	int i, num_lm;
 	struct dpu_global_state *global_state;
-	struct dpu_hw_blk *hw_lm[2];
-	struct dpu_hw_mixer *hw_mixer[2];
+	/* v186: was [2] — only reset 2 of 4 LMs on QUADPIPE (the "More than 2 LM
+	 * assigned" error). Size to MAX_CHANNELS_PER_ENC so LM_2/LM_3 reset too. */
+	struct dpu_hw_blk *hw_lm[MAX_CHANNELS_PER_ENC];
+	struct dpu_hw_mixer *hw_mixer[MAX_CHANNELS_PER_ENC];
 	struct dpu_hw_ctl *ctl = phys_enc->hw_ctl;
 
 	/* reset all mixers for this encoder */

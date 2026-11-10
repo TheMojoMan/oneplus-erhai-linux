@@ -24,7 +24,7 @@
 #define DPU_MAX_IMG_WIDTH 0x3fff
 #define DPU_MAX_IMG_HEIGHT 0x3fff
 
-#define CRTC_DUAL_MIXERS	2
+#define CRTC_DUAL_MIXERS	4
 
 #define MAX_XIN_COUNT 16
 
@@ -132,11 +132,13 @@ enum {
  * VBIF sub-blocks and features
  * @DPU_VBIF_QOS_OTLIM        VBIF supports OT Limit
  * @DPU_VBIF_QOS_REMAP        VBIF supports QoS priority remap
+ * @DPU_VBIF_AXI_HALT         VBIF AXI ports are halted before power collapse
  * @DPU_VBIF_MAX              maximum value
  */
 enum {
 	DPU_VBIF_QOS_OTLIM = 0x1,
 	DPU_VBIF_QOS_REMAP,
+	DPU_VBIF_AXI_HALT,
 	DPU_VBIF_MAX
 };
 

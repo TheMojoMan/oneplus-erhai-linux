@@ -3,6 +3,8 @@
  * Copyright (c) 2017-2020, The Linux Foundation. All rights reserved.
  */
 
+#include <linux/math.h>
+#include <linux/sprintf.h>
 #include <linux/string_choices.h>
 #include <drm/drm_atomic_helper.h>
 #include <drm/drm_atomic.h>
@@ -95,6 +97,160 @@ static enum drm_mode_status msm_dp_bridge_mode_valid(struct drm_bridge *drm_brid
 	return msm_dp_display_mode_valid(dp, info, mode);
 }
 
+/*
+ * erhai: the timing the sink is fed while it mirrors the internal panel.
+ *
+ * The virtual 3392x2400 mode exists so stock mutter can mirror at the panel's
+ * native size; what the sink actually receives is a free choice, the DPU
+ * scales the panel framebuffer to it.  <w>x<h> picks a size, an optional
+ * @<hz> a rate of that size (119.88 matches @120); without @<hz> the mode with
+ * the highest refresh of that size is taken.  Empty selects automatically.
+ */
+static char *erhai_dp_mirror_sink_mode;
+module_param_named(mirror_sink_mode, erhai_dp_mirror_sink_mode, charp, 0644);
+MODULE_PARM_DESC(mirror_sink_mode,
+		 "sink timing used when mirroring the internal panel, <w>x<h>[@<hz>] (e.g. 1920x1080@120); empty picks the sink's preferred mode, else the highest refresh it offers");
+
+static const struct drm_display_mode *
+msm_dp_find_named_sink_mode(struct drm_connector *connector, const char *spec)
+{
+	const struct drm_display_mode *mode, *match = NULL;
+	int width, height, refresh = 0, parsed;
+
+	parsed = sscanf(spec, "%dx%d@%d", &width, &height, &refresh);
+	if (parsed < 2)
+		return NULL;
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		if (msm_dp_mode_is_virtual(mode))
+			continue;
+
+		if (mode->hdisplay != width || mode->vdisplay != height)
+			continue;
+
+		if (parsed == 3 &&
+		    abs(drm_mode_vrefresh(mode) - refresh) > 1)
+			continue;
+
+		if (!match ||
+		    drm_mode_vrefresh(mode) > drm_mode_vrefresh(match))
+			match = mode;
+	}
+
+	return match;
+}
+
+/*
+ * erhai: not every sink marks a preferred mode.  An EDID 1.3 sink whose
+ * feature byte clears the "preferred timing mode" bit (bit 0) - the Beyond TV
+ * on DP-1 does - leaves every probed mode without DRM_MODE_TYPE_PREFERRED, so
+ * the strict lookup returned NULL and a mirror at 3392x2400 was rejected with
+ * EINVAL.  Mutter kept page-flipping the mirror framebuffer onto the old CRTC
+ * mode, which the DPU drew 1:1 (bottom of the desktop cut off).
+ *
+ * Without a preferred mode, take the highest refresh the sink offers instead
+ * of the first EDID timing: a mirror can only present as fast as its slower
+ * CRTC (and the sink adds its own processing delay on top, worst at 24p), so
+ * on the TV the first timing - 4096x2160@24 - made the mirror lag by several
+ * hundred milliseconds.  1920x1080@120 is the same pixel clock, smooth, and
+ * matches the timing the bootloader already leaves the link at.  Modes within
+ * 1 Hz of each other (59.94/60, 119.88/120) count as the same rate and the
+ * largest of them wins; mirror_sink_mode= overrides the whole choice.
+ *
+ * The virtual mode itself must never be returned: adjusted_mode would then
+ * equal the virtual mode and the out-of-spec timing would reach the sink
+ * unscaled.
+ */
+static const struct drm_display_mode *
+msm_dp_get_sink_mode(struct drm_connector *connector)
+{
+	const struct drm_display_mode *mode, *best = NULL;
+	int best_refresh = 0;
+	u64 best_area = 0;
+
+	if (!connector)
+		return NULL;
+
+	if (erhai_dp_mirror_sink_mode && *erhai_dp_mirror_sink_mode) {
+		best = msm_dp_find_named_sink_mode(connector,
+						   erhai_dp_mirror_sink_mode);
+		if (best)
+			return best;
+
+		DRM_DEBUG("erhai: no sink mode matches mirror_sink_mode=%s\n",
+			  erhai_dp_mirror_sink_mode);
+		best = NULL;
+	}
+
+	list_for_each_entry(mode, &connector->modes, head) {
+		int refresh;
+		u64 area;
+
+		if (msm_dp_mode_is_virtual(mode))
+			continue;
+
+		if (mode->type & DRM_MODE_TYPE_PREFERRED)
+			return mode;
+
+		refresh = drm_mode_vrefresh(mode);
+		area = (u64)mode->hdisplay * mode->vdisplay;
+
+		if (!best) {
+			best = mode;
+			best_refresh = refresh;
+			best_area = area;
+		} else if (refresh > best_refresh + 1) {
+			best = mode;
+			best_refresh = refresh;
+			best_area = area;
+		} else if (refresh + 1 >= best_refresh && area > best_area) {
+			best = mode;
+			best_refresh = refresh;
+			best_area = area;
+		}
+	}
+
+	return best;
+}
+
+/*
+ * erhai: see the erhai_dp_3392x2400_virtual comment in dp_display.c.
+ *
+ * The virtual 3392x2400 mode exists so a mirrored logical monitor can use the
+ * internal panel's native size.  It is never sent to the sink: swap it for the
+ * sink's own preferred EDID mode here, before the link is configured and
+ * before the DPU is set up.  Everything downstream (link training, DPU INTF,
+ * mixer) then uses the sink mode, and dpu_plane.c scales the 3392x2400
+ * framebuffer down to it.
+ */
+static int msm_dp_bridge_atomic_check(struct drm_bridge *drm_bridge,
+				      struct drm_bridge_state *bridge_state,
+				      struct drm_crtc_state *crtc_state,
+				      struct drm_connector_state *conn_state)
+{
+	const struct drm_display_mode *sink_mode;
+
+	if (!crtc_state->enable ||
+	    !msm_dp_mode_is_virtual(&crtc_state->mode))
+		return 0;
+
+	sink_mode = msm_dp_get_sink_mode(conn_state->connector);
+	if (!sink_mode) {
+		DRM_ERROR("virtual panel mode on a connector without a sink mode\n");
+		return -EINVAL;
+	}
+
+	DRM_DEBUG("erhai: virtual DP mode %dx%d@%d, sending %dx%d@%d\n",
+		  crtc_state->mode.hdisplay, crtc_state->mode.vdisplay,
+		  drm_mode_vrefresh(&crtc_state->mode),
+		  sink_mode->hdisplay, sink_mode->vdisplay,
+		  drm_mode_vrefresh(sink_mode));
+
+	drm_mode_copy(&crtc_state->adjusted_mode, sink_mode);
+
+	return 0;
+}
+
 static const struct drm_bridge_funcs msm_dp_bridge_ops = {
 	.atomic_duplicate_state = drm_atomic_helper_bridge_duplicate_state,
 	.atomic_destroy_state   = drm_atomic_helper_bridge_destroy_state,
@@ -103,6 +259,7 @@ static const struct drm_bridge_funcs msm_dp_bridge_ops = {
 	.atomic_enable          = msm_dp_bridge_atomic_enable,
 	.atomic_disable         = msm_dp_bridge_atomic_disable,
 	.atomic_post_disable    = msm_dp_bridge_atomic_post_disable,
+	.atomic_check = msm_dp_bridge_atomic_check,
 	.mode_valid   = msm_dp_bridge_mode_valid,
 	.get_modes    = msm_dp_bridge_get_modes,
 	.detect       = msm_dp_bridge_detect,

@@ -224,13 +224,10 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 	if (ret)
 		goto phy_en_fail;
 
-	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id], is_bonded_dsi, msm_dsi->phy);
-	if (ret) {
-		pr_err("%s: power on host %d failed, %d\n", __func__, id, ret);
-		goto host_on_fail;
-	}
-
 	if (is_bonded_dsi && msm_dsi1) {
+		/* erhai: slave-first re-enable — arm the slave DSI host
+		 * before the master (matches dsi_mgr_phy_disable, which
+		 * already tears the slave down first). */
 		ret = msm_dsi_host_power_on(msm_dsi1->host,
 				&phy_shared_timings[DSI_1], is_bonded_dsi, msm_dsi1->phy);
 		if (ret) {
@@ -238,6 +235,12 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 							__func__, ret);
 			goto host1_on_fail;
 		}
+	}
+
+	ret = msm_dsi_host_power_on(host, &phy_shared_timings[id], is_bonded_dsi, msm_dsi->phy);
+	if (ret) {
+		pr_err("%s: power on host %d failed, %d\n", __func__, id, ret);
+		goto host_on_fail;
 	}
 
 	/*
@@ -251,9 +254,13 @@ static int dsi_mgr_bridge_power_on(struct drm_bridge *bridge)
 	return 0;
 
 host1_on_fail:
-	msm_dsi_host_power_off(host);
-host_on_fail:
 	dsi_mgr_phy_disable(id);
+	return ret;
+host_on_fail:
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_power_off(msm_dsi1->host);
+	dsi_mgr_phy_disable(id);
+	return ret;
 phy_en_fail:
 	return ret;
 }
@@ -297,13 +304,9 @@ static void dsi_mgr_bridge_pre_enable(struct drm_bridge *bridge,
 		return;
 	}
 
-	ret = msm_dsi_host_enable(host);
-	if (ret) {
-		pr_err("%s: enable host %d failed, %d\n", __func__, id, ret);
-		goto host_en_fail;
-	}
-
 	if (is_bonded_dsi && msm_dsi1) {
+		/* erhai: slave-first re-enable — start the slave video
+		 * engine before the master. */
 		ret = msm_dsi_host_enable(msm_dsi1->host);
 		if (ret) {
 			pr_err("%s: enable host1 failed, %d\n", __func__, ret);
@@ -311,11 +314,22 @@ static void dsi_mgr_bridge_pre_enable(struct drm_bridge *bridge,
 		}
 	}
 
+	ret = msm_dsi_host_enable(host);
+	if (ret) {
+		pr_err("%s: enable host %d failed, %d\n", __func__, id, ret);
+		goto host_en_fail;
+	}
+
 	return;
 
 host1_en_fail:
-	msm_dsi_host_disable(host);
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_disable(msm_dsi1->host);
+	dsi_mgr_bridge_power_off(bridge);
+	return;
 host_en_fail:
+	if (is_bonded_dsi && msm_dsi1)
+		msm_dsi_host_disable(msm_dsi1->host);
 	dsi_mgr_bridge_power_off(bridge);
 }
 
@@ -429,7 +443,7 @@ static enum drm_mode_status dsi_mgr_bridge_mode_valid(struct drm_bridge *bridge,
 		if (dev_pm_opp_get_opp_count(&pdev->dev) != 0)
 			return MODE_CLOCK_RANGE;
 	} else {
-			return MODE_ERROR;
+		return MODE_ERROR;
 	}
 
 	return msm_dsi_host_check_dsc(host, mode);
@@ -496,7 +510,7 @@ int msm_dsi_manager_connector_init(struct msm_dsi *msm_dsi,
 int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
 {
 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
-	struct msm_dsi *msm_dsi0 = dsi_mgr_get_dsi(DSI_0);
+	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
 	struct mipi_dsi_host *host = msm_dsi->host;
 	bool is_read = (msg->rx_buf && msg->rx_len);
 	bool need_sync = (IS_SYNC_NEEDED() && !is_read);
@@ -507,14 +521,14 @@ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
 
 	/* In bonded master case, panel requires the same commands sent to
 	 * both DSI links. Host issues the command trigger to both links
-	 * when DSI_1 calls the cmd transfer function, no matter it happens
-	 * before or after DSI_0 cmd transfer.
+	 * when DSI_0 calls the cmd transfer function, no matter it happens
+	 * before or after DSI_1 cmd transfer.
 	 */
-	if (need_sync && (id == DSI_0))
+	if (need_sync && (id == DSI_1))
 		return is_read ? msg->rx_len : msg->tx_len;
 
-	if (need_sync && msm_dsi0) {
-		ret = msm_dsi_host_xfer_prepare(msm_dsi0->host, msg);
+	if (need_sync && msm_dsi1) {
+		ret = msm_dsi_host_xfer_prepare(msm_dsi1->host, msg);
 		if (ret) {
 			pr_err("%s: failed to prepare non-trigger host, %d\n",
 				__func__, ret);
@@ -533,8 +547,8 @@ int msm_dsi_manager_cmd_xfer(int id, const struct mipi_dsi_msg *msg)
 	msm_dsi_host_xfer_restore(host, msg);
 
 restore_host0:
-	if (need_sync && msm_dsi0)
-		msm_dsi_host_xfer_restore(msm_dsi0->host, msg);
+	if (need_sync && msm_dsi1)
+		msm_dsi_host_xfer_restore(msm_dsi1->host, msg);
 
 	return ret;
 }
@@ -542,14 +556,14 @@ restore_host0:
 bool msm_dsi_manager_cmd_xfer_trigger(int id, u32 dma_base, u32 len)
 {
 	struct msm_dsi *msm_dsi = dsi_mgr_get_dsi(id);
-	struct msm_dsi *msm_dsi0 = dsi_mgr_get_dsi(DSI_0);
+	struct msm_dsi *msm_dsi1 = dsi_mgr_get_dsi(DSI_1);
 	struct mipi_dsi_host *host = msm_dsi->host;
 
-	if (IS_SYNC_NEEDED() && (id == DSI_0))
+	if (IS_SYNC_NEEDED() && (id == DSI_1))
 		return false;
 
-	if (IS_SYNC_NEEDED() && msm_dsi0)
-		msm_dsi_host_cmd_xfer_commit(msm_dsi0->host, dma_base, len);
+	if (IS_SYNC_NEEDED() && msm_dsi1)
+		msm_dsi_host_cmd_xfer_commit(msm_dsi1->host, dma_base, len);
 
 	msm_dsi_host_cmd_xfer_commit(host, dma_base, len);
 

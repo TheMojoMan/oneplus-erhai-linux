@@ -432,12 +432,15 @@ int a6xx_gmu_set_oob(struct a6xx_gmu *gmu, enum a6xx_gmu_oob_state state)
 		if (!ret)
 			break;
 
-		if (completion_done(&a6xx_gpu->base.fault_coredump_done))
+		if (completion_done(&a6xx_gpu->base.fault_coredump_done) ||
+		    READ_ONCE(a6xx_gpu->base.base.recovery_in_progress))
 			break;
 
 		/* We may timeout because the GMU is temporarily wedged from
 		 * pending faults from the GPU and we are taking a devcoredump.
-		 * Wait until the MMU is resumed and try again.
+		 * Wait until the MMU is resumed and try again. A fault dump
+		 * cannot complete while recovery holds gpu->lock, so don't
+		 * wait for one then.
 		 */
 		wait_for_completion(&a6xx_gpu->base.fault_coredump_done);
 	} while (true);
@@ -1338,6 +1341,16 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 	/* Read the slice info on A8x GPUs */
 	a8xx_gpu_get_slice_info(gpu);
 
+	/*
+	 * The vendor driver calls qcom_scm_gpu_init_regs() during GMU boot, after
+	 * the CX gdsc and GMU clocks but before the GMU device runs, requesting
+	 * GPU_ALWAYS_EN and GPU_TSENSE_EN. Upstream a8xx omits it; this TZ appears
+	 * to want GPU_ALWAYS_EN programmed before it will accept the zap PAS auth.
+	 * Not every firmware implements the call, so a failure is non-fatal.
+	 */
+	if (adreno_is_a8xx(adreno_gpu))
+		qcom_scm_gpu_init_regs(BIT(0) | BIT(3));
+
 	/* Set the bus quota to a reasonable value for boot */
 	a6xx_gmu_set_initial_bw(gpu, gmu);
 
@@ -1368,6 +1381,7 @@ int a6xx_gmu_resume(struct a6xx_gpu *a6xx_gpu)
 	ret = a6xx_hfi_start(gmu, status);
 	if (ret)
 		goto disable_irq;
+
 
 	/*
 	 * Turn on the GMU firmware fault interrupt after we know the boot
@@ -2299,7 +2313,6 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 	if (ret)
 		return ret;
 
-	/* Set GMU idle level */
 	gmu->idle_level = (adreno_gpu->info->quirks & ADRENO_QUIRK_IFPC) ?
 		GMU_IDLE_STATE_IFPC : GMU_IDLE_STATE_ACTIVE;
 
@@ -2454,6 +2467,14 @@ int a6xx_gmu_init(struct a6xx_gpu *a6xx_gpu, struct device_node *node)
 	 * crash
 	 */
 	gmu->gxpd = dev_pm_domain_attach_by_name(gmu->dev, "gx");
+	if (PTR_ERR_OR_ZERO(gmu->gxpd) == -EPROBE_DEFER) {
+		ret = -EPROBE_DEFER;
+		goto detach_gxpd;
+	}
+	if (adreno_is_a8xx(adreno_gpu) && IS_ERR(gmu->gxpd))
+		dev_warn(gmu->dev,
+			 "GX power domain not available (%pe): hang recovery cannot collapse GX\n",
+			 gmu->gxpd);
 
 	/* Get the power levels for the GMU and GPU */
 	a6xx_gmu_pwrlevels_probe(gmu);
@@ -2479,7 +2500,10 @@ detach_gxpd:
 	if (!IS_ERR_OR_NULL(gmu->qmp))
 		qmp_put(gmu->qmp);
 
-	device_link_del(link);
+	/*
+	 * The cxpd link is a managed one and cannot be dropped while the GMU is
+	 * registered; it is purged when cxpd, a virt device, is detached below.
+	 */
 
 detach_cxpd:
 	dev_pm_domain_detach(gmu->cxpd, false);
@@ -2492,6 +2516,9 @@ err_mmio:
 err_memory:
 	a6xx_gmu_memory_free(gmu);
 err_put_device:
+	/* Every error above happens after pm_runtime_enable() */
+	pm_runtime_disable(gmu->dev);
+
 	/* Drop reference taken in of_find_device_by_node */
 	put_device(gmu->dev);
 
