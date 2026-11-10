@@ -5,6 +5,8 @@
 
 # Each configuration option enables a list of files.
 
+obj-$(CONFIG_TOUCHSCREEN_NT36523_SPI)	+= nt36523/
+
 wm97xx-ts-y := wm97xx-core.o
 goodix_ts-y := goodix.o goodix_fwupload.o
 

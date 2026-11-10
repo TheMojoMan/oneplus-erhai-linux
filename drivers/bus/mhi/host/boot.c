@@ -280,12 +280,41 @@ static int mhi_fw_load_bhi(struct mhi_controller *mhi_cntrl,
 	mhi_write_reg(mhi_cntrl, base, BHI_IMGTXDB, session_id);
 	read_unlock_bh(pm_lock);
 
-	/* Wait for the image download to complete */
-	ret = wait_event_timeout(mhi_cntrl->state_event,
+	dev_info(&mhi_cntrl->mhi_dev->dev,
+		 "erhai-dbg: fw_load_bhi writes done, entering wait\n");
+
+	dev_info(dev, "erhai-dbg: fw_load_bhi entering wait, timeout_ms=%u dma=%llx len=%u\n",
+		 mhi_cntrl->timeout_ms,
+		 mhi_buf->dma_addr, mhi_buf->len);
+	{
+		u32 wait_ms = mhi_cntrl->timeout_ms;
+
+		/* erhai 7.3 ddtune: cal download ack measured <1 s on the working
+		 * DT; the runtime mhi timeout is 720 s. Cap the fuse to 45 s
+		 * (45x the ack, >3x the worst measured 10.4 s cal). Below the
+		 * cal duration an expiry -> failure teardown -> SoC POR.
+		 */
+		if (wait_ms < 10000)
+			wait_ms = 10000;
+		if (wait_ms > 45000)
+			wait_ms = 45000;
+		ret = wait_event_timeout(mhi_cntrl->state_event,
 			   MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state) ||
 			   mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
 					      BHI_STATUS_MASK, &tx_status) || tx_status,
-			   msecs_to_jiffies(mhi_cntrl->timeout_ms));
+			   msecs_to_jiffies(wait_ms));
+	}
+	dev_info(dev, "erhai-dbg: fw_load_bhi wait done ret=%d tx_status=%u\n",
+		 ret, tx_status);
+	{
+		u32 t2 = 0;
+		int r2;
+
+		r2 = mhi_read_reg_field(mhi_cntrl, base, BHI_STATUS,
+					BHI_STATUS_MASK, &t2);
+		dev_info(dev, "erhai-dbg: post-wait BHI_STATUS re-read r2=%d t2=%u\n",
+			 r2, t2);
+	}
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 		goto invalid_pm_state;
 
@@ -448,6 +477,13 @@ static int mhi_load_image_bhi(struct mhi_controller *mhi_cntrl, const u8 *fw_dat
 	/* Load the firmware into BHI vec table */
 	memcpy(image->mhi_buf->buf, fw_data, size);
 
+	dev_info(&mhi_cntrl->mhi_dev->dev,
+		 "erhai-dbg: BHI img size=%zu magic=%02x%02x%02x%02x\n",
+		 size, ((const u8 *)image->mhi_buf->buf)[0],
+		 ((const u8 *)image->mhi_buf->buf)[1],
+		 ((const u8 *)image->mhi_buf->buf)[2],
+		 ((const u8 *)image->mhi_buf->buf)[3]);
+
 	ret = mhi_fw_load_bhi(mhi_cntrl, &image->mhi_buf[image->entries - 1]);
 	mhi_free_bhi_buffer(mhi_cntrl, image);
 
@@ -482,6 +518,11 @@ void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl)
 	size_t size, fw_sz;
 	int ret;
 
+	/* erhai-dbg: never observed in the cal-stall - confirms the load offer
+	 * itself never reached the WCN (b11, 2026-09-15). */
+	dev_info(dev, "erhai-dbg: fw_load_handler entered, ee=%s\n",
+		 TO_MHI_EXEC_STR(mhi_cntrl->ee));
+
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state)) {
 		dev_err(dev, "Device MHI is not in valid state\n");
 		return;
@@ -492,6 +533,7 @@ void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl)
 			   &mhi_cntrl->serial_number);
 	if (ret)
 		dev_err(dev, "Could not capture serial number via BHI\n");
+	dev_info(dev, "erhai-dbg: handler serial read ret=%d\n", ret);
 
 	/* wait for ready on pass through or any other execution environment */
 	if (!MHI_FW_LOAD_CAPABLE(mhi_cntrl->ee))
@@ -526,6 +568,7 @@ void mhi_fw_load_handler(struct mhi_controller *mhi_cntrl)
 		dev_err(dev, "Error loading firmware: %d\n", ret);
 		goto error_fw_load;
 	}
+	dev_info(dev, "erhai-dbg: request_firmware ret=%d\n", ret);
 
 	size = (mhi_cntrl->fbc_download) ? mhi_cntrl->sbl_size : firmware->size;
 
@@ -598,6 +641,10 @@ fw_load_ready_state:
 	}
 
 	dev_info(dev, "Wait for device to enter SBL or Mission mode\n");
+	dev_info(dev,
+		 "erhai-dbg: fw_load done, exiting handler, dev_state=%s pm_state=%s\n",
+		 mhi_state_str(mhi_cntrl->dev_state),
+		 to_mhi_pm_state_str(mhi_cntrl->pm_state));
 	return;
 
 error_ready_state:

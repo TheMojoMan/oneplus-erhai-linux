@@ -704,8 +704,32 @@ static int qca_check_bdaddr(struct hci_dev *hdev, const struct qca_fw_config *co
 	}
 
 	bda = (struct hci_rp_read_bd_addr *)skb->data;
-	if (!bacmp(&bda->bdaddr, &config->bdaddr))
-		hci_set_quirk(hdev, HCI_QUIRK_USE_BDADDR_PROPERTY);
+
+	/*
+	 * erhai: prefer the firmware/OTP address. The stock brhbtnv20.bin NVM
+	 * carries the WCN7850 default 78:55:00:01:5A:AD in its BD_ADDR tag, and
+	 * erhai.dts no longer overrides it via local-bd-address. Stock Android
+	 * downloads the byte-identical NVM blob and still reports the factory
+	 * OTP address (7C:F0:E5:9B:4B:E4, shared base with the WLAN MLD MAC),
+	 * so a genuine OTP address is simply passed through untouched here.
+	 *
+	 * If the controller instead reports the NVM default (or an all-zero
+	 * address, i.e. no OTP programmed), program a fixed fallback address
+	 * rather than leaving the controller UNCONFIGURED (RAW mode), which
+	 * bluez ignores ("No default controller").
+	 */
+	if (!bacmp(&bda->bdaddr, &config->bdaddr) ||
+	    !bacmp(&bda->bdaddr, BDADDR_ANY)) {
+		static const bdaddr_t erhai_bdaddr_fallback = {
+			.b = { 0x54, 0x55, 0x79, 0xE5, 0xF0, 0x7C },
+		};	/* 7C:F0:E5:79:55:54, LSB-first */
+
+		bt_dev_warn(hdev,
+			    "qca: NVM-default/invalid BD_ADDR, programming erhai fallback %pMR",
+			    &erhai_bdaddr_fallback);
+		kfree_skb(skb);
+		return qca_set_bdaddr(hdev, &erhai_bdaddr_fallback);
+	}
 
 	kfree_skb(skb);
 

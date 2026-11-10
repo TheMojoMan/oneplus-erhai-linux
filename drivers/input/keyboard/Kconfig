@@ -768,4 +768,17 @@ config KEYBOARD_CYPRESS_SF
 	  To compile this driver as a module, choose M here: the
 	  module will be called cypress-sf.
 
+config KEYBOARD_ONEPLUS_POGO
+	tristate "OnePlus Pad 3 magnetic pogo keyboard"
+	depends on SERIAL_DEV_BUS
+	help
+	  Say Y here to enable the OnePlus Pad 3 (erhai) magnetic pogo
+	  keyboard + touchpad. It is a half-duplex one-wire-bus UART device
+	  on a GENI serial engine; this driver attaches as a serdev child of
+	  that UART, decodes the keyboard/media/touchpad stream and reports
+	  standard input events.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called oneplus-pogo-kbd.
+
 endif

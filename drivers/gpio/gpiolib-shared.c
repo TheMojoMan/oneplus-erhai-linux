@@ -453,8 +453,14 @@ int gpio_shared_add_proxy_lookup(struct device *consumer, struct fwnode_handle *
 	struct gpio_shared_ref *ref;
 	const char *dev_id;
 
+	/* erhai: fwnode-only requests (fwnode_gpiod_get_index(), e.g. the cnss2
+	 * port's of_get_named_gpio() shim) pass a NULL consumer device. There is
+	 * no dev_name() to key a proxy machine-lookup on. Return 0 -- not
+	 * upstream's -EOPNOTSUPP -- so the caller falls through to the platform
+	 * lookup, which yields -ENOENT, instead of failing the request.
+	 */
 	if (!consumer)
-		return -EOPNOTSUPP;
+		return 0;
 
 	dev_id = dev_name(consumer);
 

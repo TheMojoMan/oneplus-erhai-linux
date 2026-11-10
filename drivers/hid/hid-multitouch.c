@@ -80,6 +80,7 @@ MODULE_LICENSE("GPL");
 #define MT_QUIRK_YOGABOOK9I		BIT(24)
 #define MT_QUIRK_KEEP_LATENCY_ON_CLOSE	BIT(25)
 #define MT_QUIRK_IGNORE_FEATURE_ID_MISMATCH	BIT(26)
+#define MT_QUIRK_FORCE_BUTTONPAD	BIT(27)
 
 #define MT_INPUTMODE_TOUCHSCREEN	0x02
 #define MT_INPUTMODE_TOUCHPAD		0x03
@@ -186,6 +187,11 @@ struct mt_device {
 	bool is_haptic_touchpad;	/* is this device a haptic touchpad? */
 	bool serial_maybe;	/* need to check for serial protocol */
 
+	/* OnePlus Pad 3 keyboard: magnifier-as-Fn layer, as on its pogo pins */
+	struct input_dev *oneplus_kbd;	/* keyboard node the F-keys go to */
+	bool oneplus_fn_held;		/* magnifier key is down */
+	unsigned long oneplus_fn_down;	/* mt_oneplus_fn_map[] keys sent as F-keys */
+
 	struct list_head applications;
 	struct list_head reports;
 };
@@ -237,6 +243,7 @@ static void mt_post_parse(struct mt_device *td, struct mt_application *app);
 #define MT_CLS_YOGABOOK9I			0x0115
 #define MT_CLS_EGALAX_P80H84			0x0116
 #define MT_CLS_ASUS_ROG_Z13_FOLIO		0x0117
+#define MT_CLS_ONEPLUS_PAD3_KEYBOARD		0x0118
 #define MT_CLS_SIS				0x0457
 
 #define MT_DEFAULT_MAXCONTACT	10
@@ -417,6 +424,11 @@ static const struct mt_class mt_classes[] = {
 			MT_QUIRK_CONFIDENCE |
 			MT_QUIRK_IGNORE_FEATURE_ID_MISMATCH,
 		.export_all_inputs = true },
+	{ .name = MT_CLS_ONEPLUS_PAD3_KEYBOARD,
+		.quirks = MT_QUIRK_ALWAYS_VALID |
+			MT_QUIRK_CONTACT_CNT_ACCURATE |
+			MT_QUIRK_FORCE_BUTTONPAD,
+		.maxcontacts = 5 },
 	{ .name = MT_CLS_VTL,
 		.quirks = MT_QUIRK_ALWAYS_VALID |
 			MT_QUIRK_CONTACT_CNT_ACCURATE |
@@ -1419,10 +1431,12 @@ static int mt_touch_input_configured(struct hid_device *hdev,
 	int ret;
 
 	/*
-	 * HID_DG_CONTACTMAX field is not present on Apple Touch Bars,
-	 * but the maximum contact count is greater than the default.
+	 * HID_DG_CONTACTMAX field is not present on Apple Touch Bars or on
+	 * the OnePlus Pad 3 Bluetooth keyboard, but the class knows the
+	 * maximum contact count.
 	 */
-	if (cls->quirks & MT_QUIRK_APPLE_TOUCHBAR && cls->maxcontacts)
+	if ((cls->quirks & MT_QUIRK_APPLE_TOUCHBAR ||
+	     cls->name == MT_CLS_ONEPLUS_PAD3_KEYBOARD) && cls->maxcontacts)
 		td->maxcontacts = cls->maxcontacts;
 
 	if (!td->maxcontacts)
@@ -1451,6 +1465,13 @@ static int mt_touch_input_configured(struct hid_device *hdev,
 	/* check for clickpads */
 	if ((app->mt_flags & INPUT_MT_POINTER) &&
 	    (app->buttons_count == 1))
+		td->is_buttonpad = true;
+
+	/*
+	 * Some touchpads are physical clickpads but declare two buttons and
+	 * no Win8 Button Type feature.
+	 */
+	if (app->quirks & MT_QUIRK_FORCE_BUTTONPAD)
 		td->is_buttonpad = true;
 
 	if (td->is_buttonpad)
@@ -1521,6 +1542,20 @@ static int mt_input_mapping(struct hid_device *hdev, struct hid_input *hi,
 		return -1;
 
 	/*
+	 * The OnePlus Pad 3 keyboard's Esc key sends Consumer AC Back over
+	 * Bluetooth; its pogo-pin driver maps the same usage to KEY_ESC.
+	 */
+	if (td->mtclass.name == MT_CLS_ONEPLUS_PAD3_KEYBOARD) {
+		if (usage->hid == (HID_UP_CONSUMER | 0x224)) {
+			hid_map_usage_clear(hi, usage, bit, max, EV_KEY, KEY_ESC);
+			return 1;
+		}
+		/* the Fn layer sends its F-keys on the keyboard node */
+		if ((usage->hid & HID_USAGE_PAGE) == HID_UP_KEYBOARD)
+			td->oneplus_kbd = hi->input;
+	}
+
+	/*
 	 * Some Asus keyboard+touchpad devices have the hotkeys defined in the
 	 * touchpad report descriptor. We need to treat these as an array to
 	 * map usages to input keys.
@@ -1580,11 +1615,87 @@ static int mt_input_mapped(struct hid_device *hdev, struct hid_input *hi,
 	return 0;
 }
 
+/*
+ * OnePlus Pad 3 keyboard Fn layer, mirroring its pogo-pin driver
+ * (oneplus-pogo-kbd.c pogo_fn_remap/pogo_fn_gen_remap): the magnifier key
+ * (keyboard usage 0x72, otherwise F23) is the Fn modifier, and Fn + the top
+ * row gives F1..F12 in physical order.
+ */
+#define MT_ONEPLUS_FN_USAGE	(HID_UP_KEYBOARD | 0x72)
+
+static const struct {
+	unsigned int usage;
+	unsigned short key;
+} mt_oneplus_fn_map[] = {
+	{ HID_UP_CONSUMER | 0x70, KEY_F1 },	/* brightness down */
+	{ HID_UP_CONSUMER | 0x6f, KEY_F2 },	/* brightness up */
+	{ HID_UP_KEYBOARD | 0x68, KEY_F3 },	/* F13: mic / settings */
+	{ HID_UP_KEYBOARD | 0x6b, KEY_F4 },	/* F16: touchpad toggle */
+	{ HID_UP_KEYBOARD | 0x6c, KEY_F4 },	/* F17: touchpad toggle */
+	{ HID_UP_KEYBOARD | 0x46, KEY_F5 },	/* PrintScreen: screenshot */
+	{ HID_UP_KEYBOARD | 0x73, KEY_F6 },	/* F24: lock */
+	{ HID_UP_CONSUMER | 0xb6, KEY_F7 },	/* previous song */
+	{ HID_UP_CONSUMER | 0xcd, KEY_F8 },	/* play/pause */
+	{ HID_UP_CONSUMER | 0xb5, KEY_F9 },	/* next song */
+	{ HID_UP_CONSUMER | 0xe2, KEY_F10 },	/* mute */
+	{ HID_UP_CONSUMER | 0xea, KEY_F11 },	/* volume down */
+	{ HID_UP_CONSUMER | 0xe9, KEY_F12 },	/* volume up */
+};
+
+/* returns true if the event was consumed by the Fn layer */
+static bool mt_oneplus_fn_event(struct mt_device *td, struct hid_field *field,
+				struct hid_usage *usage, __s32 value)
+{
+	struct input_dev *kbd = td->oneplus_kbd;
+	struct input_dev *input;
+	int i;
+
+	if (!kbd)
+		return false;
+
+	if (usage->hid == MT_ONEPLUS_FN_USAGE) {
+		td->oneplus_fn_held = !!value;
+		return true;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(mt_oneplus_fn_map); i++) {
+		if (mt_oneplus_fn_map[i].usage != usage->hid)
+			continue;
+
+		if (value) {
+			if (test_bit(i, &td->oneplus_fn_down))
+				return true;	/* already sent as an F-key */
+			if (!td->oneplus_fn_held)
+				return false;
+			/* pressed before Fn: leave it to the stock mapping */
+			input = field->hidinput ? field->hidinput->input : NULL;
+			if (input && usage->type == EV_KEY &&
+			    test_bit(usage->code, input->key))
+				return false;
+			set_bit(i, &td->oneplus_fn_down);
+		} else {
+			/* release what was pressed, even if Fn went up first */
+			if (!test_and_clear_bit(i, &td->oneplus_fn_down))
+				return false;
+		}
+
+		input_event(kbd, EV_KEY, mt_oneplus_fn_map[i].key, !!value);
+		input_sync(kbd);
+		return true;
+	}
+
+	return false;
+}
+
 static int mt_event(struct hid_device *hid, struct hid_field *field,
 				struct hid_usage *usage, __s32 value)
 {
 	struct mt_device *td = hid_get_drvdata(hid);
 	struct mt_report_data *rdata;
+
+	if (td->mtclass.name == MT_CLS_ONEPLUS_PAD3_KEYBOARD &&
+	    mt_oneplus_fn_event(td, field, usage, value))
+		return 1;
 
 	rdata = mt_find_report_data(td, field->report);
 	if (rdata && rdata->is_mt_collection)
@@ -2739,6 +2850,11 @@ static const struct hid_device_id mt_devices[] = {
 		HID_DEVICE(BUS_USB, HID_GROUP_MULTITOUCH_WIN_8,
 			USB_VENDOR_ID_ASUSTEK,
 			USB_DEVICE_ID_ASUSTEK_ROG_Z13_FOLIO) },
+
+	/* OnePlus Pad 3 keyboard over Bluetooth */
+	{ .driver_data = MT_CLS_ONEPLUS_PAD3_KEYBOARD,
+		MT_BT_DEVICE(USB_VENDOR_ID_ONEPLUS,
+			     USB_DEVICE_ID_ONEPLUS_PAD3_KEYBOARD) },
 
 	/* Generic MT device */
 	{ HID_DEVICE(HID_BUS_ANY, HID_GROUP_MULTITOUCH, HID_ANY_ID, HID_ANY_ID) },

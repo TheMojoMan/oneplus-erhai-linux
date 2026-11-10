@@ -182,6 +182,9 @@ static void pmic_glink_altmode_enable_dp(struct pmic_glink_altmode *altmode,
 	struct typec_displayport_data dp_data = {};
 	int ret;
 
+	dev_info(altmode->dev,
+		 "erhai enable_dp request: mode=%u hpd=%u irq=%u\n",
+		 mode, hpd_state, hpd_irq);
 	dp_data.status = DP_STATUS_ENABLED;
 	if (hpd_state)
 		dp_data.status |= DP_STATUS_HPD_STATE;
@@ -331,6 +334,7 @@ static void pmic_glink_altmode_safe(struct pmic_glink_altmode *altmode,
 
 	port->state.alt = NULL;
 	port->state.data = NULL;
+	dev_info(altmode->dev, "erhai safe-mode request\n");
 	port->state.mode = TYPEC_STATE_SAFE;
 
 	ret = typec_mux_set(port->typec_mux, &port->state);
@@ -351,6 +355,12 @@ static void pmic_glink_altmode_worker(struct work_struct *work)
 	struct pmic_glink_altmode_port *alt_port = work_to_altmode_port(work);
 	struct pmic_glink_altmode *altmode = alt_port->altmode;
 	enum drm_connector_status conn_status;
+	int ret;
+
+	dev_info(altmode->dev,
+		 "erhai altmode worker: port=%u svid=%04x mux_ctrl=%u mode=%u hpd=%u irq=%u\n",
+		 alt_port->index, alt_port->svid, alt_port->mux_ctrl,
+		 alt_port->mode, alt_port->hpd_state, alt_port->hpd_irq);
 
 	typec_switch_set(alt_port->typec_switch, alt_port->orientation);
 
@@ -390,7 +400,12 @@ static void pmic_glink_altmode_worker(struct work_struct *work)
 		pmic_glink_altmode_safe(altmode, alt_port);
 	}
 
-	pmic_glink_altmode_request(altmode, ALTMODE_PAN_ACK, alt_port->index);
+	ret = pmic_glink_altmode_request(altmode, ALTMODE_PAN_ACK, alt_port->index);
+	if (ret)
+		dev_err(altmode->dev, "erhai altmode: PAN ACK request failed: %d\n", ret);
+	dev_info(altmode->dev,
+		 "erhai altmode worker done port=%u mux_ctrl=%u svid=%04x\n",
+		 alt_port->index, alt_port->mux_ctrl, alt_port->svid);
 }
 
 static enum typec_orientation pmic_glink_altmode_orientation(unsigned int orientation)
@@ -451,6 +466,9 @@ static void pmic_glink_altmode_sc8180xp_notify(struct pmic_glink_altmode *altmod
 	alt_port->mode = mode;
 	alt_port->hpd_state = hpd_state;
 	alt_port->hpd_irq = hpd_irq;
+	dev_info(altmode->dev,
+		 "erhai altmode(sc8180x) notify: port=%u orient=%u mux=%u mode=%u hpd=%u irq=%u svid=%04x\n",
+		 port, orientation, mux, mode, hpd_state, hpd_irq, svid);
 	queue_work(system_freezable_wq, &alt_port->work);
 }
 
@@ -488,6 +506,9 @@ static void pmic_glink_altmode_sc8280xp_notify(struct pmic_glink_altmode *altmod
 	alt_port->orientation = pmic_glink_altmode_orientation(orientation);
 	alt_port->svid = svid;
 	alt_port->mux_ctrl = notify->mux_ctrl;
+	dev_info(altmode->dev,
+		 "erhai altmode(sc8280x) notify: port=%u orient=%u svid=%04x mux_ctrl=%u\n",
+		 port, orientation, svid, notify->mux_ctrl);
 
 	if (svid == USB_TYPEC_DP_SID) {
 		dp = &notify->extended_data.dp;
@@ -514,6 +535,10 @@ static void pmic_glink_altmode_callback(const void *data, size_t len, void *priv
 
 	opcode = le32_to_cpu(hdr->opcode) & 0xff;
 	svid = le32_to_cpu(hdr->opcode) >> 16;
+
+	dev_info_ratelimited(altmode->dev,
+			     "erhai altmode: rx opcode=%#x svid=%#x\n",
+			     opcode, svid);
 
 	switch (opcode) {
 	case USBC_CMD_WRITE_REQ:
@@ -565,6 +590,35 @@ static const struct of_device_id pmic_glink_altmode_of_quirks[] = {
 	{ .compatible = "qcom,sc8180x-pmic-glink", .data = (void *)PMIC_GLINK_OWNER_USBC },
 	{}
 };
+
+/*
+ * Returns true if the connector graph references an available remote device
+ * carrying @prop ("mode-switch"/"orientation-switch"). Used to distinguish
+ * "this connector genuinely has no mux/switch" (proceed) from "the mux/switch
+ * device exists but has not registered yet" (defer) — the latter is a probe
+ * ordering race on platforms where the switch is an i2c device (wcd939x-usbss)
+ * that probes after pmic_glink spawns this altmode aux device.
+ */
+static bool pmic_glink_altmode_fwnode_has_switch(struct fwnode_handle *fwnode,
+						 const char *prop)
+{
+	struct fwnode_handle *ep, *rpp;
+	bool found = false;
+
+	fwnode_graph_for_each_endpoint(fwnode, ep) {
+		rpp = fwnode_graph_get_remote_port_parent(ep);
+		if (rpp && fwnode_device_is_available(rpp) &&
+		    fwnode_property_present(rpp, prop))
+			found = true;
+		fwnode_handle_put(rpp);
+		if (found) {
+			fwnode_handle_put(ep);
+			break;
+		}
+	}
+
+	return found;
+}
 
 static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 				    const struct auxiliary_device_id *id)
@@ -632,6 +686,13 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 		alt_port->tbt_alt.active = 1;
 
 		alt_port->typec_mux = fwnode_typec_mux_get(fwnode);
+		if (!alt_port->typec_mux &&
+		    pmic_glink_altmode_fwnode_has_switch(fwnode, "mode-switch")) {
+			fwnode_handle_put(fwnode);
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "mode-switch in graph not registered yet for port %d\n",
+					     port);
+		}
 		if (IS_ERR(alt_port->typec_mux)) {
 			fwnode_handle_put(fwnode);
 			return dev_err_probe(dev, PTR_ERR(alt_port->typec_mux),
@@ -662,6 +723,13 @@ static int pmic_glink_altmode_probe(struct auxiliary_device *adev,
 		}
 
 		alt_port->typec_switch = fwnode_typec_switch_get(fwnode);
+		if (!alt_port->typec_switch &&
+		    pmic_glink_altmode_fwnode_has_switch(fwnode, "orientation-switch")) {
+			fwnode_handle_put(fwnode);
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "orientation-switch in graph not registered yet for port %d\n",
+					     port);
+		}
 		if (IS_ERR(alt_port->typec_switch)) {
 			fwnode_handle_put(fwnode);
 			return dev_err_probe(dev, PTR_ERR(alt_port->typec_switch),

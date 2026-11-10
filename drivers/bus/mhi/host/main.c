@@ -170,9 +170,6 @@ EXPORT_SYMBOL_GPL(mhi_get_mhi_state);
 
 void mhi_soc_reset(struct mhi_controller *mhi_cntrl)
 {
-	int __maybe_unused ret;
-	u32 tmp;
-
 	if (mhi_cntrl->reset) {
 		mhi_cntrl->reset(mhi_cntrl);
 		return;
@@ -181,9 +178,6 @@ void mhi_soc_reset(struct mhi_controller *mhi_cntrl)
 	/* Generic MHI SoC reset */
 	mhi_write_reg(mhi_cntrl, mhi_cntrl->regs, MHI_SOC_RESET_REQ_OFFSET,
 		      MHI_SOC_RESET_REQ);
-	/* Flush the posted write to the device (ignore return value) */
-	ret = mhi_read_reg(mhi_cntrl, mhi_cntrl->regs, MHI_SOC_RESET_REQ_OFFSET,
-			   &tmp);
 }
 EXPORT_SYMBOL_GPL(mhi_soc_reset);
 
@@ -394,9 +388,18 @@ void mhi_create_devices(struct mhi_controller *mhi_cntrl)
 			mhi_dev->dl_chan_id = mhi_chan->chan;
 			break;
 		default:
-			dev_err(dev, "Direction not supported\n");
+			/* erhai/WCN7880: the cnss-1:1 channel config carries
+			 * DMA_BIDIRECTIONAL ADSP offload channels (50/51/70/71)
+			 * that mainline MHI cannot represent as xfer devices.
+			 * Downstream qcom MHI handles them specially; we don't
+			 * use them at all -- skip instead of aborting the walk
+			 * (the abort dropped every channel after the first
+			 * bidirectional one).
+			 */
+			dev_dbg(dev, "chan %d (%s): direction not supported, skipping\n",
+				mhi_chan->chan, mhi_chan->name);
 			put_device(&mhi_dev->dev);
-			return;
+			continue;
 		}
 
 		get_device(&mhi_dev->dev);
@@ -849,6 +852,11 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 				MHI_TRE_GET_EV_LINKSPEED(local_rp);
 			link_info->target_link_width =
 				MHI_TRE_GET_EV_LINKWIDTH(local_rp);
+			/* Echoed back to the device in the bw_scale ack (the
+			 * controller's MHI_CB_BW_REQ handler rings chan-126's db).
+			 */
+			link_info->sequence_num =
+				MHI_TRE_GET_EV_BW_SEQ(local_rp);
 			write_unlock_irq(&mhi_cntrl->pm_lock);
 			dev_dbg(dev, "Received BW_REQ event\n");
 			mhi_cntrl->status_cb(mhi_cntrl, MHI_CB_BW_REQ);

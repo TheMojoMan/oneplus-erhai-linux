@@ -7,9 +7,18 @@ config PCI_PWRCTRL
 	tristate
 
 config PCI_PWRCTRL_PWRSEQ
-	tristate
+	tristate "PCI Power Control for power-sequenced devices (WCN WiFi/BT)"
 	select POWER_SEQUENCING
 	select PCI_PWRCTRL
+	help
+	  Say Y here to build the PCI power-control glue for devices that
+	  need a power sequencer (e.g. Qualcomm WCN WiFi/BT over PCIe) into
+	  the kernel. Building it in (=y) is required when the PCIe host
+	  controller is built-in: the pwrctrl ->power_on hook must be present
+	  during the controller's boot-time bus scan, otherwise the endpoint
+	  is never powered and link training fails ("Device not found").
+	  This symbol is normally select-ed as a module by ath11k/ath12k; the
+	  prompt lets it be forced built-in.
 
 config PCI_PWRCTRL_GENERIC
 	tristate "Generic PCI Power Control driver for PCI slots and endpoints"

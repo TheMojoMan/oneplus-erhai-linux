@@ -34,6 +34,8 @@ struct qcom_q6v5 {
 	spinlock_t handover_lock;
 	bool handover_irq_enabled;
 	bool handover_issued;
+	/* erhai: a repeated handover signal has already been reported */
+	bool handover_repeat_reported;
 
 	struct completion start_done;
 	struct completion stop_done;

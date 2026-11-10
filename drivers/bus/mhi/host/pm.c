@@ -173,7 +173,7 @@ int mhi_ready_state_transition(struct mhi_controller *mhi_cntrl)
 	enum mhi_pm_state cur_state;
 	struct device *dev = &mhi_cntrl->mhi_dev->dev;
 	u32 interval_us = 25000; /* poll register field every 25 milliseconds */
-	u32 timeout_ms;
+	u32 p1, p2;
 	int ret, i;
 
 	/* Check if device entered error state */
@@ -183,22 +183,42 @@ int mhi_ready_state_transition(struct mhi_controller *mhi_cntrl)
 	}
 
 	/* Wait for RESET to be cleared and READY bit to be set by the device */
-	ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
-				 MHICTRL_RESET_MASK, 0, interval_us,
-				 mhi_cntrl->timeout_ms);
-	if (ret) {
-		dev_err(dev, "Device failed to clear MHI Reset\n");
-		return ret;
-	}
+	dev_info(dev, "erhai-dbg: ready_transition entry, dev_state=%s\n",
+		 mhi_state_str(mhi_cntrl->dev_state));
+	{
+		p1 = mhi_cntrl->timeout_ms;
+		p2 = mhi_cntrl->timeout_ms;
 
-	timeout_ms = mhi_cntrl->ready_timeout_ms ?
-		mhi_cntrl->ready_timeout_ms : mhi_cntrl->timeout_ms;
-	ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHISTATUS,
-				 MHISTATUS_READY_MASK, 1, interval_us,
-				 timeout_ms);
-	if (ret) {
-		dev_err(dev, "Device failed to enter MHI Ready\n");
-		return ret;
+		/* erhai 7.3 ddtune: ready transition measured same-second on the
+		 * working DT; runtime timeout is 720 s. Cap both polls to 45 s
+		 * (never below 10 s). */
+		if (p1 < 10000)
+			p1 = 10000;
+		if (p1 > 45000)
+			p1 = 45000;
+		ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
+					 MHICTRL_RESET_MASK, 0, interval_us, p1);
+		if (ret) {
+			dev_err(dev, "Device failed to clear MHI Reset\n");
+			return ret;
+		}
+		dev_info(dev, "erhai-dbg: ready_transition poll RESET done ret=%d\n",
+			 ret);
+
+		if (mhi_cntrl->ready_timeout_ms)
+			p2 = mhi_cntrl->ready_timeout_ms;
+		if (p2 < 10000)
+			p2 = 10000;
+		if (p2 > 45000)
+			p2 = 45000;
+		ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHISTATUS,
+					 MHISTATUS_READY_MASK, 1, interval_us, p2);
+		if (ret) {
+			dev_err(dev, "Device failed to enter MHI Ready\n");
+			return ret;
+		}
+		dev_info(dev, "erhai-dbg: ready_transition poll READY done ret=%d\n",
+			 ret);
 	}
 
 	dev_dbg(dev, "Device in READY State\n");
@@ -651,13 +671,21 @@ static void mhi_pm_sys_error_transition(struct mhi_controller *mhi_cntrl)
 
 	/* Trigger MHI RESET so that the device will not access host memory */
 	if (reset_device) {
+		u32 in_reset = -1;
+		unsigned long timeout = msecs_to_jiffies(mhi_cntrl->timeout_ms);
+
 		dev_dbg(dev, "Triggering MHI Reset in device\n");
 		mhi_set_mhi_state(mhi_cntrl, MHI_STATE_RESET);
 
 		/* Wait for the reset bit to be cleared by the device */
-		ret = mhi_poll_reg_field(mhi_cntrl, mhi_cntrl->regs, MHICTRL,
-				 MHICTRL_RESET_MASK, 0, 25000, mhi_cntrl->timeout_ms);
-		if (ret) {
+		ret = wait_event_timeout(mhi_cntrl->state_event,
+					 mhi_read_reg_field(mhi_cntrl,
+							    mhi_cntrl->regs,
+							    MHICTRL,
+							    MHICTRL_RESET_MASK,
+							    &in_reset) ||
+					!in_reset, timeout);
+		if (!ret || in_reset) {
 			dev_err(dev, "Device failed to exit MHI Reset state\n");
 			write_lock_irq(&mhi_cntrl->pm_lock);
 			cur_state = mhi_tryset_pm_state(mhi_cntrl,
@@ -816,6 +844,9 @@ void mhi_pm_st_worker(struct work_struct *work)
 			write_lock_irq(&mhi_cntrl->pm_lock);
 			mhi_cntrl->ee = MHI_EE_SBL;
 			write_unlock_irq(&mhi_cntrl->pm_lock);
+			dev_info(&mhi_cntrl->mhi_dev->dev,
+				 "erhai-dbg: st_worker TRANSITION_SBL reached, ee=%s\n",
+				 TO_MHI_EXEC_STR(mhi_cntrl->ee));
 			/*
 			 * The MHI devices are only created when the client
 			 * device switches its Execution Environment (EE) to
@@ -828,6 +859,8 @@ void mhi_pm_st_worker(struct work_struct *work)
 			mhi_uevent_notify(mhi_cntrl, mhi_cntrl->ee);
 			break;
 		case DEV_ST_TRANSITION_MISSION_MODE:
+			dev_info(&mhi_cntrl->mhi_dev->dev,
+				 "erhai-dbg: st_worker TRANSITION_MISSION_MODE entered\n");
 			mhi_pm_mission_mode_transition(mhi_cntrl);
 			break;
 		case DEV_ST_TRANSITION_FP:
@@ -914,39 +947,22 @@ int mhi_pm_suspend(struct mhi_controller *mhi_cntrl)
 		return -EIO;
 	}
 
-	/*
-	 * For devices without M3 support, just set the host state to M3. This
-	 * host transition is needed to prevent the client drivers from
-	 * accessing the device during suspend.
-	 */
-	if (mhi_cntrl->no_m3) {
-		new_state = mhi_tryset_pm_state(mhi_cntrl, MHI_PM_M3);
-		write_unlock_irq(&mhi_cntrl->pm_lock);
-		if (new_state != MHI_PM_M3) {
-			dev_err(dev,
-				"Error setting to PM state: %s from: %s\n",
-				to_mhi_pm_state_str(MHI_PM_M3),
-				to_mhi_pm_state_str(mhi_cntrl->pm_state));
-			return -EIO;
-		}
-	} else {
-		/* Set MHI to M3 and wait for completion */
-		mhi_set_mhi_state(mhi_cntrl, MHI_STATE_M3);
-		write_unlock_irq(&mhi_cntrl->pm_lock);
-		dev_dbg(dev, "Waiting for M3 completion\n");
+	/* Set MHI to M3 and wait for completion */
+	mhi_set_mhi_state(mhi_cntrl, MHI_STATE_M3);
+	write_unlock_irq(&mhi_cntrl->pm_lock);
+	dev_dbg(dev, "Waiting for M3 completion\n");
 
-		ret = wait_event_timeout(mhi_cntrl->state_event,
-					 mhi_cntrl->dev_state == MHI_STATE_M3 ||
-					 MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state),
-					 msecs_to_jiffies(mhi_cntrl->timeout_ms));
+	ret = wait_event_timeout(mhi_cntrl->state_event,
+				 mhi_cntrl->dev_state == MHI_STATE_M3 ||
+				 MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state),
+				 msecs_to_jiffies(mhi_cntrl->timeout_ms));
 
-		if (!ret || MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state)) {
-			dev_err(dev,
-				"Did not enter M3 state, MHI state: %s, PM state: %s\n",
-				mhi_state_str(mhi_cntrl->dev_state),
-				to_mhi_pm_state_str(mhi_cntrl->pm_state));
-			return -EIO;
-		}
+	if (!ret || MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state)) {
+		dev_err(dev,
+			"Did not enter M3 state, MHI state: %s, PM state: %s\n",
+			mhi_state_str(mhi_cntrl->dev_state),
+			to_mhi_pm_state_str(mhi_cntrl->pm_state));
+		return -EIO;
 	}
 
 	/* Notify clients about entering LPM */
@@ -978,8 +994,7 @@ static int __mhi_pm_resume(struct mhi_controller *mhi_cntrl, bool force)
 	if (MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))
 		return -EIO;
 
-	if (!mhi_cntrl->no_m3 &&
-	    mhi_get_mhi_state(mhi_cntrl) != MHI_STATE_M3) {
+	if (mhi_get_mhi_state(mhi_cntrl) != MHI_STATE_M3) {
 		dev_warn(dev, "Resuming from non M3 state (%s)\n",
 			 mhi_state_str(mhi_get_mhi_state(mhi_cntrl)));
 		if (!force)
@@ -1003,15 +1018,6 @@ static int __mhi_pm_resume(struct mhi_controller *mhi_cntrl, bool force)
 			 to_mhi_pm_state_str(MHI_PM_M3_EXIT),
 			 to_mhi_pm_state_str(mhi_cntrl->pm_state));
 		return -EIO;
-	}
-
-	/*
-	 * For devices without M3 support, just move the host back to M0
-	 * directly.
-	 */
-	if (mhi_cntrl->no_m3) {
-		write_unlock_irq(&mhi_cntrl->pm_lock);
-		return mhi_pm_m0_transition(mhi_cntrl);
 	}
 
 	/* Set MHI to M0 and wait for completion */

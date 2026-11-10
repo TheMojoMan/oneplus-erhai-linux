@@ -15,9 +15,11 @@
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/sort.h>
+#include <linux/iommu-dma.h>
 #include <linux/of_platform.h>
 #include <linux/rpmsg.h>
 #include <linux/scatterlist.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <uapi/misc/fastrpc.h>
@@ -70,6 +72,8 @@
 #define ADSP_MMAP_HEAP_ADDR  4
 /* MAP static DMA buffer on DSP User PD */
 #define ADSP_MMAP_DMA_BUFFER  6
+/* Add memory to static PD pool protection thru hypervisor */
+#define ADSP_MMAP_REMOTE_HEAP_ADDR  8
 /* Add memory to userPD pool, for user heap */
 #define ADSP_MMAP_ADD_PAGES 0x1000
 /* Add memory to userPD pool, for LLC heap */
@@ -79,6 +83,101 @@
 /* MAX NUMBER of DSP ATTRIBUTES SUPPORTED */
 #define FASTRPC_MAX_DSP_ATTRIBUTES (256)
 #define FASTRPC_MAX_DSP_ATTRIBUTES_LEN (sizeof(u32) * FASTRPC_MAX_DSP_ATTRIBUTES)
+
+/*
+ * erhai: a DSP-side unmap failure (FASTRPC_RMID_INIT_UNMAP for a coherent
+ * buffer, FASTRPC_RMID_INIT_MEM_UNMAP for a mapped dma-buf) means the DSP no
+ * longer has that mapping -- typically because the PD was torn down while it
+ * still had entries.  Upstream keeps the buffer/mapping on the host list in
+ * that case, so it is only released when the client closes /dev/fastrpc-*.
+ * A long-lived client (Qualcomm's cdsprpcd never closes the node) therefore
+ * leaks its SMMU/IOVA space request after request and the device ends up in
+ * the permanent "failed to map buffer, fd = N" state documented in
+ * npu-MEMORY-2026-09-20.md (continuation 10: 10 x fastrpc_test -d 3 churn ->
+ * every later NPU model load fails with -100201 until the CDSP is restarted).
+ *
+ * With this enabled the host-side resources are released right away, which
+ * makes the mapping space self-healing.  The reason upstream does not do it is
+ * the (unproven) possibility that the DSP still refers to the memory the unmap
+ * failed on, and the vendor OxygenOS kernel parks the mapping for the same
+ * reason -- and the 2026-09-21 b72 measurement proved the deviation fixes
+ * nothing here (the stranded space is not in this path at all; see
+ * npu-MEMORY-2026-09-21.md continuation 21 + 25).  The DEFAULT is therefore
+ * upstream/vendor behaviour (park the mapping); set
+ * fastrpc.release_failed_unmap=1 to re-enable the b65 deviation without
+ * rebuilding the kernel.
+ */
+static bool release_failed_unmap;
+module_param(release_failed_unmap, bool, 0644);
+MODULE_PARM_DESC(release_failed_unmap,
+	"erhai: release the host buffer/mapping when the DSP refuses to unmap it (default 0 = upstream/vendor)");
+
+/*
+ * erhai: release a closing client's IOVA-bearing resources at fd close.
+ *
+ * WHY (measured, npu-MEMORY-2026-09-21.md continuations 25 + 26): a user invoke
+ * whose wait is interrupted (the client's thread is killed at process exit ->
+ * -ERESTARTSYS) is left in `fl->pending` WITH the reference
+ * `fastrpc_context_alloc()` took on `fastrpc_user`, and that reference is only
+ * released by `fastrpc_context_free()` -- which needs the *other* context
+ * reference (the one `fastrpc_invoke_send()` took for the DSP's reply) to be
+ * dropped first.  The result is an immortal context, so
+ * `fastrpc_user_free()` never runs for that client and its `init_mem`, its
+ * `fl->maps` and its `fl->mmaps` keep their IOVA ranges forever: measured as
+ * one copy per NPU model load (~49 MiB), which is what exhausts the 4 GiB CDSP
+ * arena after ~20 loads ("failed to map buffer, fd = N").
+ *
+ * The fix is not to make the context die sooner (it must stay alive until the
+ * DSP's reply arrives, exactly as upstream intends) but to release the
+ * *resources* of a client that is gone: by the time this runs
+ * `fastrpc_release_current_dsp_process()` has destroyed the DSP-side process,
+ * so no in-flight invoke of this client can still touch them.  The leftover
+ * contexts are ALSO unlinked and their extra reference dropped, so the client's
+ * `fastrpc_user` is reclaimed as soon as the late reply lands instead of never.
+ *
+ * `erhai_release_at_close=0` restores upstream behaviour without a rebuild.
+ */
+static bool erhai_release_at_close = true;
+module_param(erhai_release_at_close, bool, 0644);
+MODULE_PARM_DESC(erhai_release_at_close,
+	"erhai: release a closing fastrpc client's buffers/mappings at fd close even if an interrupted context still holds a reference (default 1)");
+
+/*
+ * erhai (b76): name what the CDSP IOVA arena still holds that no live client
+ * owns.  The b75 verification (npu-MEMORY-2026-09-21.md) brought the per-load
+ * leak down from ~50 MiB to ~0.14 MiB / ~18 ranges and left exactly that residue
+ * unnamed: at every DSP process creation fastrpc now prints what its live
+ * clients account for, and iommu_dma_iova_residue() prints the domain's own
+ * total, the difference, a size histogram and the biggest holders.
+ *
+ * Both knobs are runtime-only (no rebuild): erhai_residue_report=0 silences the
+ * whole reconciliation, erhai_residue_holders=N limits the holder list.
+ */
+static bool erhai_residue_report = true;
+module_param(erhai_residue_report, bool, 0644);
+MODULE_PARM_DESC(erhai_residue_report,
+	"erhai: reconcile the IOVA arena against the live clients at every DSP process creation (default 1)");
+static unsigned int erhai_residue_holders = 8;
+module_param(erhai_residue_holders, uint, 0644);
+MODULE_PARM_DESC(erhai_residue_holders,
+	"erhai: how many of the largest IOVA ranges that reconciliation lists (0 = summary + histogram only, max 32)");
+
+/*
+ * erhai (b77): print the ALLOC side of the CDSP IOVA books.
+ *
+ * b76 could only name the SIZE of the post-b75 residue (96 % 4-KiB ranges,
+ * ~19 per HTP model load) because the `iova[...]` stream printed frees only, and
+ * one-page allocations cannot be attributed from free-side deltas (the next
+ * invoke's allocation immediately follows).  With this on, every allocation that
+ * can hold an IOVA range -- coherent buffers and dma-buf mappings -- prints its
+ * call site and size, and the free paths print the same call-site string, so
+ * `allocs per tag - frees per tag` names the path that never returns its ranges.
+ * Turn it off (`erhai_alloc_report=0`) to get exactly the b76 log volume.
+ */
+static bool erhai_alloc_report = true;
+module_param(erhai_alloc_report, bool, 0644);
+MODULE_PARM_DESC(erhai_alloc_report,
+	"erhai: print every IOVA-bearing allocation with its call site (default 1; 0 == b76 logging)");
 
 /* Retrives number of input buffers from the scalars parameter */
 #define REMOTE_SCALARS_INBUFS(sc)	(((sc) >> 16) & 0x0ff)
@@ -230,6 +329,12 @@ struct fastrpc_buf {
 	/* mmap support */
 	struct list_head node; /* list of user requested mmaps */
 	uintptr_t raddr;
+	/*
+	 * erhai (b77): the call site that allocated it.  Every allocation that
+	 * can hold an IOVA range carries one, and the free path prints it again,
+	 * so `allocs per tag - frees per tag` closes the arena's books.
+	 */
+	const char *atag;
 };
 
 struct fastrpc_dma_buf_attachment {
@@ -252,6 +357,21 @@ struct fastrpc_map {
 	u64 raddr;
 	u32 attr;
 	struct kref refcount;
+	/* erhai (b77): which path attached it: "ctx", "user", "init-file" */
+	const char *kind;
+	/*
+	 * erhai (b33): set when this map was created BY a context (kind "ctx",
+	 * fastrpc_create_maps()), i.e. when the map's single reference belongs
+	 * to that context and is dropped in fastrpc_context_free().  Such a map
+	 * is also linked in fl->maps, but it must NOT be put by the fd-close
+	 * release: doing that freed the map while the (parked) context still
+	 * referenced it, and the context's own put then decremented zero --
+	 * "refcount_t: underflow; use-after-free" from fastrpc_context_free
+	 * (inlined fastrpc_map_put) at every shutdown that had an interrupted
+	 * invoke.  A map the context merely REFERENCED (a lookup with take_ref,
+	 * kind "user"/"init-file") keeps owner_ctx == NULL and is released here.
+	 */
+	struct fastrpc_invoke_ctx *owner_ctx;
 };
 
 struct fastrpc_invoke_ctx {
@@ -271,6 +391,13 @@ struct fastrpc_invoke_ctx {
 	bool is_work_done;
 	/* process updates poll memory instead of glink response */
 	bool is_polled;
+	/*
+	 * erhai: the reference taken in fastrpc_invoke_send() may be put only
+	 * ONCE -- a duplicated/replayed glink COMPLETE must not free a context
+	 * that is still linked in fastrpc_user->pending (use-after-free; see
+	 * fastrpc_rpmsg_callback()).
+	 */
+	unsigned long reply_put_done;
 	struct kref refcount;
 	struct list_head node; /* list of ctxs */
 	struct completion work;
@@ -312,20 +439,27 @@ struct fastrpc_channel_ctx {
 	struct kref refcount;
 	/* Flag if dsp attributes are cached */
 	bool valid_attributes;
-	/* Flag if audio PD init mem was allocated */
-	bool audio_init_mem;
-	/* Audio PD reserved remote heap region */
-	phys_addr_t remote_heap_addr;
-	u64 remote_heap_size;
 	u32 dsp_attributes[FASTRPC_MAX_DSP_ATTRIBUTES];
 	struct fastrpc_device *secure_fdevice;
 	struct fastrpc_device *fdevice;
+	struct fastrpc_buf *remote_heap;
 	struct list_head invoke_interrupted_mmaps;
 	bool secure;
 	bool unsigned_support;
 	bool poll_mode_supported;
 	/* Per-channel sequence counter; incremented on every context allocation */
 	atomic_t ctx_seq;
+	/*
+	 * erhai (b33 diagnostic): how many references this channel ever handed
+	 * out (fastrpc_channel_ctx_get) and how many were given back
+	 * (fastrpc_channel_ctx_put).  gets - puts must always equal
+	 * kref_read(&refcount); a put on a channel whose refcount is already 0
+	 * is the "refcount_t: underflow; use-after-free" of 2026-10-23, and
+	 * these two numbers say whether a reference was LOST (gets too small) or
+	 * PUT TWICE (puts too large) -- and the put site is printed with %pS.
+	 */
+	atomic_t erhai_gets;
+	atomic_t erhai_puts;
 	u64 dma_mask;
 	const struct fastrpc_soc_data *soc_data;
 };
@@ -341,6 +475,16 @@ struct fastrpc_user {
 	struct list_head maps;
 	struct list_head pending;
 	struct list_head mmaps;
+	/*
+	 * erhai: this client's own mmaps that an interrupted invoke parked --
+	 * per user, not per channel: upstream keeps them in
+	 * cctx->invoke_interrupted_mmaps, where a client can only be attributed
+	 * by peeking at buf->fl and where the add (fl->lock) and the drain
+	 * (cctx->lock / none) are not mutually exclusive.  Here every access is
+	 * under fl->lock and the buffers are freed at fd close (see
+	 * fastrpc_user_release_buffers()).
+	 */
+	struct list_head interrupted_mmaps;
 
 	struct fastrpc_channel_ctx *cctx;
 	struct fastrpc_session_ctx *sctx;
@@ -377,6 +521,375 @@ static inline u64 fastrpc_sid_offset(struct fastrpc_channel_ctx *cctx,
 	return (u64)sctx->sid << cctx->soc_data->sid_pos;
 }
 
+/*
+ * erhai: FastRPC mapping-footprint accounting for the CDSP mapping-space
+ * exhaustion (see npu-MEMORY-2026-09-21.md).  Every map belongs to exactly one
+ * client (fastrpc_user) and lives on that client's `maps` list, so walking the
+ * list reports the footprint directly -- there are no counters that could drift
+ * out of sync with it.  Two questions this answers:
+ *
+ *  - how much does a client still hold when it EXITS?  A mapping that outlives
+ *    its client is a leak, and the number should be 0 for every client.
+ *  - how much does a client already hold when a LARGE attach fails?  The CDSP
+ *    device is limited to a 32-bit DMA mask (dma_addr_bits_cdsp = 32 for the
+ *    "qcom,fastrpc" compatible), so its IOVA arena is at most 4 GB; the held
+ *    bytes at the moment of -ENOMEM are the floor of what is really consumed.
+ */
+static void fastrpc_map_footprint(struct fastrpc_user *fl,
+				  unsigned int *nmaps, u64 *bytes)
+{
+	struct fastrpc_map *map;
+	unsigned long flags;
+
+	*nmaps = 0;
+	*bytes = 0;
+	if (!fl)
+		return;
+
+	spin_lock_irqsave(&fl->lock, flags);
+	list_for_each_entry(map, &fl->maps, node) {
+		(*nmaps)++;
+		/*
+		 * erhai: `size` (= what was actually mapped in the IOVA space),
+		 * NOT `len` (the length the client asked for, which can be far
+		 * smaller than the buffer -- summing `len` made a 4 GB arena
+		 * look empty while a 601 MB mapping failed; see
+		 * npu-MEMORY-2026-09-21.md continuation 23).
+		 */
+		*bytes += map->size;
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+}
+
+/*
+ * erhai: full per-client IOVA footprint.  `maps` are the dma-buf mappings, but
+ * a client also consumes IOVA through `mmaps` (the coherent buffers it asked the
+ * kernel to allocate via the MAP ioctls) and through every pending invocation
+ * context's own coherent buffer, plus `init_mem`.  Those were invisible before,
+ * which is why the arena looked empty at the wall.
+ */
+static void fastrpc_dump_client_iova(struct fastrpc_channel_ctx *cctx,
+				     struct device *dev)
+{
+	struct fastrpc_user *user;
+
+	spin_lock(&cctx->lock);
+	list_for_each_entry(user, &cctx->users, user) {
+		struct fastrpc_invoke_ctx *ctx;
+		struct fastrpc_buf *buf;
+		struct fastrpc_map *map;
+		unsigned long uflags;
+		u64 maps_sz = 0, maps_len = 0, mmaps_sz = 0, pend_sz = 0;
+		unsigned int nmaps = 0, nmmaps = 0, npend = 0;
+
+		spin_lock_irqsave(&user->lock, uflags);
+		list_for_each_entry(map, &user->maps, node) {
+			nmaps++;
+			maps_sz += map->size;
+			maps_len += map->len;
+		}
+		list_for_each_entry(buf, &user->mmaps, node) {
+			nmmaps++;
+			mmaps_sz += buf->size;
+		}
+		list_for_each_entry(ctx, &user->pending, node) {
+			npend++;
+			if (ctx->buf)
+				pend_sz += ctx->buf->size;
+		}
+		spin_unlock_irqrestore(&user->lock, uflags);
+
+		dev_warn(dev, "erhai: client id %d pd %d: maps %u (mapped 0x%llx, requested 0x%llx), mmaps %u / 0x%llx, pending %u / 0x%llx, init_mem 0x%llx\n",
+			 user->client_id, user->pd, nmaps, maps_sz, maps_len,
+			 nmmaps, mmaps_sz, npend, pend_sz,
+			 user->init_mem ? user->init_mem->size : 0);
+
+		spin_lock_irqsave(&user->lock, uflags);
+		list_for_each_entry(map, &user->maps, node)
+			dev_warn(dev, "erhai:   map fd %d iova 0x%llx size 0x%llx len 0x%llx\n",
+				 map->fd, (unsigned long long)map->dma_addr,
+				 map->size, map->len);
+		spin_unlock_irqrestore(&user->lock, uflags);
+	}
+	spin_unlock(&cctx->lock);
+}
+
+/*
+ * erhai (b76): what EVERY live client accounts for, in the four categories that
+ * hold IOVA ranges: `maps` (dma-buf mappings, by MAPPED size), `mmaps` (coherent
+ * buffers the client asked the kernel for), each `pending` context's own coherent
+ * buffer, and `init_mem`.  The per-client list alone cannot tell a fragmented
+ * arena from space held by another client -- cdsprpcd never exits, so whatever it
+ * holds is invisible in the client-exit print -- and it cannot see the space NO
+ * client owns, which is why the caller compares the returned total against the
+ * domain's own range total (iommu_dma_iova_residue()).
+ *
+ * Returns the accounted bytes; *nclients / *nobjects receive the client and
+ * object counts.  One line per client is printed when @dev is non-NULL; the
+ * mapping-failure path passes NULL and keeps its own single-line format.
+ *
+ * (b67/b71 summed `map->len` -- the length the client ASKED for -- and ignored
+ * mmaps / init_mem / pending buffers, which is why a 4 GiB arena looked almost
+ * empty while a 601 MB mapping failed.  This is the corrected version, matching
+ * fastrpc_map_footprint(); see npu-MEMORY-2026-09-21.md continuations 23 + 27.)
+ */
+/*
+ * erhai (b77): what the accounting found -- overall, and for ONE device.
+ *
+ * The b76 version returned only the channel-wide total while the residue print
+ * measured a single device's IOVA domain, so `unaccounted` mixed domains (and
+ * "space no live client owns" could just be another client's
+ * compute-cb@N).  `dev_*` is the same sum restricted to the clients whose
+ * session device IS the device being reconciled, which is what
+ * iommu_dma_iova_residue() measures; the overall figures stay in the print for
+ * context.  See npu-MEMORY-2026-09-21.md continuation 28.
+ */
+struct fastrpc_acct {
+	unsigned int clients;
+	unsigned int objects;
+	u64 bytes;
+	unsigned int dev_clients;
+	u64 dev_bytes;
+};
+
+static void fastrpc_dev_label(const struct device *dev, char *buf, size_t len);
+
+static u64 fastrpc_account_clients(struct fastrpc_channel_ctx *cctx,
+				   struct device *dev, const char *tag,
+				   struct device *for_dev,
+				   struct fastrpc_acct *out)
+{
+	struct fastrpc_user *user;
+	unsigned int nclients = 0, nobjects = 0, devclients = 0;
+	u64 total = 0, devbytes = 0;
+
+	spin_lock(&cctx->lock);
+	list_for_each_entry(user, &cctx->users, user) {
+		struct fastrpc_invoke_ctx *ctx;
+		struct fastrpc_buf *buf;
+		struct fastrpc_map *map;
+		unsigned long uflags;
+		u64 maps_sz = 0, mmaps_sz = 0, pend_sz = 0, imem_sz = 0;
+		unsigned int nmaps = 0, nmmaps = 0, npend = 0;
+
+		spin_lock_irqsave(&user->lock, uflags);
+		list_for_each_entry(map, &user->maps, node) {
+			nmaps++;
+			/* erhai: the MAPPED size, not the requested length */
+			maps_sz += map->size;
+		}
+		list_for_each_entry(buf, &user->mmaps, node) {
+			nmmaps++;
+			mmaps_sz += buf->size;
+		}
+		list_for_each_entry(ctx, &user->pending, node) {
+			npend++;
+			if (ctx->buf)
+				pend_sz += ctx->buf->size;
+		}
+		if (user->init_mem)
+			imem_sz = user->init_mem->size;
+		spin_unlock_irqrestore(&user->lock, uflags);
+
+		nclients++;
+		nobjects += nmaps + nmmaps + npend + (imem_sz ? 1 : 0);
+		total += maps_sz + mmaps_sz + pend_sz + imem_sz;
+
+		/*
+		 * erhai (b77): the client's OWN session device is appended, because
+		 * the line's log prefix is the device DOING the reporting, not the
+		 * device this client holds its IOVA ranges in.
+		 */
+		if (user->sctx && user->sctx->dev == for_dev) {
+			devclients++;
+			devbytes += maps_sz + mmaps_sz + pend_sz + imem_sz;
+		}
+
+		if (dev) {
+			char label[40];
+
+			fastrpc_dev_label(user->sctx ? user->sctx->dev : NULL,
+					  label, sizeof(label));
+			dev_warn(dev, "erhai: acct[%s] client %d pd %d: maps %u / 0x%llx, mmaps %u / 0x%llx, pending %u / 0x%llx, init_mem 0x%llx -> 0x%llx bytes dev %s\n",
+				 tag, user->client_id, user->pd, nmaps, maps_sz,
+				 nmmaps, mmaps_sz, npend, pend_sz, imem_sz,
+				 maps_sz + mmaps_sz + pend_sz + imem_sz, label);
+		}
+	}
+	spin_unlock(&cctx->lock);
+
+	if (out) {
+		out->clients = nclients;
+		out->objects = nobjects;
+		out->bytes = total;
+		out->dev_clients = devclients;
+		out->dev_bytes = devbytes;
+	}
+
+	return total;
+}
+
+/*
+ * erhai: the mapping footprint of EVERY live client on this channel, for the
+ * mapping-failure print.  The single-line format is historical (the b67-era
+ * analysers parse it verbatim), but the numbers are now the corrected ones:
+ * *nobjects counts maps + mmaps + pending buffers + init_mem, and *bytes uses
+ * the mapped size.  Diagnostic only, called from the failure path.
+ */
+static void fastrpc_map_footprint_all(struct fastrpc_channel_ctx *cctx,
+				      unsigned int *nclients,
+				      unsigned int *nobjects, u64 *bytes)
+{
+	struct fastrpc_acct acct = { };
+
+	fastrpc_account_clients(cctx, NULL, NULL, NULL, &acct);
+	*nclients = acct.clients;
+	*nobjects = acct.objects;
+	*bytes = acct.bytes;
+}
+
+/*
+ * erhai: one-line IOVA usage of this client's channel domain.  Called from the
+ * free paths so the space that never comes back can be attributed to the exact
+ * call that failed to return its range -- the per-load CDSP leak measured on
+ * 2026-09-21 (see npu-MEMORY-2026-09-21.md continuation 24).  Safe in atomic
+ * context: the walk takes the allocator's rbtree lock only.
+ */
+static void fastrpc_iova_summary(struct fastrpc_user *fl, const char *tag)
+{
+	if (fl && fl->sctx)
+		iommu_dma_iova_summary(fl->sctx->dev, tag);
+}
+
+/*
+ * erhai (b77): "32300000.remoteproc:glink-edge:fastrpc:compute-cb@2" ->
+ * "32300000/compute-cb@2".  The remoteproc address is kept because the CDSP and
+ * the ADSP both have compute-cb@N nodes (and separate IOVA domains), and the
+ * b76 reconciliation missed exactly that: it measured one device's arena while
+ * summing every client of the channel.
+ */
+static void fastrpc_dev_label(const struct device *dev, char *buf, size_t len)
+{
+	const char *n = dev ? dev_name(dev) : "?";
+	const char *p = strrchr(n, ':');
+
+	if (p && p[1])
+		snprintf(buf, len, "%.8s/%s", n, p + 1);
+	else
+		snprintf(buf, len, "%s", n);
+}
+
+/*
+ * erhai (b77): the ALLOC side of the books.  @tag is the call site (stored in
+ * buf->atag and reprinted by fastrpc_buf_free()), @ctxid the invoke context for
+ * the per-invoke packet buffer and 0 for the others.  The arena summary is
+ * printed AFTER the allocation, so every arena delta now has a printed cause.
+ */
+static void fastrpc_alloc_buf_report(struct fastrpc_user *fl, struct device *dev,
+				     const char *tag, u64 size, u64 ctxid)
+{
+	char sum[96], label[40];
+
+	if (!erhai_alloc_report || !fl || !fl->sctx)
+		return;
+
+	fastrpc_dev_label(dev, label, sizeof(label));
+	dev_warn(dev,
+		 "erhai: alloc-buf[%s] client %d ctxid 0x%llx size 0x%llx dev %s\n",
+		 tag, fl->client_id, ctxid, size, label);
+
+	snprintf(sum, sizeof(sum), "alloc-buf %s size 0x%llx", tag, size);
+	fastrpc_iova_summary(fl, sum);
+}
+
+/* erhai (b77): the same for a dma-buf mapping, which is where map->size (the
+ * IOVA cost) first differs from the length the client asked for. */
+static void fastrpc_alloc_map_report(struct fastrpc_user *fl, int fd,
+				     const char *kind, struct fastrpc_map *map,
+				     u64 len)
+{
+	char sum[96], label[40];
+
+	if (!erhai_alloc_report || !fl || !fl->sctx)
+		return;
+
+	fastrpc_dev_label(fl->sctx->dev, label, sizeof(label));
+	dev_warn(fl->sctx->dev,
+		 "erhai: alloc-map[%s] client %d fd %d len 0x%llx -> size 0x%llx iova 0x%llx dev %s\n",
+		 kind, fl->client_id, fd, len, map->size,
+		 (unsigned long long)sg_dma_address(map->table->sgl), label);
+
+	snprintf(sum, sizeof(sum), "alloc-map %s fd %d size 0x%llx len 0x%llx",
+		 kind, fd, map->size, len);
+	fastrpc_iova_summary(fl, sum);
+}
+
+/*
+ * erhai: the state of ONE client at the moment it goes away -- and the verdict
+ * the 2026-09-21 leak investigation needs (npu-MEMORY-2026-09-21.md,
+ * continuation 25).  A client whose fd closes while its `fastrpc_user` kref is
+ * still > 1 never reaches `fastrpc_user_free()`, so its `init_mem`, its
+ * `fl->mmaps` and every map it did not explicitly unmap keep their IOVA ranges
+ * forever -- measured as 50 MiB per NPU model load.  The references are held by
+ * pending contexts (`fastrpc_context_alloc()` takes one each; released only in
+ * `fastrpc_context_free()`), so the pending ones are printed with their id and
+ * scalars.  Diagnostic only, on lifetime edges: fd close, user free, DSP
+ * process creation.
+ */
+static void fastrpc_dump_user_state(struct fastrpc_user *fl, const char *why)
+{
+	struct fastrpc_invoke_ctx *ctx;
+	struct fastrpc_buf *buf;
+	struct fastrpc_map *map;
+	unsigned long flags;
+	u64 maps_sz = 0, mmaps_sz = 0, pend_sz = 0;
+	unsigned int nmaps = 0, nmmaps = 0, npend = 0, shown = 0;
+	int kref;
+
+	if (!fl || !fl->sctx)
+		return;
+
+	kref = kref_read(&fl->refcount);
+
+	spin_lock_irqsave(&fl->lock, flags);
+	list_for_each_entry(map, &fl->maps, node) {
+		nmaps++;
+		maps_sz += map->size;
+	}
+	list_for_each_entry(buf, &fl->mmaps, node) {
+		nmmaps++;
+		mmaps_sz += buf->size;
+	}
+	list_for_each_entry(ctx, &fl->pending, node) {
+		npend++;
+		if (ctx->buf)
+			pend_sz += ctx->buf->size;
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+
+	dev_warn(fl->sctx->dev,
+		 "erhai: %s: client %d pd %d kref %d: pending %u / 0x%llx, maps %u / 0x%llx, mmaps %u / 0x%llx, init_mem 0x%llx -> fastrpc_user_free %s\n",
+		 why, fl->client_id, fl->pd, kref, npend,
+		 (unsigned long long)pend_sz, nmaps,
+		 (unsigned long long)maps_sz, nmmaps,
+		 (unsigned long long)mmaps_sz,
+		 (unsigned long long)(fl->init_mem ? fl->init_mem->size : 0),
+		 kref == 0 ? "RUNNING NOW (kref 0)"
+			   : (kref == 1 ? "WILL RUN (next put is the last)"
+					: "WILL NOT RUN (references still held)"));
+
+	spin_lock_irqsave(&fl->lock, flags);
+	list_for_each_entry(ctx, &fl->pending, node) {
+		if (shown++ >= 4)
+			break;
+		dev_warn(fl->sctx->dev,
+			 "erhai:   pending ctxid 0x%llx sc 0x%x pid %d refs %d buf 0x%llx\n",
+			 ctx->ctxid, ctx->sc, ctx->pid, kref_read(&ctx->refcount),
+			 (unsigned long long)(ctx->buf ? ctx->buf->size : 0));
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+}
+
 static void fastrpc_free_map(struct kref *ref)
 {
 	struct fastrpc_map *map;
@@ -407,9 +920,23 @@ static void fastrpc_free_map(struct kref *ref)
 		dma_buf_put(map->buf);
 	}
 
+	{
+		char tag[96];
+
+		/*
+		 * erhai: did THIS free give the IOVA range back?  b77 appends the
+		 * attaching call site, so the mapping books balance per path.
+		 */
+		snprintf(tag, sizeof(tag),
+			 "free-map fd %d size 0x%llx len 0x%llx attr 0x%x tbl %d kind=%s",
+			 map->fd, map->size, map->len, map->attr, !!map->table,
+			 map->kind ? map->kind : "?");
+		fastrpc_iova_summary(map->fl, tag);
+	}
+
 	if (map->fl) {
 		spin_lock(&map->fl->lock);
-		list_del(&map->node);
+		list_del_init(&map->node);
 		spin_unlock(&map->fl->lock);
 		map->fl = NULL;
 	}
@@ -417,10 +944,22 @@ static void fastrpc_free_map(struct kref *ref)
 	kfree(map);
 }
 
-static void fastrpc_map_put(struct fastrpc_map *map)
+static noinline void fastrpc_map_put(struct fastrpc_map *map)
 {
-	if (map)
-		kref_put(&map->refcount, fastrpc_free_map);
+	if (!map)
+		return;
+
+	/*
+	 * erhai (b32-test-03 diagnostic): a put on a map that is already at zero
+	 * is the double put this build chases (the 2026-10-23
+	 * "refcount_t: underflow; use-after-free").  %pS names the call site.
+	 */
+	if (!kref_read(&map->refcount))
+		pr_warn("erhai DIAG map-put on a DEAD map %px fd %d size 0x%llx kind %s owner_ctx %px from %pS\n",
+			map, map->fd, map->size, map->kind ? map->kind : "?",
+			map->owner_ctx, __builtin_return_address(0));
+
+	kref_put(&map->refcount, fastrpc_free_map);
 }
 
 static int fastrpc_map_get(struct fastrpc_map *map)
@@ -467,16 +1006,28 @@ static int fastrpc_map_lookup(struct fastrpc_user *fl, int fd,
 
 static void fastrpc_buf_free(struct fastrpc_buf *buf)
 {
+	char tag[96];
+
 	if (!buf)
 		return;
 
 	dma_free_coherent(buf->dev, buf->size, buf->virt,
 			  fastrpc_ipa_to_dma_addr(buf->fl->cctx, buf->dma_addr));
+	/*
+	 * erhai: did this coherent-buffer free return its IOVA range?  b77 adds
+	 * the allocating call site, so a range that comes back can be balanced
+	 * against the allocation that took it (the prefix is unchanged -- the
+	 * b75/b76 analysers parse "free-buf size 0x... ").
+	 */
+	snprintf(tag, sizeof(tag), "free-buf size 0x%llx dev %s from=%s",
+		 buf->size, dev_name(buf->dev), buf->atag ? buf->atag : "?");
+	fastrpc_iova_summary(buf->fl, tag);
 	kfree(buf);
 }
 
 static int __fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
-			     u64 size, struct fastrpc_buf **obuf)
+			     u64 size, struct fastrpc_buf **obuf,
+			     const char *tag, u64 ctxid)
 {
 	struct fastrpc_buf *buf;
 
@@ -494,6 +1045,7 @@ static int __fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 	buf->size = size;
 	buf->dev = dev;
 	buf->raddr = 0;
+	buf->atag = tag;
 
 	buf->virt = dma_alloc_coherent(dev, buf->size, &buf->dma_addr,
 				       GFP_KERNEL);
@@ -503,18 +1055,22 @@ static int __fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 		return -ENOMEM;
 	}
 
+	/* erhai (b77): the allocation that took the range, and the arena after it */
+	fastrpc_alloc_buf_report(fl, dev, tag, size, ctxid);
+
 	*obuf = buf;
 
 	return 0;
 }
 
 static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
-			     u64 size, struct fastrpc_buf **obuf)
+			     u64 size, struct fastrpc_buf **obuf,
+			     const char *tag, u64 ctxid)
 {
 	int ret;
 	struct fastrpc_buf *buf;
 
-	ret = __fastrpc_buf_alloc(fl, dev, size, obuf);
+	ret = __fastrpc_buf_alloc(fl, dev, size, obuf, tag, ctxid);
 	if (ret)
 		return ret;
 
@@ -527,11 +1083,21 @@ static int fastrpc_buf_alloc(struct fastrpc_user *fl, struct device *dev,
 }
 
 static int fastrpc_remote_heap_alloc(struct fastrpc_user *fl, struct device *dev,
-				     u64 size, struct fastrpc_buf **obuf)
+				     u64 size, struct fastrpc_buf **obuf,
+				     const char *tag, u64 ctxid)
 {
 	struct device *rdev = &fl->cctx->rpdev->dev;
 
-	return  __fastrpc_buf_alloc(fl, rdev, size, obuf);
+	return  __fastrpc_buf_alloc(fl, rdev, size, obuf, tag, ctxid);
+}
+
+/* erhai (b33 diagnostic): the channel reference books, and who is asking. */
+static void fastrpc_channel_books(struct fastrpc_channel_ctx *cctx,
+				  const char *why)
+{
+	pr_warn("erhai DIAG %s: cctx %px ref %d gets %d puts %d\n", why, cctx,
+		kref_read(&cctx->refcount), atomic_read(&cctx->erhai_gets),
+		atomic_read(&cctx->erhai_puts));
 }
 
 static void fastrpc_channel_ctx_free(struct kref *ref)
@@ -540,43 +1106,242 @@ static void fastrpc_channel_ctx_free(struct kref *ref)
 
 	cctx = container_of(ref, struct fastrpc_channel_ctx, refcount);
 
+	pr_warn("erhai DIAG channel-FREE: cctx %px gets %d puts %d -- every further put on it is a use-after-free\n",
+		cctx, atomic_read(&cctx->erhai_gets),
+		atomic_read(&cctx->erhai_puts));
+
 	idr_destroy(&cctx->ctx_idr);
 	kfree(cctx);
 }
 
 static void fastrpc_channel_ctx_get(struct fastrpc_channel_ctx *cctx)
 {
+	atomic_inc(&cctx->erhai_gets);
 	kref_get(&cctx->refcount);
 }
 
-static void fastrpc_channel_ctx_put(struct fastrpc_channel_ctx *cctx)
+static noinline void fastrpc_channel_ctx_put(struct fastrpc_channel_ctx *cctx)
 {
+	atomic_inc(&cctx->erhai_puts);
+	if (!kref_read(&cctx->refcount))
+		pr_warn("erhai DIAG channel-put on a DEAD cctx %px (ref 0, gets %d puts %d) from %pS\n",
+			cctx, atomic_read(&cctx->erhai_gets),
+			atomic_read(&cctx->erhai_puts),
+			__builtin_return_address(0));
 	kref_put(&cctx->refcount, fastrpc_channel_ctx_free);
 }
 
 static void fastrpc_context_put(struct fastrpc_invoke_ctx *ctx);
 
-static void fastrpc_user_free(struct kref *ref)
+/*
+ * erhai: a context sitting in fastrpc_user->pending is OWNED by that list --
+ * the reference fastrpc_context_alloc() took is dropped by whoever takes the
+ * context OFF the list, and by nobody else.  Every remover (the invoke path,
+ * the fd-close release, fastrpc_user_free()) therefore asks this helper first,
+ * which makes putting a context twice impossible: a second put frees a context
+ * that is still linked in `pending`, and the next put of that dangling entry
+ * walks freed memory -- exactly the "refcount_t: underflow; use-after-free"
+ * seen in fastrpc_context_free at fd close on 2026-10-23 (see
+ * fastrpc_rpmsg_callback()).  list_del_init() is what makes the test valid.
+ *
+ * Returns true when THIS caller removed it, i.e. when it must put it.
+ */
+static bool fastrpc_pending_unlink(struct fastrpc_user *fl,
+				   struct fastrpc_invoke_ctx *ctx)
 {
-	struct fastrpc_user *fl = container_of(ref, struct fastrpc_user, refcount);
-	struct fastrpc_invoke_ctx *ctx, *n;
+	bool owned;
+
+	spin_lock(&fl->lock);
+	owned = !list_empty(&ctx->node);
+	if (owned)
+		list_del_init(&ctx->node);
+	spin_unlock(&fl->lock);
+
+	return owned;
+}
+
+/*
+ * erhai: release everything a client owns that holds CDSP IOVA ranges.
+ * Idempotent (it NULLs what it took), so it can run both at fd close and again
+ * from fastrpc_user_free() when the last reference finally drops.  Must be
+ * called with no locks held: fastrpc_buf_free()/fastrpc_map_put() call into the
+ * DMA/dma-buf layer and may sleep.
+ */
+static void fastrpc_user_release_buffers(struct fastrpc_user *fl, const char *why)
+{
 	struct fastrpc_map *map, *m;
-	struct fastrpc_buf *buf, *b;
+	struct fastrpc_buf *buf, *b, *imem;
+	LIST_HEAD(intr);
+	unsigned long flags;
+	unsigned int nmaps = 0, nmmaps = 0, nintr = 0, nowned = 0;
+	u64 maps_sz = 0, imem_sz = 0, owned_sz = 0;
 
-	fastrpc_buf_free(fl->init_mem);
+	spin_lock_irqsave(&fl->lock, flags);
+	imem = fl->init_mem;
+	fl->init_mem = NULL;
+	list_for_each_entry(map, &fl->maps, node) {
+		/*
+		 * erhai (b33): a map that a CONTEXT created (kind "ctx") is owned
+		 * by that context -- its single reference is dropped in
+		 * fastrpc_context_free().  Putting it here as well freed the map
+		 * while the (parked) context still referenced it, and the
+		 * context's own put then decremented zero: the "refcount_t:
+		 * underflow; use-after-free" from fastrpc_context_free (inlined
+		 * fastrpc_map_put) that every shutdown with an interrupted
+		 * invoke produced.  Leave it to its context -- the fd-close
+		 * cancel below frees that context in the same call, so the IOVA
+		 * still comes back here.
+		 */
+		if (map->owner_ctx) {
+			nowned++;
+			owned_sz += map->size;
+			continue;
+		}
+		nmaps++;
+		maps_sz += map->size;
+	}
+	list_for_each_entry(buf, &fl->mmaps, node)
+		nmmaps++;
+	/*
+	 * erhai: the client's mmaps that an interrupted invoke parked (see
+	 * struct fastrpc_user) -- upstream only unlinks those when the whole
+	 * CDSP goes away, so they are lost for good.  Same lock as the add
+	 * path, so this cannot race with it.
+	 */
+	list_for_each_entry_safe(buf, b, &fl->interrupted_mmaps, node) {
+		list_del(&buf->node);
+		list_add_tail(&buf->node, &intr);
+		nintr++;
+	}
+	spin_unlock_irqrestore(&fl->lock, flags);
+	imem_sz = imem ? imem->size : 0;
 
-	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
-		list_del(&ctx->node);
-		fastrpc_context_put(ctx);
+	if (!imem && !nmaps && !nmmaps && !nintr)
+		return;
+
+	dev_warn(fl->sctx->dev,
+		 "erhai: %s: releasing client %d resources: init_mem 0x%llx, maps %u / 0x%llx, mmaps %u, parked-mmaps %u, ctx-owned maps %u / 0x%llx\n",
+		 why, fl->client_id, (unsigned long long)imem_sz, nmaps,
+		 (unsigned long long)maps_sz, nmmaps, nintr, nowned,
+		 (unsigned long long)owned_sz);
+
+	if (imem) {
+		fastrpc_buf_free(imem);
+		fastrpc_iova_summary(fl, "exit-after-init_mem");
 	}
 
-	list_for_each_entry_safe(map, m, &fl->maps, node)
+	list_for_each_entry_safe(map, m, &fl->maps, node) {
+		/* erhai (b33): owned by a (still parked) context -- not ours */
+		if (map->owner_ctx)
+			continue;
+		list_del_init(&map->node);
 		fastrpc_map_put(map);
+	}
+	fastrpc_iova_summary(fl, "exit-after-maps");
 
 	list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
 		list_del(&buf->node);
 		fastrpc_buf_free(buf);
 	}
+	fastrpc_iova_summary(fl, "exit-after-mmaps");
+
+	list_for_each_entry_safe(buf, b, &intr, node) {
+		list_del(&buf->node);
+		fastrpc_buf_free(buf);
+	}
+	fastrpc_iova_summary(fl, "exit-after-parked");
+}
+
+/*
+ * erhai: unlink the contexts an interrupted invoke left in `fl->pending` and
+ * drop the reference each one holds on `fastrpc_user` (taken in
+ * fastrpc_context_alloc(), released in fastrpc_context_free()).
+ *
+ * The context object itself is NOT freed here -- the DSP's late reply owns the
+ * other reference and frees it (fastrpc_rpmsg_callback() -> put_work ->
+ * fastrpc_context_put()), which then lets fastrpc_user_free() run for a client
+ * that would otherwise be pinned forever.  Dropping our reference is safe in
+ * either order: the object can only be freed by the last of the two puts.
+ */
+static unsigned int fastrpc_cancel_pending_contexts(struct fastrpc_user *fl,
+						    const char *why)
+{
+	struct fastrpc_invoke_ctx *ctx;
+	unsigned int count = 0;
+
+	/*
+	 * Take the contexts off the list one by one and put them OUTSIDE the
+	 * list lock (the put frees the context and may sleep in the DMA/dma-buf
+	 * layer).  The head is re-read every round, so a context that another
+	 * path unlinked first is simply skipped -- and because
+	 * fastrpc_pending_unlink() is the only unlinker, every context's list
+	 * reference is dropped exactly once.
+	 */
+	for (;;) {
+		spin_lock(&fl->lock);
+		ctx = list_first_entry_or_null(&fl->pending,
+					       struct fastrpc_invoke_ctx, node);
+		if (ctx)
+			list_del_init(&ctx->node);
+		spin_unlock(&fl->lock);
+
+		if (!ctx)
+			break;
+
+		dev_warn(fl->sctx->dev,
+			 "erhai: %s: dropping the user reference of left-over context ctxid 0x%llx sc 0x%x pid %d refs %d\n",
+			 why, ctx->ctxid, ctx->sc, ctx->pid,
+			 kref_read(&ctx->refcount));
+		fastrpc_context_put(ctx);
+		count++;
+	}
+
+	return count;
+}
+
+static void fastrpc_user_free(struct kref *ref)
+{
+	struct fastrpc_user *fl = container_of(ref, struct fastrpc_user, refcount);
+	struct fastrpc_invoke_ctx *ctx, *n;
+
+	/* erhai: what is still held here, and by whom (see the helper) */
+	fastrpc_dump_user_state(fl, "user-free");
+
+	/* erhai: the arena state as this client goes away */
+	fastrpc_iova_summary(fl, "exit-in");
+
+	/*
+	 * erhai: report what this client still holds at the moment it goes away
+	 * -- a non-zero footprint here is a mapping (and the IOVA range behind
+	 * it) that outlived its user, i.e. exactly the CDSP exhaustion failure.
+	 */
+	{
+		unsigned int nmaps;
+		u64 held;
+
+		fastrpc_map_footprint(fl, &nmaps, &held);
+		if (nmaps)
+			dev_info(fl->sctx->dev,
+				 "erhai: client exiting: still holds %u mappings / 0x%llx bytes\n",
+				 nmaps, held);
+	}
+
+	/*
+	 * erhai: init_mem / maps / mmaps / parked mmaps -- normally already gone
+	 * (fastrpc_user_release_buffers() at fd close), so this is the no-op
+	 * second half of an idempotent pair.
+	 */
+	fastrpc_user_release_buffers(fl, "user-free");
+
+	/*
+	 * erhai: put only what THIS path unlinked -- the fd-close release may
+	 * have taken some of these contexts already (fastrpc_pending_unlink()).
+	 */
+	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
+		if (fastrpc_pending_unlink(fl, ctx))
+			fastrpc_context_put(ctx);
+	}
+	fastrpc_iova_summary(fl, "exit-after-pending");
 
 	fastrpc_channel_ctx_put(fl->cctx);
 	mutex_destroy(&fl->mutex);
@@ -605,8 +1370,53 @@ static void fastrpc_context_free(struct kref *ref)
 	cctx = ctx->cctx;
 	fl = ctx->fl;
 
-	for (i = 0; i < ctx->nbufs; i++)
+	/*
+	 * erhai (b32-test-03 diagnostic): the anomaly this build chases.  Printed
+	 * only when one of the objects this free is about to put is ALREADY at
+	 * zero -- i.e. exactly the "refcount_t: underflow; use-after-free" case,
+	 * the context's own maps included (they are put first, and a map the
+	 * fd-close release already freed warns from inside this function too).
+	 * Silent in normal operation.
+	 */
+	{
+		bool bad = fl && (!kref_read(&fl->refcount) ||
+				  !kref_read(&cctx->refcount));
+
+		for (i = 0; i < ctx->nbufs; i++)
+			if (ctx->maps[i] && !kref_read(&ctx->maps[i]->refcount))
+				bad = true;
+
+		if (bad) {
+			pr_warn("erhai DIAG ctx-free: ctx %px ctxid 0x%llx nbufs %d pid %d fl %px ref %d cctx %px ref %d\n",
+				ctx, ctx->ctxid, ctx->nbufs, ctx->pid, fl,
+				fl ? kref_read(&fl->refcount) : -1, cctx,
+				kref_read(&cctx->refcount));
+			for (i = 0; i < ctx->nbufs; i++)
+				pr_warn("erhai DIAG   map[%d] %px fd %d size 0x%llx kind %s ref %d owner_ctx %px\n",
+					i, ctx->maps[i],
+					ctx->maps[i] ? ctx->maps[i]->fd : -1,
+					ctx->maps[i] ? ctx->maps[i]->size : 0,
+					ctx->maps[i] && ctx->maps[i]->kind ?
+						ctx->maps[i]->kind : "?",
+					ctx->maps[i] ?
+						kref_read(&ctx->maps[i]->refcount) : -1,
+					ctx->maps[i] ?
+						ctx->maps[i]->owner_ctx : NULL);
+			fastrpc_channel_books(cctx, "DIAG ctx-free books");
+		}
+	}
+
+	for (i = 0; i < ctx->nbufs; i++) {
+		/*
+		 * erhai (b33): a map this context created (kind "ctx") is ours --
+		 * the fd-close release deliberately leaves it to us (see struct
+		 * fastrpc_map.owner_ctx); clear the marker so a map that survives
+		 * (still referenced elsewhere) cannot point at a freed context.
+		 */
+		if (ctx->maps[i])
+			ctx->maps[i]->owner_ctx = NULL;
 		fastrpc_map_put(ctx->maps[i]);
+	}
 
 	fastrpc_buf_free(ctx->buf);
 
@@ -881,7 +1691,8 @@ static dma_addr_t fastrpc_compute_dma_addr(struct fastrpc_user *fl, dma_addr_t s
 }
 
 static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
-			      u64 len, u32 attr, struct fastrpc_map **ppmap)
+			      u64 len, u32 attr, struct fastrpc_map **ppmap,
+			      const char *kind)
 {
 	struct fastrpc_session_ctx *sess = fl->sctx;
 	struct fastrpc_map *map = NULL;
@@ -890,8 +1701,12 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	int err = 0, sgl_index = 0;
 
 	map = kzalloc_obj(*map);
-	if (!map)
+	if (!map) {
+		dev_err(sess->dev,
+			"erhai: map_attach: kzalloc failed (fd = %d len 0x%llx)\n",
+			fd, len);
 		return -ENOMEM;
+	}
 
 	INIT_LIST_HEAD(&map->node);
 	kref_init(&map->refcount);
@@ -901,6 +1716,9 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 	map->buf = dma_buf_get(fd);
 	if (IS_ERR(map->buf)) {
 		err = PTR_ERR(map->buf);
+		dev_err(sess->dev,
+			"erhai: map_attach: dma_buf_get failed (fd = %d len 0x%llx err %d)\n",
+			fd, len, err);
 		goto get_err;
 	}
 
@@ -913,7 +1731,38 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 
 	table = dma_buf_map_attachment_unlocked(map->attach, DMA_BIDIRECTIONAL);
 	if (IS_ERR(table)) {
+		unsigned int nmaps, nclients_all, nmaps_all;
+		u64 held, held_all;
+
 		err = PTR_ERR(table);
+		fastrpc_map_footprint(fl, &nmaps, &held);
+		fastrpc_map_footprint_all(fl->cctx, &nclients_all, &nmaps_all,
+					  &held_all);
+		/*
+		 * erhai: this is where the 2026-09-21 mapping-exhaustion
+		 * failure lands -- the only message it produced was
+		 * "failed to map buffer, fd = N" in fastrpc_req_mem_map(),
+		 * while upstream prints nothing here.  -ENOMEM means the
+		 * SMMU/IOVA or dma-buf mapping space is full; -EINVAL/-EBUSY
+		 * would mean the mapping is being refused for another reason.
+		 * The "ALL clients" figures matter because the arena is shared:
+		 * a long-lived client (cdsprpcd) never exits, so its holdings
+		 * are invisible in the client-exit print.  See
+		 * npu-MEMORY-2026-09-21.md (continuation 13).
+		 */
+		dev_err(sess->dev,
+			"erhai: map_attach: dma_buf_map_attachment failed (fd = %d len 0x%llx err %d; client holds %u maps / 0x%llx bytes; ALL %u clients hold %u maps / 0x%llx bytes)\n",
+			fd, len, err, nmaps, held, nclients_all, nmaps_all,
+			held_all);
+		/*
+		 * erhai: -ENOMEM here means "no free IOVA range of this size in
+		 * this domain".  Print what every client really holds (maps by
+		 * mapped size, plus mmaps/init_mem/pending buffers) and dump the
+		 * domain's IOVA tree, so the holder of the space is visible --
+		 * fastrpc's own accounting alone cannot see it.
+		 */
+		fastrpc_dump_client_iova(fl->cctx, sess->dev);
+		iommu_dma_dump_iova(sess->dev);
 		goto map_err;
 	}
 	map->table = table;
@@ -926,13 +1775,19 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 		sgl_index)
 		map->size += sg_dma_len(sgl);
 	if (len > map->size) {
-		dev_dbg(sess->dev, "Bad size passed len 0x%llx map size 0x%llx\n",
-				len, map->size);
+		/* erhai: surface this rejected map at the default log level. */
+		dev_err(sess->dev,
+			"erhai: map_attach: bad size passed len 0x%llx map size 0x%llx (fd = %d)\n",
+			len, map->size, fd);
 		err = -EINVAL;
-		goto get_err;
+		goto map_err;
 	}
 	map->va = sg_virt(map->table->sgl);
 	map->len = len;
+	map->kind = kind;
+
+	/* erhai (b77): the ALLOC side for mappings (freed in fastrpc_free_map) */
+	fastrpc_alloc_map_report(fl, fd, kind, map, len);
 
 	if (attr & FASTRPC_ATTR_SECUREMAP) {
 		/*
@@ -952,13 +1807,40 @@ static int fastrpc_map_attach(struct fastrpc_user *fl, int fd,
 			dev_err(sess->dev,
 				"Failed to assign memory with dma_addr %pad size 0x%llx err %d\n",
 				&map->dma_addr, map->len, err);
-			goto get_err;
+			goto map_err;
 		}
 	}
 	spin_lock(&fl->lock);
 	list_add_tail(&map->node, &fl->maps);
 	spin_unlock(&fl->lock);
 	*ppmap = map;
+
+	/*
+	 * erhai: a LARGE mapping is the one that fails once the arena fills up,
+	 * so report the client's footprint for those only (small mappings are
+	 * far too frequent to log) -- this is the growth curve of the
+	 * consumption that ends in -ENOMEM.
+	 */
+	if (len >= SZ_256M) {
+		unsigned int nmaps;
+		u64 held;
+
+		fastrpc_map_footprint(fl, &nmaps, &held);
+		/*
+		 * erhai: `iova` is the address the SMMU/DSP will use, `nents`/`first`
+		 * are the fragmentation of what we just mapped: one big segment means
+		 * the whole buffer needs one contiguous IOVA range, many 2 MB segments
+		 * mean the arena is consumed in small pieces (which decides whether
+		 * "chunking" would help at all).  Watching the iova across loads also
+		 * shows whether the allocator reuses the same ranges or drifts.
+		 */
+		dev_info(sess->dev,
+			 "erhai: map ok fd = %d len 0x%llx iova 0x%llx (client holds %u maps / 0x%llx bytes; sg %u nents, first 0x%x)\n",
+			 fd, len,
+			 (unsigned long long)sg_dma_address(map->table->sgl),
+			 nmaps, held, map->table->nents,
+			 sg_dma_len(map->table->sgl));
+	}
 
 	return 0;
 
@@ -973,12 +1855,24 @@ get_err:
 }
 
 static int fastrpc_map_create(struct fastrpc_user *fl, int fd,
-			      u64 len, u32 attr, struct fastrpc_map **ppmap)
+			      u64 len, u32 attr, struct fastrpc_map **ppmap,
+			      const char *kind, struct fastrpc_invoke_ctx *owner)
 {
+	int err;
+
 	if (!fastrpc_map_lookup(fl, fd, ppmap, true))
 		return 0;
 
-	return fastrpc_map_attach(fl, fd, len, attr, ppmap);
+	/*
+	 * erhai (b33): a map newly created for a context is owned by it -- see
+	 * struct fastrpc_map.owner_ctx.  Maps created for the client (kind
+	 * "user"/"init-file") pass owner == NULL and stay the client's.
+	 */
+	err = fastrpc_map_attach(fl, fd, len, attr, ppmap, kind);
+	if (!err && owner && *ppmap)
+		(*ppmap)->owner_ctx = owner;
+
+	return err;
 }
 
 /*
@@ -1056,10 +1950,12 @@ static int fastrpc_create_maps(struct fastrpc_invoke_ctx *ctx)
 
 		if (i < ctx->nbufs)
 			err = fastrpc_map_create(ctx->fl, ctx->args[i].fd,
-				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i]);
+				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i],
+				 "ctx", ctx);
 		else
 			err = fastrpc_map_attach(ctx->fl, ctx->args[i].fd,
-				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i]);
+				 ctx->args[i].length, ctx->args[i].attr, &ctx->maps[i],
+				 "ctx");
 		if (err) {
 			dev_err(dev, "Error Creating map %d\n", err);
 			return -EINVAL;
@@ -1102,9 +1998,11 @@ static int fastrpc_get_args(u32 kernel, struct fastrpc_invoke_ctx *ctx)
 	ctx->msg_sz = pkt_size;
 
 	if (ctx->fl->sctx->sid)
-		err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
+		err = fastrpc_buf_alloc(ctx->fl, dev, pkt_size, &ctx->buf,
+					"invoke-pkt", ctx->ctxid);
 	else
-		err = fastrpc_remote_heap_alloc(ctx->fl, dev, pkt_size, &ctx->buf);
+		err = fastrpc_remote_heap_alloc(ctx->fl, dev, pkt_size, &ctx->buf,
+						"invoke-pkt-rh", ctx->ctxid);
 	if (err)
 		return err;
 
@@ -1278,8 +2176,14 @@ static int fastrpc_invoke_send(struct fastrpc_session_ctx *sctx,
 
 	ret = rpmsg_send(cctx->rpdev->ept, (void *)msg, sizeof(*msg));
 
-	if (ret)
+	if (ret) {
+		/*
+		 * erhai: this drops the reference taken above, so a response
+		 * that still races in must not put it a second time.
+		 */
+		test_and_set_bit(0, &ctx->reply_put_done);
 		fastrpc_context_put(ctx);
+	}
 
 	return ret;
 
@@ -1410,18 +2314,33 @@ static int fastrpc_internal_invoke(struct fastrpc_user *fl,  u32 kernel,
 
 bail:
 	if (err != -ERESTARTSYS && err != -ETIMEDOUT) {
-		/* We are done with this compute context */
-		spin_lock(&fl->lock);
-		list_del(&ctx->node);
-		spin_unlock(&fl->lock);
-		fastrpc_context_put(ctx);
+		/*
+		 * We are done with this compute context.  Put it only if WE took
+		 * it off the pending list -- the fd-close release may have
+		 * already (fastrpc_pending_unlink()).
+		 */
+		if (fastrpc_pending_unlink(fl, ctx))
+			fastrpc_context_put(ctx);
+	} else {
+		/*
+		 * erhai: this context, and the reference it holds on `fl`, stay
+		 * in fl->pending for the DSP's late reply -- which a client that
+		 * is exiting never lives to see, so at fd close the reference is
+		 * dropped there instead (fastrpc_cancel_pending_contexts()).
+		 * Logged because it is the entry point of the whole CDSP IOVA
+		 * exhaustion (npu-MEMORY-2026-09-21.md, continuation 26).
+		 */
+		dev_warn(fl->sctx->dev,
+			 "erhai: invoke left pending (err %d): handle 0x%x sc 0x%x pid %d client %d kernel %u\n",
+			 err, handle, sc, current->pid, fl->client_id, kernel);
 	}
 
 	if (err == -ERESTARTSYS) {
 		spin_lock(&fl->lock);
 		list_for_each_entry_safe(buf, b, &fl->mmaps, node) {
 			list_del(&buf->node);
-			list_add_tail(&buf->node, &fl->cctx->invoke_interrupted_mmaps);
+			/* erhai: per-client, see struct fastrpc_user */
+			list_add_tail(&buf->node, &fl->interrupted_mmaps);
 		}
 		spin_unlock(&fl->lock);
 	}
@@ -1456,24 +2375,15 @@ static int fastrpc_init_create_static_process(struct fastrpc_user *fl,
 	struct fastrpc_init_create_static init;
 	struct fastrpc_invoke_args *args;
 	struct fastrpc_phy_page pages[1];
-	struct fastrpc_channel_ctx *cctx = fl->cctx;
 	char *name;
 	int err;
+	bool scm_done = false;
 	struct {
 		int client_id;
 		u32 namelen;
 		u32 pageslen;
 	} inbuf;
 	u32 sc;
-	unsigned long flags;
-	bool sent_heap = false;
-
-	if (!cctx->remote_heap_addr || !cctx->remote_heap_size) {
-		err = -ENOMEM;
-		dev_err(fl->sctx->dev,
-			"remote heap memory region is not added\n");
-		return err;
-	}
 
 	args = kzalloc_objs(*args, FASTRPC_CREATE_STATIC_PROCESS_NARGS);
 	if (!args)
@@ -1497,6 +2407,32 @@ static int fastrpc_init_create_static_process(struct fastrpc_user *fl,
 	inbuf.client_id = fl->client_id;
 	inbuf.namelen = init.namelen;
 	inbuf.pageslen = 0;
+	if (!fl->cctx->remote_heap) {
+		err = fastrpc_remote_heap_alloc(fl, fl->sctx->dev, init.memlen,
+						&fl->cctx->remote_heap,
+						"remote-heap", 0);
+		if (err)
+			goto err_name;
+
+		/* Map if we have any heap VMIDs associated with this ADSP Static Process. */
+		if (fl->cctx->vmcount) {
+			u64 src_perms = BIT(QCOM_SCM_VMID_HLOS);
+
+			err = qcom_scm_assign_mem(fl->cctx->remote_heap->dma_addr,
+							(u64)fl->cctx->remote_heap->size,
+							&src_perms,
+							fl->cctx->vmperms, fl->cctx->vmcount);
+			if (err) {
+				dev_err(fl->sctx->dev,
+					"Failed to assign memory with dma_addr %pad size 0x%llx err %d\n",
+					&fl->cctx->remote_heap->dma_addr,
+					fl->cctx->remote_heap->size, err);
+				goto err_map;
+			}
+			scm_done = true;
+			inbuf.pageslen = 1;
+		}
+	}
 
 	fl->pd = USER_PD;
 
@@ -1508,25 +2444,8 @@ static int fastrpc_init_create_static_process(struct fastrpc_user *fl,
 	args[1].length = inbuf.namelen;
 	args[1].fd = -1;
 
-	/*
-	 * Audio PD is a static PD and retains the remote heap
-	 * information across daemon restarts. Therefore only
-	 * the first attach should provide heap information to
-	 * DSP. Subsequent attaches reuse the previously
-	 * initialized memory pool.
-	 */
-	spin_lock_irqsave(&cctx->lock, flags);
-	if (!cctx->audio_init_mem) {
-		pages[0].addr = cctx->remote_heap_addr;
-		pages[0].size = cctx->remote_heap_size;
-		cctx->audio_init_mem = true;
-		inbuf.pageslen = 1;
-		sent_heap = true;
-	} else {
-		pages[0].addr = 0;
-		pages[0].size = 0;
-	}
-	spin_unlock_irqrestore(&cctx->lock, flags);
+	pages[0].addr = fl->cctx->remote_heap->dma_addr;
+	pages[0].size = fl->cctx->remote_heap->size;
 
 	args[2].ptr = (u64)(uintptr_t) pages;
 	args[2].length = sizeof(*pages);
@@ -1544,11 +2463,27 @@ static int fastrpc_init_create_static_process(struct fastrpc_user *fl,
 
 	return 0;
 err_invoke:
-	if (sent_heap) {
-		spin_lock_irqsave(&cctx->lock, flags);
-		cctx->audio_init_mem = false;
-		spin_unlock_irqrestore(&cctx->lock, flags);
+	if (fl->cctx->vmcount && scm_done) {
+		u64 src_perms = 0;
+		struct qcom_scm_vmperm dst_perms;
+		u32 i;
+
+		for (i = 0; i < fl->cctx->vmcount; i++)
+			src_perms |= BIT(fl->cctx->vmperms[i].vmid);
+
+		dst_perms.vmid = QCOM_SCM_VMID_HLOS;
+		dst_perms.perm = QCOM_SCM_PERM_RWX;
+		err = qcom_scm_assign_mem(fl->cctx->remote_heap->dma_addr,
+						(u64)fl->cctx->remote_heap->size,
+						&src_perms, &dst_perms, 1);
+		if (err)
+			dev_err(fl->sctx->dev, "Failed to assign memory dma_addr %pad size 0x%llx err %d\n",
+				&fl->cctx->remote_heap->dma_addr, fl->cctx->remote_heap->size, err);
 	}
+err_map:
+	fastrpc_buf_free(fl->cctx->remote_heap);
+	fl->cctx->remote_heap = NULL;
+err_name:
 	kfree(name);
 err:
 	kfree(args);
@@ -1564,6 +2499,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	struct fastrpc_phy_page pages[1];
 	struct fastrpc_map *map = NULL;
 	struct fastrpc_buf *imem = NULL;
+
 	int memlen;
 	int err;
 	struct {
@@ -1576,6 +2512,44 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	} inbuf;
 	u32 sc;
 	bool unsigned_module = false;
+
+	/*
+	 * erhai: the arena state every time a new DSP process is created -- one
+	 * of these lines per HTP load makes the per-load leak rate visible
+	 * directly (a flat series means the loads recycle their space).
+	 */
+	fastrpc_iova_summary(fl, "init-create-in");
+
+	/*
+	 * erhai (b76): the b74/b75 fd-close release cut the per-load CDSP leak
+	 * from ~50 MiB to ~0.14 MiB / ~18 ranges and left exactly that residue
+	 * unnamed (npu-MEMORY-2026-09-21.md).  A DSP process creation is the only
+	 * moment the arena is quiet -- nothing this client has allocated yet --
+	 * so reconcile it here: print what the live clients account for, then let
+	 * the IOMMU side print the domain's own total and the difference.
+	 * unaccounted > 0 is space no client owns, and the size histogram in that
+	 * print names the object classes it is made of.
+	 */
+	if (fl && fl->cctx && fl->sctx && erhai_residue_report) {
+		char label[40];
+		struct fastrpc_acct acct = { };
+
+		/*
+		 * erhai (b77): reconcile the device whose arena is about to be
+		 * measured -- the b76 print used the channel-wide client total
+		 * against one device's domain (see struct fastrpc_acct).
+		 */
+		fastrpc_account_clients(fl->cctx, fl->sctx->dev,
+					"init-create-in", fl->sctx->dev, &acct);
+		fastrpc_dev_label(fl->sctx->dev, label, sizeof(label));
+
+		dev_warn(fl->sctx->dev,
+			 "erhai: acct[init-create-in] %u clients account for %u objects / 0x%llx bytes (device %s: %u clients / 0x%llx bytes)\n",
+			 acct.clients, acct.objects, acct.bytes, label,
+			 acct.dev_clients, acct.dev_bytes);
+		iommu_dma_iova_residue(fl->sctx->dev, "init-create-in",
+				       acct.dev_bytes, erhai_residue_holders);
+	}
 
 	args = kzalloc_objs(*args, FASTRPC_CREATE_PROCESS_NARGS);
 	if (!args)
@@ -1608,7 +2582,8 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	fl->pd = USER_PD;
 
 	if (init.filelen && init.filefd) {
-		err = fastrpc_map_create(fl, init.filefd, init.filelen, 0, &map);
+		err = fastrpc_map_create(fl, init.filefd, init.filelen, 0, &map,
+					 "init-file", NULL);
 		if (err)
 			goto err;
 	}
@@ -1616,7 +2591,7 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 	memlen = ALIGN(max(INIT_FILELEN_MAX, (int)init.filelen * 4),
 		       1024 * 1024);
 	err = fastrpc_buf_alloc(fl, fl->sctx->dev, memlen,
-				&imem);
+				&imem, "init_mem", 0);
 	if (err)
 		goto err_alloc;
 
@@ -1656,6 +2631,9 @@ static int fastrpc_init_create_process(struct fastrpc_user *fl,
 				      sc, args);
 	if (err)
 		goto err_invoke;
+
+	/* erhai: tie this DSP process to its client, for the leak trace */
+	fastrpc_dump_user_state(fl, "init-create-ok");
 
 	kfree(args);
 
@@ -1727,7 +2705,37 @@ static int fastrpc_device_release(struct inode *inode, struct file *file)
 	struct fastrpc_channel_ctx *cctx = fl->cctx;
 	unsigned long flags;
 
+	/*
+	 * erhai: the moment that decides the whole 2026-09-21 leak -- if the
+	 * kref here is > 1, the user_free below will never run and this client's
+	 * IOVA ranges (init_mem / mmaps / maps) are stranded for good.
+	 */
+	fastrpc_dump_user_state(fl, "fd-close");
+
+	/* erhai (b33 diagnostic): the channel books as this client goes away */
+	fastrpc_channel_books(cctx, "fd-close entry");
+
 	fastrpc_release_current_dsp_process(fl);
+
+	/*
+	 * erhai: the client is gone and its DSP-side process has just been
+	 * released, so nothing of this client can be using its memory any more
+	 * -- give its IOVA ranges back now.  Needed because an interrupted
+	 * invoke leaves a context that pins `fastrpc_user` (see the b73 verdict
+	 * in npu-MEMORY-2026-09-21.md), i.e. fastrpc_user_free() may not run at
+	 * all; measured cost without this: ~49 MiB stranded per NPU model load.
+	 */
+	if (erhai_release_at_close) {
+		unsigned int cancelled;
+
+		fastrpc_user_release_buffers(fl, "fd-close");
+		cancelled = fastrpc_cancel_pending_contexts(fl, "fd-close");
+		dev_warn(fl->sctx->dev,
+			 "erhai: fd-close: client %d released its resources, cancelled %u left-over context(s), kref now %d\n",
+			 fl->client_id, cancelled, kref_read(&fl->refcount));
+		/* erhai (b33 diagnostic): after the release, before the last put */
+		fastrpc_channel_books(cctx, "fd-close after release");
+	}
 
 	spin_lock_irqsave(&cctx->lock, flags);
 	list_del(&fl->user);
@@ -1764,6 +2772,7 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 	INIT_LIST_HEAD(&fl->pending);
 	INIT_LIST_HEAD(&fl->maps);
 	INIT_LIST_HEAD(&fl->mmaps);
+	INIT_LIST_HEAD(&fl->interrupted_mmaps);
 	INIT_LIST_HEAD(&fl->user);
 	fl->cctx = cctx;
 	fl->is_secure_dev = fdevice->secure;
@@ -1795,7 +2804,7 @@ static int fastrpc_dmabuf_alloc(struct fastrpc_user *fl, char __user *argp)
 	if (copy_from_user(&bp, argp, sizeof(bp)))
 		return -EFAULT;
 
-	err = fastrpc_buf_alloc(fl, fl->sctx->dev, bp.size, &buf);
+	err = fastrpc_buf_alloc(fl, fl->sctx->dev, bp.size, &buf, "dmabuf", 0);
 	if (err)
 		return err;
 	exp_info.ops = &fastrpc_dma_buf_ops;
@@ -2016,7 +3025,7 @@ static int fastrpc_req_munmap_impl(struct fastrpc_user *fl, struct fastrpc_buf *
 		dev_dbg(dev, "unmmap\tpt 0x%09lx OK\n", buf->raddr);
 		fastrpc_buf_free(buf);
 	} else {
-		dev_err(dev, "unmmap\tpt 0x%09lx ERROR\n", buf->raddr);
+		dev_err(dev, "unmmap\tpt 0x%09lx ERROR (%d)\n", buf->raddr, err);
 	}
 
 	return err;
@@ -2050,9 +3059,25 @@ static int fastrpc_req_munmap(struct fastrpc_user *fl, char __user *argp)
 
 	err = fastrpc_req_munmap_impl(fl, buf);
 	if (err) {
-		spin_lock(&fl->lock);
-		list_add_tail(&buf->node, &fl->mmaps);
-		spin_unlock(&fl->lock);
+		if (release_failed_unmap) {
+			/*
+			 * erhai: the DSP dropped this mapping (that is why the
+			 * request failed), so parking the buffer back on
+			 * fl->mmaps would leak its coherent memory AND the IOVA
+			 * range the fastrpc device holds for it until this
+			 * client closes /dev/fastrpc-*.  cdsprpcd never does,
+			 * which is exactly how the mapping space used to
+			 * exhaust itself -- see the parameter above.
+			 */
+			dev_warn(dev,
+				 "unmmap\tpt 0x%09lx failed (%d); releasing host buffer\n",
+				 buf->raddr, err);
+			fastrpc_buf_free(buf);
+		} else {
+			spin_lock(&fl->lock);
+			list_add_tail(&buf->node, &fl->mmaps);
+			spin_unlock(&fl->lock);
+		}
 	}
 
 	return err;
@@ -2073,7 +3098,7 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 	if (copy_from_user(&req, argp, sizeof(req)))
 		return -EFAULT;
 
-	if (req.flags != ADSP_MMAP_ADD_PAGES) {
+	if (req.flags != ADSP_MMAP_ADD_PAGES && req.flags != ADSP_MMAP_REMOTE_HEAP_ADDR) {
 		dev_err(dev, "flag not supported 0x%x\n", req.flags);
 
 		return -EINVAL;
@@ -2084,7 +3109,11 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 		return -EINVAL;
 	}
 
-	err = fastrpc_buf_alloc(fl, dev, req.size, &buf);
+	if (req.flags == ADSP_MMAP_REMOTE_HEAP_ADDR)
+		err = fastrpc_remote_heap_alloc(fl, dev, req.size, &buf,
+						"mmap-rh", 0);
+	else
+		err = fastrpc_buf_alloc(fl, dev, req.size, &buf, "mmap", 0);
 
 	if (err) {
 		dev_err(dev, "failed to allocate buffer\n");
@@ -2123,6 +3152,20 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 	/* let the client know the address to use */
 	req.vaddrout = rsp_msg.vaddr;
 
+	/* Add memory to static PD pool, protection thru hypervisor */
+	if (req.flags == ADSP_MMAP_REMOTE_HEAP_ADDR && fl->cctx->vmcount) {
+		u64 src_perms = BIT(QCOM_SCM_VMID_HLOS);
+
+		err = qcom_scm_assign_mem(buf->dma_addr, (u64)buf->size,
+			&src_perms, fl->cctx->vmperms, fl->cctx->vmcount);
+		if (err) {
+			dev_err(fl->sctx->dev,
+				"Failed to assign memory dma_addr %pad size 0x%llx err %d",
+				&buf->dma_addr, buf->size, err);
+			goto err_assign;
+		}
+	}
+
 	spin_lock(&fl->lock);
 	list_add_tail(&buf->node, &fl->mmaps);
 	spin_unlock(&fl->lock);
@@ -2138,7 +3181,18 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 	return 0;
 
 err_assign:
-	fastrpc_req_munmap_impl(fl, buf);
+	if (fastrpc_req_munmap_impl(fl, buf) && release_failed_unmap) {
+		/*
+		 * erhai: the buffer is already on fl->mmaps here (it was added
+		 * before copy_to_user()), and fastrpc_req_munmap_impl() only
+		 * frees it when the DSP accepted the unmap -- drop it instead
+		 * of leaking it, same reasoning as in fastrpc_req_munmap().
+		 */
+		spin_lock(&fl->lock);
+		list_del(&buf->node);
+		spin_unlock(&fl->lock);
+		fastrpc_buf_free(buf);
+	}
 
 	return err;
 }
@@ -2179,7 +3233,17 @@ static int fastrpc_req_mem_unmap_impl(struct fastrpc_user *fl, struct fastrpc_me
 	err = fastrpc_internal_invoke(fl, true, FASTRPC_INIT_HANDLE, sc,
 				      &args[0]);
 	if (err) {
-		dev_err(dev, "unmmap\tpt fd = %d, 0x%09llx error\n",  map->fd, map->raddr);
+		dev_err(dev, "unmmap\tpt fd = %d, 0x%09llx error %d\n",
+			map->fd, map->raddr, err);
+		if (release_failed_unmap)
+			/*
+			 * erhai: release the host mapping (dma_buf attachment +
+			 * its SMMU/IOVA range) instead of leaving it in
+			 * fl->maps for the whole lifetime of this client -- the
+			 * DSP has just told us it does not have it any more.
+			 * See the parameter above.
+			 */
+			fastrpc_map_put(map);
 		return err;
 	}
 	fastrpc_map_put(map);
@@ -2214,7 +3278,7 @@ static int fastrpc_req_mem_map(struct fastrpc_user *fl, char __user *argp)
 		return -EFAULT;
 
 	/* create SMMU mapping */
-	err = fastrpc_map_create(fl, req.fd, req.length, 0, &map);
+	err = fastrpc_map_create(fl, req.fd, req.length, 0, &map, "user", NULL);
 	if (err) {
 		dev_err(dev, "failed to map buffer, fd = %d\n", req.fd);
 		return err;
@@ -2386,6 +3450,17 @@ static int fastrpc_cb_probe(struct platform_device *pdev)
 		return rc;
 	}
 
+	/*
+	 * erhai: proves which soc_data the DT matched and how big this domain's
+	 * IOVA arena therefore is.  A CDSP compute-cb that prints "32-bit" here
+	 * is the 4 GB arena that runs out after ~20 model loads -- the node must
+	 * carry the "qcom,kaanapali-fastrpc" compatible for 34 bits (16 GB).
+	 * Diagnostic only.
+	 */
+	dev_info(dev, "erhai: compute-cb%u mask %u-bit, sid %u, sid_pos %u (domain %d)\n",
+		 sess->sid, dma_bits, sess->sid, cctx->soc_data->sid_pos,
+		 cctx->domain_id);
+
 	return 0;
 }
 
@@ -2503,44 +3578,37 @@ static const struct of_device_id fastrpc_poll_supported_machines[] __maybe_unuse
 	{},
 };
 
-static int fastrpc_init_reserved_mem(struct fastrpc_channel_ctx *cctx,
-				     struct device *rdev, u32 domain_id)
-{
-	struct resource res;
-	u64 src_perms;
-	int err;
+/*
+ * erhai: the CDSP address layout (sid_pos, and therefore the IOVA width that
+ * fits below it) is a property of the DSP firmware as much as of the SoC, and
+ * getting it wrong makes EVERY FastRPC call on that domain fail with
+ * "Error: dsp information is incorrect" (the very first DSP capability query
+ * dies, before any client mapping exists).
+ *
+ * Measured 2026-09-21: the kaanapali values (sid_pos 56 / 34 bits) break the
+ * OxygenOS CDSP firmware that this pad runs, so the 16 GB arena is NOT
+ * reachable by just picking the kaanapali compatible -- the firmware has to
+ * accept the layout.
+ *
+ * These parameters make the layout testable at RUNTIME, without a reboot:
+ *   modprobe fastrpc erhai_sid_pos=34 erhai_dma_bits=34   (try a layout)
+ *   modprobe fastrpc                                      (back to the DT)
+ * They apply to the CDSP channel ONLY -- the ADSP (sensors, audio) always
+ * keeps the soc_data its DT node matched.  Both values must move together:
+ * the IOVA width is exactly what sid_pos leaves below it (the DSP strips the
+ * SID bits back off, see fastrpc_ipa_to_dma_addr()).
+ */
+static unsigned int erhai_sid_pos;
+module_param(erhai_sid_pos, uint, 0644);
+MODULE_PARM_DESC(erhai_sid_pos,
+	"erhai: override soc_data.sid_pos on the CDSP channel (0 = matched soc_data)");
 
-	/* Only SDSP and ADSP domains use a reserved remote heap region */
-	if (domain_id != SDSP_DOMAIN_ID && domain_id != ADSP_DOMAIN_ID)
-		return 0;
+static unsigned int erhai_dma_bits;
+module_param(erhai_dma_bits, uint, 0644);
+MODULE_PARM_DESC(erhai_dma_bits,
+	"erhai: override soc_data.dma_addr_bits_cdsp on the CDSP channel (0 = matched soc_data)");
 
-	err = of_reserved_mem_region_to_resource(rdev->of_node, 0, &res);
-	if (err) {
-		/*
-		 * The reserved-memory region is optional at probe time. For
-		 * the Audio PD (ADSP) domain its absence is validated later in
-		 * fastrpc_init_create_static_process(), so keep probing here.
-		 */
-		return 0;
-	}
-
-	/*
-	 * Audio PD (ADSP) is a static PD: cache the region so its lifetime
-	 * is tied to the rpmsg channel instead of being controlled by
-	 * userspace.
-	 */
-	if (domain_id == ADSP_DOMAIN_ID) {
-		cctx->remote_heap_addr = res.start;
-		cctx->remote_heap_size = resource_size(&res);
-	}
-
-	if (!cctx->vmcount)
-		return 0;
-
-	src_perms = BIT(QCOM_SCM_VMID_HLOS);
-	return qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
-				  cctx->vmperms, cctx->vmcount);
-}
+static struct fastrpc_soc_data erhai_override_soc_data;
 
 static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 {
@@ -2567,6 +3635,24 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 		return -EINVAL;
 	}
 
+	/*
+	 * erhai: optional runtime override of the CDSP address layout (see the
+	 * module parameter descriptions above).  Kept off the ADSP channel so
+	 * sensors/audio always run the DT-matched table.
+	 */
+	if ((erhai_sid_pos || erhai_dma_bits) && domain_id == CDSP_DOMAIN_ID) {
+		erhai_override_soc_data = *soc_data;
+		if (erhai_sid_pos)
+			erhai_override_soc_data.sid_pos = erhai_sid_pos;
+		if (erhai_dma_bits)
+			erhai_override_soc_data.dma_addr_bits_cdsp =
+				erhai_dma_bits;
+		soc_data = &erhai_override_soc_data;
+		dev_info(rdev, "erhai: CDSP soc_data override -> sid_pos %u, dma_addr_bits_cdsp %u\n",
+			 erhai_override_soc_data.sid_pos,
+			 erhai_override_soc_data.dma_addr_bits_cdsp);
+	}
+
 	if (of_reserved_mem_device_init_by_idx(rdev, rdev->of_node, 0))
 		dev_info(rdev, "no reserved DMA memory for FASTRPC\n");
 
@@ -2589,15 +3675,54 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 		}
 	}
 
-	err = fastrpc_init_reserved_mem(data, rdev, domain_id);
-	if (err)
-		goto err_free_data;
+	if (domain_id == SDSP_DOMAIN_ID) {
+		struct resource res;
+		u64 src_perms;
+
+		err = of_reserved_mem_region_to_resource(rdev->of_node, 0, &res);
+		if (!err) {
+			src_perms = BIT(QCOM_SCM_VMID_HLOS);
+
+			err = qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
+				    data->vmperms, data->vmcount);
+			if (err)
+				goto err_free_data;
+		}
+
+	}
 
 	secure_dsp = !(of_property_read_bool(rdev->of_node, "qcom,non-secure-domain"));
 	data->secure = secure_dsp;
 	data->soc_data = soc_data;
 	data->poll_mode_supported = soc_data->poll_mode_supported ||
 		of_machine_get_match(fastrpc_poll_supported_machines);
+
+	/*
+	 * erhai: initialize the channel BEFORE the device nodes are registered.
+	 * fastrpc_device_register() -> misc_register() publishes /dev/fastrpc-*
+	 * and a client may open() it at once -- and that path uses all of this
+	 * state (kref_get() on the refcount, spin_lock(&cctx->lock),
+	 * idr_alloc_cyclic(&cctx->ctx_idr), cctx->rpdev, cctx->users).  With the
+	 * initialization after the registration, such an early open() did
+	 * kref_get() on the zeroed refcount, and the kref_init() that used to
+	 * follow the registration then RESET the counter -- losing the
+	 * reference that open() took, so the channel's last put decremented
+	 * zero: "refcount_t: underflow; use-after-free" (the 2026-10-23
+	 * report; same class as the duplicate COMPLETE handled in
+	 * fastrpc_rpmsg_callback()).
+	 */
+	kref_init(&data->refcount);
+	atomic_set(&data->ctx_seq, 0);
+
+	rdev->dma_mask = &data->dma_mask;
+	dma_set_mask_and_coherent(rdev, DMA_BIT_MASK(32));
+	INIT_LIST_HEAD(&data->users);
+	INIT_LIST_HEAD(&data->invoke_interrupted_mmaps);
+	spin_lock_init(&data->lock);
+	idr_init(&data->ctx_idr);
+	data->domain_id = domain_id;
+	data->rpdev = rpdev;
+	dev_set_drvdata(&rpdev->dev, data);
 
 	switch (domain_id) {
 	case ADSP_DOMAIN_ID:
@@ -2625,19 +3750,6 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 		err = -EINVAL;
 		goto err_free_data;
 	}
-
-	kref_init(&data->refcount);
-	atomic_set(&data->ctx_seq, 0);
-
-	rdev->dma_mask = &data->dma_mask;
-	dma_set_mask_and_coherent(rdev, DMA_BIT_MASK(32));
-	INIT_LIST_HEAD(&data->users);
-	INIT_LIST_HEAD(&data->invoke_interrupted_mmaps);
-	spin_lock_init(&data->lock);
-	idr_init(&data->ctx_idr);
-	data->domain_id = domain_id;
-	data->rpdev = rpdev;
-	dev_set_drvdata(&rpdev->dev, data);
 
 	err = of_platform_populate(rdev->of_node, NULL, NULL, rdev);
 	if (err)
@@ -2675,6 +3787,9 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	struct fastrpc_user *user;
 	unsigned long flags;
 
+	/* erhai (b33 diagnostic): the books before/after the probe reference */
+	fastrpc_channel_books(cctx, "rpmsg-remove entry");
+
 	/* No invocations past this point */
 	spin_lock_irqsave(&cctx->lock, flags);
 	cctx->rpdev = NULL;
@@ -2691,28 +3806,12 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 	list_for_each_entry_safe(buf, b, &cctx->invoke_interrupted_mmaps, node)
 		list_del(&buf->node);
 
-	if (cctx->remote_heap_size && cctx->vmcount) {
-		u64 src_perms = 0;
-		int err, i;
-		struct qcom_scm_vmperm dst_perms;
-
-		for (i = 0; i < cctx->vmcount; i++)
-			src_perms |= BIT(cctx->vmperms[i].vmid);
-
-		dst_perms.vmid = QCOM_SCM_VMID_HLOS;
-		dst_perms.perm = QCOM_SCM_PERM_RWX;
-
-		err = qcom_scm_assign_mem(cctx->remote_heap_addr,
-					  cctx->remote_heap_size, &src_perms,
-					  &dst_perms, 1);
-		if (err)
-			dev_err(&rpdev->dev,
-				"Failed to assign memory back to HLOS: addr %pa size %#llx err %d\n",
-				&cctx->remote_heap_addr, cctx->remote_heap_size, err);
-	}
+	if (cctx->remote_heap)
+		fastrpc_buf_free(cctx->remote_heap);
 
 	of_platform_depopulate(&rpdev->dev);
 
+	fastrpc_channel_books(cctx, "rpmsg-remove before put");
 	fastrpc_channel_ctx_put(cctx);
 }
 
@@ -2775,8 +3874,26 @@ static int fastrpc_rpmsg_callback(struct rpmsg_device *rpdev, void *data,
 	 * The DMA buffer associated with the context cannot be freed in
 	 * interrupt context so schedule it through a worker thread to
 	 * avoid a kernel BUG.
+	 *
+	 * erhai: the reference this put releases was taken in
+	 * fastrpc_invoke_send() and belongs to the RESPONSE -- so it must be
+	 * released exactly once.  A duplicated (or replayed) glink COMPLETE for
+	 * a context that is still alive would otherwise put it twice: the
+	 * second put frees the context while it is still linked in
+	 * fastrpc_user->pending, and whoever puts that dangling entry later
+	 * (fastrpc_user_free() or the fd-close release) walks freed memory --
+	 * observed 2026-10-23 as
+	 *   refcount_t: underflow; use-after-free
+	 *   fastrpc_context_free <- kref_put <- fastrpc_device_release
+	 * The sequence-number check above only rejects responses for a RECYCLED
+	 * ctxid; this one covers the same live context answering twice.
 	 */
-	schedule_work(&ctx->put_work);
+	if (!test_and_set_bit(0, &ctx->reply_put_done))
+		schedule_work(&ctx->put_work);
+	else
+		dev_warn_ratelimited(&rpdev->dev,
+				     "erhai: duplicate COMPLETE for ctx 0x%llx ignored\n",
+				     rsp->ctx);
 
 	return 0;
 }

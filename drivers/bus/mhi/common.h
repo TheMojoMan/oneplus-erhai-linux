@@ -16,6 +16,7 @@
 #define MHICFG				0x10
 #define CHDBOFF				0x18
 #define ERDBOFF				0x20
+#define MISCOFF				0x24
 #define BHIOFF				0x28
 #define BHIEOFF				0x2c
 #define DEBUGOFF			0x30
@@ -37,6 +38,27 @@
 #define MHIDATABASE_HIGHER		0x9c
 #define MHIDATALIMIT_LOWER		0xa0
 #define MHIDATALIMIT_HIGHER		0xa4
+
+/* MHI MISC-region capability chain (qcom vendor extension; mainline has no cap
+ * walk). MISCOFF (0x24) holds the offset of the first capability; each cap
+ * header word has the CAP_ID in bits 31:24 and the next-cap offset in bits
+ * 23:12 (0 = end of chain). Used to advertise host BW_SCALE support so the
+ * peach/WCN7880 firmware emits MHI BW_REQ events. Values byte-verified against
+ * the working vendor mhi.ko (mhi_misc_init_mmio / mhi_get_capability_offset).
+ */
+#define MHI_MISC_CAP_CAPID_MASK		GENMASK(31, 24)
+#define MHI_MISC_CAP_NEXT_MASK		GENMASK(23, 12)
+#define MHI_BW_SCALE_CAP_ID		3
+#define MHI_BW_SCALE_CFG_OFFSET		0x04
+/* BW_SCALE_CFG = enable(bit31) | qcom vector/db cfg(0x7d in bits 30:24) |
+ * bw_scale event-ring index in bits 23:19. (vendor const 0xfd000000.)
+ */
+#define MHI_BW_SCALE_CFG(er_index)	(0xfd000000u | ((u32)(er_index) << 19))
+/* Host acks a BW_REQ by ringing channel-126's doorbell with the echoed seq
+ * byte and a status nibble (0 = success) in bits 11:8.
+ */
+#define MHI_BW_SCALE_CHAN_DB		126
+#define MHI_BW_SCALE_RESULT(status, seq) (((seq) & 0xff) | (((status) & 0xf) << 8))
 
 /* MHI BHI registers */
 #define BHI_BHIVERSION_MINOR		0x00
@@ -164,6 +186,7 @@
 #define MHI_TRE_GET_EV_VEID(tre)	FIELD_GET(GENMASK(23, 16), (MHI_TRE_GET_DWORD(tre, 0)))
 #define MHI_TRE_GET_EV_LINKSPEED(tre)	FIELD_GET(GENMASK(31, 24), (MHI_TRE_GET_DWORD(tre, 1)))
 #define MHI_TRE_GET_EV_LINKWIDTH(tre)	FIELD_GET(GENMASK(7, 0), (MHI_TRE_GET_DWORD(tre, 0)))
+#define MHI_TRE_GET_EV_BW_SEQ(tre)	FIELD_GET(GENMASK(15, 8), (MHI_TRE_GET_DWORD(tre, 0)))
 
 /* State change event */
 #define MHI_SC_EV_PTR			0
