@@ -842,7 +842,25 @@
 #define WCD939X_DSD_HPHR_CFG5				   (0x35a6)
 #define WCD939X_MAX_REGISTER				   (WCD939X_DSD_HPHR_CFG5)
 
+/*
+ * erhai mic EXPERIMENTAL: SDW 1.2 slave DPn block — the codec's OWN SDW
+ * register space (0x0000..0x0FFF), NOT the 0x3000+ CSR area the rest of
+ * this header describes.  Android programmes these at record time (lt9611
+ * trace dev=1: 0x130=01, 0x132=01, 0x138=01, 0x102=00 = ADC1/DP1 and
+ * 0x230=02, 0x232=01, 0x238=02, 0x202=00 = ADC4/DP2 = the ACTIVE-bank
+ * channel-enable / sample-ctrl1 / offset-ctrl1 plus per-DPn INT_MASK).
+ * Lane encoding unverified -> gated behind erhai_tx_chmap_silicon_regs
+ * (snd-soc-wcd939x module param, default off).
+ */
+#define WCD939X_DPN_INT_MASK_OFF		 0x02
+#define WCD939X_DPN_CHANNEL_ENABLE_OFF		 0x30
+#define WCD939X_DPN_SAMPLE_CTRL1_OFF		 0x32
+#define WCD939X_DPN_OFFSET_CTRL1_OFF		 0x38
+
+#define WCD939X_DP1_BASE			 0x0100
+#define WCD939X_DP2_BASE			 0x0200
 #define WCD939X_MAX_SWR_CH_IDS		(15)
+#define WCD939X_SWRM_CH_MASK(ch_idx)	BIT((ch_idx) - 1)
 
 enum wcd939x_tx_sdw_ports {
 	WCD939X_ADC_1_4_PORT = 1,
@@ -898,8 +916,11 @@ struct wcd939x_sdw_priv {
 	struct sdw_stream_config sconfig;
 	struct sdw_stream_runtime *sruntime;
 	struct sdw_port_config port_config[WCD939X_MAX_SWR_PORTS];
-	const struct wcd_sdw_ch_info *ch_info;
+	struct wcd_sdw_ch_info *ch_info;
+	/* Requested switch state per channel ID, not per shared port. */
 	bool port_enable[WCD939X_MAX_SWR_CH_IDS];
+	/* per master port: bitmask of channels carrying data (get_channel_map) */
+	unsigned int master_channel_map[SDW_MAX_PORTS];
 	int active_ports;
 	bool is_tx;
 	struct wcd939x_priv *wcd939x;

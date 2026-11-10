@@ -2,6 +2,9 @@
 // Copyright (c) 2022, Linaro Limited
 
 #include <dt-bindings/sound/qcom,q6afe.h>
+#include <dt-bindings/sound/qcom,q6dsp-lpass-ports.h>
+#include <linux/clk.h>
+#include <linux/of.h>
 #include <linux/module.h>
 #include <linux/platform_device.h>
 #include <sound/soc.h>
@@ -81,6 +84,8 @@ struct sc8280xp_snd_data {
 	struct snd_soc_jack dp_jack[8];
 	const struct qcom_snd_soc_common *priv;
 	bool jack_setup;
+	/* erhai: lifetime vote on the SEC TDM bit clock (audit F07) */
+	struct clk *sec_tdm_clk;
 };
 
 static inline int sc8280xp_get_mclk_freq(struct snd_pcm_hw_params *params)
@@ -116,6 +121,9 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	struct qcom_snd_tdm_slot_cfg cpu_cfg;
 	struct qcom_snd_tdm_slot_cfg codec_cfg;
 	int bclk_freq;
+	/* erhai mic A-2 (d1f84c6f9f): keep the link's own DAI format */
+	unsigned int cpu_fmt = (rtd->dai_link->dai_fmt & ~SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) |
+		SND_SOC_DAIFMT_BP_FP;
 	int ret;
 	int i;
 
@@ -126,7 +134,7 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	if (!cpu_cfg.slots)
 		return 0;
 
-	ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+	ret = snd_soc_dai_set_fmt(cpu_dai, cpu_fmt);
 	if (ret && ret != -ENOTSUPP)
 		return ret;
 
@@ -172,6 +180,84 @@ static int sc8280xp_tdm_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
+/*
+ * The AW88261 amplifiers on the secondary TDM bus need a running LPAIF bit
+ * clock (8 slots x 32 bit @ 48 kHz) before their PLL-lock check, and the DSP
+ * does not vote for it on its own here. Vote for it from the AP side through
+ * q6prm when that backend is initialised.
+ */
+#define SEC_TDM_IBIT_RATE	12288000
+
+/*
+ * erhai (audit F07): the SEC TDM bit clock has to stay alive for the card's
+ * lifetime, but the reference taken here used to leak on every call --
+ * of_clk_get_from_provider() takes a clk reference and clk_prepare_enable()
+ * an enable count, and neither was ever dropped (no clk_put in this file).
+ * Take the vote exactly once and hand the release to devres, which runs it
+ * when the card device is torn down.
+ */
+static void sc8280xp_sec_tdm_clk_release(void *arg)
+{
+	struct clk *clk = arg;
+
+	clk_disable_unprepare(clk);
+	clk_put(clk);
+}
+
+static void sc8280xp_vote_sec_tdm_bclk(struct snd_soc_card *card)
+{
+	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(card);
+	struct device *dev = card->dev;
+	struct of_phandle_args clkspec;
+	struct device_node *np;
+	struct clk *clk;
+	int ret;
+
+	if (data && data->sec_tdm_clk)
+		return;			/* vote already taken */
+
+	np = of_find_compatible_node(NULL, NULL, "qcom,q6prm-lpass-clocks");
+	if (!np) {
+		dev_err(dev, "q6prm-lpass-clocks node not found\n");
+		return;
+	}
+
+	clkspec.np = np;
+	clkspec.args_count = 2;
+	clkspec.args[0] = LPASS_CLK_ID_SEC_TDM_IBIT;
+	clkspec.args[1] = LPASS_CLK_ATTRIBUTE_COUPLE_NO;
+	clk = of_clk_get_from_provider(&clkspec);
+	of_node_put(np);
+	if (IS_ERR(clk)) {
+		dev_err(dev, "failed to get SEC_TDM_IBIT: %ld\n", PTR_ERR(clk));
+		return;
+	}
+
+	ret = clk_set_rate(clk, SEC_TDM_IBIT_RATE);
+	if (ret) {
+		dev_err(dev, "failed to set SEC_TDM_IBIT rate: %d\n", ret);
+		clk_put(clk);
+		return;
+	}
+
+	ret = devm_add_action(dev, sc8280xp_sec_tdm_clk_release, clk);
+	if (ret) {
+		dev_err(dev, "failed to register SEC_TDM_IBIT cleanup: %d\n",
+			ret);
+		clk_put(clk);
+		return;
+	}
+
+	ret = clk_prepare_enable(clk);
+	if (ret) {
+		dev_err(dev, "failed to enable SEC_TDM_IBIT: %d\n", ret);
+		return;		/* devres still drops the reference */
+	}
+
+	if (data)
+		data->sec_tdm_clk = clk;
+}
+
 static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
@@ -181,6 +267,14 @@ static int sc8280xp_snd_init(struct snd_soc_pcm_runtime *rtd)
 	int dp_pcm_id = 0;
 
 	switch (cpu_dai->id) {
+	case PRIMARY_MI2S_RX...QUATERNARY_MI2S_TX:
+	case QUINARY_MI2S_RX...QUINARY_MI2S_TX:
+		snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+		if (cpu_dai->id == SECONDARY_MI2S_RX)
+			sc8280xp_vote_sec_tdm_bclk(card);
+		break;
+
+
 	case WSA_CODEC_DMA_RX_0:
 	case WSA_CODEC_DMA_RX_1:
 		/*
@@ -240,8 +334,8 @@ static int sc8280xp_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 		break;
 	}
 
-
-	return 0;
+	/* erhai mic A-2 (d1f84c6f9f): board-requested conversions last */
+	return qcom_snd_be_hw_params_fixup(rtd, params);
 }
 
 static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
@@ -253,6 +347,9 @@ static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
 	int mclk_freq = sc8280xp_get_mclk_freq(params);
 	int bclk_freq = sc8280xp_get_bclk_freq(params);
+	/* erhai mic A-2 (d1f84c6f9f): keep the link's own DAI format */
+	unsigned int cpu_fmt = (rtd->dai_link->dai_fmt & ~SND_SOC_DAIFMT_CLOCK_PROVIDER_MASK) |
+		SND_SOC_DAIFMT_BP_FP;
 	int ret;
 
 	switch (cpu_dai->id) {
@@ -260,11 +357,12 @@ static int sc8280xp_snd_hw_params(struct snd_pcm_substream *substream,
 	case QUINARY_MI2S_RX ... QUINARY_MI2S_TX:
 	case SENARY_MI2S_RX ... SENARY_MI2S_TX:
 	case LPI_MI2S_RX_0 ... LPI_MI2S_TX_4:
-		ret = snd_soc_dai_set_fmt(cpu_dai, SND_SOC_DAIFMT_BP_FP);
+		ret = snd_soc_dai_set_fmt(cpu_dai, cpu_fmt);
 		if (ret && ret != -ENOTSUPP)
 			return ret;
 
-		if (data->priv->codec_dai_fmt) {
+		/* an explicit link DAI format wins over the board default */
+		if (!rtd->dai_link->dai_fmt && data->priv->codec_dai_fmt) {
 			ret = snd_soc_dai_set_fmt(codec_dai,
 						  data->priv->codec_dai_fmt);
 			if (ret && ret != -ENOTSUPP)
@@ -342,11 +440,110 @@ static int ayaneo_ps2_snd_prepare(struct snd_pcm_substream *substream)
 					   ayaneo_ps2_channels_mapping);
 }
 
+/*
+ * erhai mic A-2b (2026-10-19): the CPU-dai TX channel-map derivation below is
+ * an erhai invention - the working OnePlus Pad 2 Pro port programs NO BE
+ * channel map at all and lets q6dma_hw_params() install the default FL/FR map
+ * (audioreach_set_default_channel_mapping()).  Ours overwrote that map with
+ * the compaction of the codec's master_channel_map, which with the b26 DTS is
+ * a single entry ({0} before, {1} after) while q6dma_set_channel_map() copies
+ * exactly that many entries into cfg->channel_map[] - so the remaining
+ * entries stayed stale and the DSP received a map whose first id is not the
+ * FL/FR pair.  Default OFF = parity with the working port; set to 1 to get the
+ * pre-b26 behaviour back at runtime.
+ */
+static bool erhai_tx_chmap;
+module_param(erhai_tx_chmap, bool, 0644);
+MODULE_PARM_DESC(erhai_tx_chmap,
+		 "derive the CPU-dai TX channel map from the codec (default 0 = off, like the working port)");
+
+/*
+ * For SoundWire capture backends the ADSP codec_dma interface must be told
+ * which LPASS intf channel carries each logical PCM channel. The codec
+ * get_channel_map() returns master_channel_map[] indexed by master port
+ * with a bitmask of active channels per port; for codec_dma each active
+ * master port feeds the intf channel with the same number, so the BE
+ * channel map is the ascending list of ports that have active channels
+ * (e.g. wcd939x ADC1->port2, ADC4->port3 => map {2,3}, matching the
+ * OxygenOS ground truth "CODEC_DMA-LPAIF_RXTX-TX-3 Channel Map {02,03}").
+ *
+ * Must run in prepare(): the q6apmbedai cpu dai's hw_params resets the map
+ * to the sequential default, and its prepare() sends the media format to
+ * the ADSP — snd_soc_link_prepare (here) runs between the two.
+ */
+static int sc8280xp_snd_set_cpu_tx_channel_map(struct snd_soc_pcm_runtime *rtd,
+					       struct snd_soc_dai *cpu_dai)
+{
+	unsigned int tx_ch[SDW_MAX_PORTS], rx_ch[SDW_MAX_PORTS];
+	unsigned int ch_map[SDW_MAX_PORTS];
+	struct snd_soc_dai *codec_dai;
+	unsigned int tx_num = 0, rx_num;
+	int ret, i, j, n = 0;
+
+	for_each_rtd_codec_dais(rtd, i, codec_dai) {
+		ret = snd_soc_dai_get_channel_map(codec_dai, &tx_num, tx_ch,
+						  &rx_num, rx_ch);
+		if (ret == -ENOTSUPP)
+			continue;
+		if (ret) {
+			dev_err(rtd->dev, "Failed to get codec chan map %s\n",
+				codec_dai->name);
+			return ret;
+		}
+		break;
+	}
+
+	for (j = 0; j < tx_num; j++) {
+		if (tx_ch[j])
+			ch_map[n++] = j;
+	}
+
+	if (!n)
+		return 0;
+
+	/* TEMP DEBUG (mic bringup, +b22) */
+	dev_info(rtd->dev, "MICDBG machine: cpu_dai %s compacted map n=%u: %u %u %u %u\n",
+		 cpu_dai->name, n,
+		 n > 0 ? ch_map[0] : 0, n > 1 ? ch_map[1] : 0,
+		 n > 2 ? ch_map[2] : 0, n > 3 ? ch_map[3] : 0);
+
+	ret = snd_soc_dai_set_channel_map(cpu_dai, n, ch_map, 0, NULL);
+	if (ret)
+		dev_err(rtd->dev, "Failed to set cpu channel map %s: %d\n",
+			cpu_dai->name, ret);
+
+	return ret;
+
+
+}
+
 static int sc8280xp_snd_prepare(struct snd_pcm_substream *substream)
 {
 	struct snd_soc_pcm_runtime *rtd = snd_soc_substream_to_rtd(substream);
 	struct snd_soc_dai *cpu_dai = snd_soc_rtd_to_cpu(rtd, 0);
 	struct sc8280xp_snd_data *data = snd_soc_card_get_drvdata(rtd->card);
+	int ret = 0;
+
+	switch (cpu_dai->id) {
+	case VA_CODEC_DMA_TX_0:
+	case VA_CODEC_DMA_TX_1:
+	case VA_CODEC_DMA_TX_2:
+	case TX_CODEC_DMA_TX_0:
+	case TX_CODEC_DMA_TX_1:
+	case TX_CODEC_DMA_TX_2:
+	case TX_CODEC_DMA_TX_3:
+	case TX_CODEC_DMA_TX_4:
+	case TX_CODEC_DMA_TX_5:
+		/* erhai mic A-2b: off by default, see erhai_tx_chmap */
+		if (erhai_tx_chmap)
+			ret = sc8280xp_snd_set_cpu_tx_channel_map(rtd, cpu_dai);
+		break;
+	default:
+		break;
+	}
+
+	if (ret)
+		return ret;
 
 	if (data->priv->snd_prepare) {
 		int ret;

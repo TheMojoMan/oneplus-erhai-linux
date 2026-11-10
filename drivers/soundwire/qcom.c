@@ -111,6 +111,15 @@
 #define SWRM_DPn_PORT_HCTRL_BANK(offset,  n, m)	(offset + 0x100 * (n - 1) + 0x40 * m)
 #define SWRM_DPn_BLOCK_CTRL3_BANK(offset, n, m)	(offset + 0x100 * (n - 1) + 0x40 * m)
 #define SWRM_DPn_SAMPLECTRL2_BANK(offset, n, m)	(offset + 0x100 * (n - 1) + 0x40 * m)
+/* erhai mic bring-up (+b35): DPn PCM port control — bank-independent,
+ * connects the master DPn payload to the LPAIF codec_dma intf. The
+ * vendor master writes 0x3 here for every enabled non-PDM port
+ * (swrm_pcm_port_config()) and 0x0 on full disable; mainline never
+ * touched it, leaving the intf permanently disconnected (all TX
+ * captures delivered exact digital zeros while every transport
+ * register was at vendor parity). */
+#define SWRM_DPn_PCM_PORT_CTRL(offset, n)	(offset + 0x100 * (n - 1))
+#define SWRM_DPn_PCM_PORT_CTRL_EN		0x3
 
 #define SWR_V1_3_MSTR_MAX_REG_ADDR				0x1740
 #define SWR_V2_0_MSTR_MAX_REG_ADDR				0x50ac
@@ -182,6 +191,7 @@ enum {
 	SWRM_OFFSET_DP_PORT_HCTRL_BANK,
 	SWRM_OFFSET_DP_BLOCK_CTRL3_BANK,
 	SWRM_OFFSET_DP_SAMPLECTRL2_BANK,
+	SWRM_OFFSET_DP_PCM_PORT_CTRL,
 };
 
 struct qcom_swrm_ctrl {
@@ -248,6 +258,7 @@ static const unsigned int swrm_v1_3_reg_layout[] = {
 	[SWRM_OFFSET_DP_PORT_HCTRL_BANK]	= 0x1134,
 	[SWRM_OFFSET_DP_BLOCK_CTRL3_BANK]	= 0x1138,
 	[SWRM_OFFSET_DP_SAMPLECTRL2_BANK]	= 0x113c,
+	[SWRM_OFFSET_DP_PCM_PORT_CTRL]		= 0x1154,
 };
 
 static const struct qcom_swrm_data swrm_v1_3_data = {
@@ -289,6 +300,7 @@ static const unsigned int swrm_v2_0_reg_layout[] = {
 	[SWRM_OFFSET_DP_PORT_HCTRL_BANK]	= 0x1134,
 	[SWRM_OFFSET_DP_BLOCK_CTRL3_BANK]	= 0x1138,
 	[SWRM_OFFSET_DP_SAMPLECTRL2_BANK]	= 0x113c,
+	[SWRM_OFFSET_DP_PCM_PORT_CTRL]		= 0x1154,
 };
 
 static const struct qcom_swrm_data swrm_v2_0_data = {
@@ -316,6 +328,7 @@ static const unsigned int swrm_v3_0_reg_layout[] = {
 	[SWRM_OFFSET_DP_PORT_HCTRL_BANK]	= 0x1234,
 	[SWRM_OFFSET_DP_BLOCK_CTRL3_BANK]	= 0x1238,
 	[SWRM_OFFSET_DP_SAMPLECTRL2_BANK]	= 0x123c,
+	[SWRM_OFFSET_DP_PCM_PORT_CTRL]		= 0x1254,
 };
 
 static const struct qcom_swrm_data swrm_v3_0_data = {
@@ -886,7 +899,8 @@ static int qcom_swrm_init(struct qcom_swrm_ctrl *ctrl)
 
 	reset_control_reset(ctrl->audio_cgcr);
 
-	ctrl->reg_write(ctrl, SWRM_MCP_FRAME_CTRL_BANK_ADDR(0), val);
+	ctrl->reg_write(ctrl, SWRM_MCP_FRAME_CTRL_BANK_ADDR(0),
+			val | FIELD_PREP(GENMASK(25, 16), 5));
 
 	/* Enable Auto enumeration */
 	ctrl->reg_write(ctrl, SWRM_ENUMERATOR_CFG_ADDR, 1);
@@ -1024,6 +1038,14 @@ static int qcom_swrm_pre_bank_switch(struct sdw_bus *bus)
 
 	u32p_replace_bits(&val, ctrl->cols_index, SWRM_MCP_FRAME_CTRL_BANK_COL_CTRL_BMSK);
 	u32p_replace_bits(&val, ctrl->rows_index, SWRM_MCP_FRAME_CTRL_BANK_ROW_CTRL_BMSK);
+	/* TEMP DEBUG (mic bringup, +b37): SSP period — bits 25:16 reset to 0
+	 * and mainline never programs them; the vendor master writes
+	 * (bus_clk*2)/(row*col*frame_sync)-1 = 5 for 50x16 @ 9.6MHz with
+	 * frame_sync 4000 (and 6 for the native 3675) — either way 5.
+	 * Data ports sync their phase off this boundary; control commands
+	 * tolerate SSP=0 but slave DATA ports do not (wcd939x TX ports
+	 * transmitted nothing with SSP=0 despite full transport parity). */
+	val |= FIELD_PREP(GENMASK(25, 16), 5);
 
 	return ctrl->reg_write(ctrl, reg, val);
 }
@@ -1034,6 +1056,15 @@ static int qcom_swrm_port_params(struct sdw_bus *bus,
 {
 	struct qcom_swrm_ctrl *ctrl = to_qcom_sdw(bus);
 	u32 offset = ctrl->reg_layout[SWRM_OFFSET_DP_BLOCK_CTRL_1];
+
+	/* TEMP DEBUG (mic bringup, +b53): did the master's block word-length
+	 * write actually happen and with which bps? (b52 mstr_live showed
+	 * blk1=0x0 on ports 3/4 while the slave's DPN block is 16-bit.) */
+	dev_info(ctrl->dev,
+		 "MICDBG mstr_blk1: port %u bank %u bps %u -> reg 0x%x val 0x%x\n",
+		 p_params->num, bank, p_params->bps,
+		 SWRM_DPn_BLOCK_CTRL_1(offset, p_params->num),
+		 p_params->bps - 1);
 
 	return ctrl->reg_write(ctrl, SWRM_DPn_BLOCK_CTRL_1(offset, p_params->num),
 				p_params->bps - 1);
@@ -1123,18 +1154,96 @@ static int qcom_swrm_port_enable(struct sdw_bus *bus,
 	u32 reg;
 	struct qcom_swrm_ctrl *ctrl = to_qcom_sdw(bus);
 	u32 val;
+	int ret;
 	u32 offset = ctrl->reg_layout[SWRM_OFFSET_DP_PORT_CTRL_BANK];
+	u32 pcm_offset = ctrl->reg_layout[SWRM_OFFSET_DP_PCM_PORT_CTRL];
 
 	reg = SWRM_DPn_PORT_CTRL_BANK(offset, enable_ch->port_num, bank);
 
 	ctrl->reg_read(ctrl, reg, &val);
+
+	/* TEMP DEBUG (mic bringup, +b22): master port enable/disable */
+	dev_info(ctrl->dev, "MICDBG port_enable: port %u bank %u en %u ch_mask=0x%x reg=0x%x old=0x%x\n",
+		 enable_ch->port_num, bank, enable_ch->enable,
+		 enable_ch->ch_mask, reg, val);
 
 	if (enable_ch->enable)
 		val |= (enable_ch->ch_mask << SWRM_DP_PORT_CTRL_EN_CHAN_SHFT);
 	else
 		val &= ~(0xff << SWRM_DP_PORT_CTRL_EN_CHAN_SHFT);
 
-	return ctrl->reg_write(ctrl, reg, val);
+	ret = ctrl->reg_write(ctrl, reg, val);
+	if (ret)
+		return ret;
+
+	/*
+	 * erhai mic bring-up (+b35): connect/disconnect the master DPn
+	 * port to the LPAIF codec_dma intf. Without DPn PCM_PORT_CTRL =
+	 * 0x3 the intf never sees the payload and every TX capture
+	 * delivers exact digital zeros (vendor parity: the vendor
+	 * master's swrm_pcm_port_config() writes 0x3 for every enabled
+	 * non-PDM port and 0x0 when the port has no channels left).
+	 * Bank-independent register. (PDM ports are skipped in the
+	 * vendor code; mainline has no stream type here, and all current
+	 * erhai SoundWire users are PCM.)
+	 */
+	if (enable_ch->enable) {
+		reg = SWRM_DPn_PCM_PORT_CTRL(pcm_offset, enable_ch->port_num);
+		dev_info(ctrl->dev, "MICDBG pcm_port: port %u reg=0x%x val=0x%x\n",
+			 enable_ch->port_num, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
+		ret = ctrl->reg_write(ctrl, reg, SWRM_DPn_PCM_PORT_CTRL_EN);
+		if (ret)
+			return ret;
+
+		/* TEMP DEBUG (mic bringup, +b52): the master's live silicon
+		 * verdict while the TX data path is supposed to be running —
+		 * frame generation, latched interrupt status, and the per-port
+		 * transport registers the master believes it programmed (both
+		 * banks of PORT_CTRL_2 / the block word-length). A data-bearing
+		 * port shows PORT_CTRL EN_CHAN set, PORT_CTRL_2 lane, BLOCK_CTRL_1
+		 * = bps-1 (0x0f for 16-bit), PCM_PORT_CTRL = 0x3; frame_gen > 0
+		 * and int_stat with the outstanding-port bits. */
+		{
+			u32 fgen = 0, istat = 0, p2b0 = 0, p2b1 = 0, bc1 = 0, pcv = 0;
+			u32 p2_off = ctrl->reg_layout[SWRM_OFFSET_DP_PORT_CTRL_2_BANK];
+			u32 b1_off = ctrl->reg_layout[SWRM_OFFSET_DP_BLOCK_CTRL_1];
+
+			ctrl->reg_read(ctrl,
+				       ctrl->reg_layout[SWRM_REG_FRAME_GEN_ENABLED],
+				       &fgen);
+			ctrl->reg_read(ctrl,
+				       ctrl->reg_layout[SWRM_REG_INTERRUPT_STATUS],
+				       &istat);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_PORT_CTRL_2_BANK(p2_off,
+								enable_ch->port_num, 0),
+				       &p2b0);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_PORT_CTRL_2_BANK(p2_off,
+								enable_ch->port_num, 1),
+				       &p2b1);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_BLOCK_CTRL_1(b1_off,
+							       enable_ch->port_num),
+				       &bc1);
+			ctrl->reg_read(ctrl,
+				       SWRM_DPn_PCM_PORT_CTRL(pcm_offset,
+							       enable_ch->port_num),
+				       &pcv);
+			dev_info(ctrl->dev,
+				 "MICDBG mstr_live: port %u bank %u frame_gen=0x%x int_stat=0x%x p2[b0]=0x%x p2[b1]=0x%x blk1=0x%x pcm=0x%x\n",
+				 enable_ch->port_num, bank, fgen, istat, p2b0,
+				 p2b1, bc1, pcv);
+		}
+		return 0;
+	}
+
+	if (!(val >> SWRM_DP_PORT_CTRL_EN_CHAN_SHFT)) {
+		reg = SWRM_DPn_PCM_PORT_CTRL(pcm_offset, enable_ch->port_num);
+		return ctrl->reg_write(ctrl, reg, 0x0);
+	}
+
+	return 0;
 }
 
 static const struct sdw_master_port_ops qcom_swrm_port_ops = {
@@ -1169,6 +1278,11 @@ static int qcom_swrm_compute_params(struct sdw_bus *bus, struct sdw_stream_runti
 					     p_rt->num,  pcfg->word_length + 1,
 					     SDW_PORT_FLOW_MODE_ISOCH,
 					     SDW_PORT_DATA_MODE_NORMAL);
+			/* TEMP DEBUG (mic bringup, +b53) */
+			dev_info(ctrl->dev,
+				 "MICDBG cfg: mstr port %u word_len=%u bps=%u\n",
+				 p_rt->num, pcfg->word_length,
+				 pcfg->word_length + 1);
 			}
 
 		}
@@ -1242,22 +1356,33 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 	struct sdw_slave *slave;
 	unsigned long *port_mask;
 	int maxport, pn, nports = 0;
+	int ret;
 	unsigned int m_port;
 	struct sdw_port_config *pconfig __free(kfree) = kzalloc_objs(*pconfig,
 								     ctrl->nports);
 	if (!pconfig)
 		return -ENOMEM;
 
-	if (direction == SNDRV_PCM_STREAM_CAPTURE)
+	if (direction == SNDRV_PCM_STREAM_CAPTURE) {
 		sconfig.direction = SDW_DATA_DIR_TX;
-	else
+		/*
+		 * erhai: wcd939x AMIC capture carries 16-bit PCM, not PDM.
+		 * The hardcoded PDM bps=1 made the core program 1-bit words
+		 * on BOTH sides (slave BlockCtrl1 derives from
+		 * stream->params.bps), so the intf received mis-packed
+		 * constant garbage (2026-09-10). ch_count must stay 1 so the
+		 * master/slave block-offset accumulation stays aligned
+		 * (port4 = port_bo + bps*1).
+		 */
+		sconfig.bps = params_width(params);
+	} else {
 		sconfig.direction = SDW_DATA_DIR_RX;
-
-	/* hw parameters will be ignored as we only support PDM */
+		/* hw parameters will be ignored as we only support PDM */
+		sconfig.bps = 1;
+	}
 	sconfig.ch_count = 1;
 	sconfig.frame_rate = params_rate(params);
 	sconfig.type = stream->type;
-	sconfig.bps = 1;
 
 	guard(mutex)(&ctrl->port_lock);
 
@@ -1282,22 +1407,63 @@ static int qcom_swrm_stream_alloc_ports(struct qcom_swrm_ctrl *ctrl,
 				if (m_port)
 					pn = m_port;
 				else
-					pn = find_first_zero_bit(port_mask, maxport);
+					/*
+					 * erhai: the port_mask bit index IS the
+					 * 1-based port number, so a controller
+					 * with maxport ports has valid port
+					 * numbers 1..maxport.  Upstream
+					 * 6ccec91c35 ("soundwire: qcom: Fix port
+					 * exhaustion check") tightened the guard
+					 * to >= to catch exhaustion (a full mask
+					 * makes find_first_zero_bit() return
+					 * maxport), which now rejects the
+					 * legitimate LAST port.  erhai's TX
+					 * capture uses master ports 3 and 4 of
+					 * swr2's 4 din ports, so hw_params died
+					 * with -EBUSY ("All ports busy") on SDW
+					 * Pin0 and ALSA could not even open
+					 * hw:0,2 (2026-09-15..17, every boot).
+					 * Search one bit further instead: a full
+					 * mask then returns maxport + 1.
+					 */
+					pn = find_first_zero_bit(port_mask, maxport + 1);
 
-				if (pn >= maxport) {
+				if (pn > maxport) {
 					dev_err(ctrl->dev, "All ports busy\n");
 					return -EBUSY;
 				}
 				set_bit(pn, port_mask);
 				pconfig[nports].num = pn;
+				/*
+				 * Master port ch_mask = slave port ch_mask
+				 * (vendor passthrough: ADC1 slave DP1 ch1 ->
+				 * master port3 ch1, ADC4 slave DP2 ch2 ->
+				 * master port4 ch2; ADSP TX3 intf map {02,03}
+				 * then yields PCM ch0 = ADC1, ch1 = ADC4).
+				 */
 				pconfig[nports].ch_mask = p_rt->ch_mask;
 				nports++;
+				/* TEMP DEBUG (mic bringup, +b22): master port alloc */
+				dev_info(ctrl->dev, "MICDBG alloc: slave port %u -> master port %d ch_mask=0x%x (nports=%d)\n",
+					 p_rt->num, pn, pconfig[nports - 1].ch_mask, nports);
 			}
 		}
 	}
 
-	sdw_stream_add_master(&ctrl->bus, &sconfig, pconfig,
-			      nports, stream);
+	/*
+	 * erhai: propagate the error — an unconfigured master runtime
+	 * (ports allocated but never port_config'ed) is invisible until
+	 * prepare/enable degenerates and the PCM start EIOs out
+	 * (2026-09-10, +b30: silent -EINVAL from a bps mismatch between
+	 * codec and master stream configs).
+	 */
+	ret = sdw_stream_add_master(&ctrl->bus, &sconfig, pconfig,
+				    nports, stream);
+	if (ret) {
+		dev_err(ctrl->dev, "Failed to add SDW master stream: %d\n",
+			ret);
+		return ret;
+	}
 
 	return 0;
 }
@@ -1633,6 +1799,16 @@ static int qcom_swrm_probe(struct platform_device *pdev)
 
 	prop = &ctrl->bus.prop;
 	prop->max_clk_freq = DEFAULT_CLK_FREQ;
+	/*
+	 * +b38: SDW SCP BUS_CLOCK_BASE/BUSCLOCK_SCALE programming in
+	 * sdw_slave_set_frequency() (bus.c) bails on !mclk_freq — the
+	 * vendor master writes base 0x1 + scale 2 to every paging slave
+	 * at each datapath enable (swrm_update_clk_base_and_scale);
+	 * without it the wcd939x slave data ports never clock and
+	 * transmit nothing (control commands tolerate it). Set by
+	 * upstream f64c5d5ff8 ("soundwire: qcom: set the bus mclk_freq
+	 * property") since 7.3.
+	 */
 	prop->mclk_freq = DEFAULT_CLK_FREQ;
 	prop->num_clk_gears = 0;
 	prop->num_clk_freq = MAX_FREQ_NUM;

@@ -67,6 +67,9 @@ config SND_SOC_APQ8016_SBC
 
 config SND_SOC_QCOM_COMMON
 	tristate
+	# erhai mic A-2 (d1f84c6f9f): qcom_snd_be_hw_params_fixup() uses the
+	# shared ASoC conversion parser (convert-rate/-channels/-sample-format).
+	select SND_SIMPLE_CARD_UTILS
 
 config SND_SOC_QCOM_SDW
 	tristate

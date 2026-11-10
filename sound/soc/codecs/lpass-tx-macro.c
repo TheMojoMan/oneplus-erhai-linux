@@ -41,6 +41,13 @@
 #define CDC_TX_TOP_CSR_SWR_DMIC0_CTL	(0x00C0)
 /* Default divider for AMIC and DMIC clock: DIV2 */
 #define CDC_TX_SWR_MIC_CLK_DEFAULT	0
+/*
+ * Vendor (OxygenOS) value for the SWR mic clock divider: DIV1.
+ * OxygenOS holds every SWR mic clock select (0xC0..0xD4) at 0x0E both idle and
+ * while capturing (live regmap ground truth); CDC_TX_SWR_MIC_CLK_DEFAULT (DIV2)
+ * is the upstream default and never appears in the vendor tree.
+ */
+#define CDC_TX_SWR_MIC_CLK_DIV1		0x0E
 #define CDC_TX_SWR_DMIC_CLK_SEL_MASK	GENMASK(3, 1)
 #define CDC_TX_TOP_CSR_SWR_DMIC1_CTL	(0x00C4)
 #define CDC_TX_TOP_CSR_SWR_DMIC2_CTL	(0x00C8)
@@ -272,7 +279,6 @@ struct tx_macro {
 	struct tx_mute_work tx_mute_dwork[NUM_DECIMATORS];
 	unsigned long active_ch_mask[TX_MACRO_MAX_DAIS];
 	unsigned long active_ch_cnt[TX_MACRO_MAX_DAIS];
-	int active_decimator[TX_MACRO_MAX_DAIS];
 	struct regmap *regmap;
 	struct clk *mclk;
 	struct clk *npl;
@@ -744,8 +750,48 @@ static int tx_macro_mclk_event(struct snd_soc_dapm_widget *w,
 	switch (event) {
 	case SND_SOC_DAPM_PRE_PMU:
 		return tx_macro_mclk_enable(tx, true);
+	case SND_SOC_DAPM_POST_PMU:
+		/*
+		 * Vendor-parity: downstream programs the SWR mic input
+		 * clocks for ALL six SWR inputs to 0x0E (div-1) while the
+		 * macro clocks are up — OxygenOS ground truth shows
+		 * 0xC0/0xC4/0xC8/0xCC/0xD0/0xD4 = 0x0E in BOTH the idle
+		 * and the capturing regmap dumps, plus SWR_CTRL = 0x60.
+		 * The upstream defaults (0x00 = div-2) leave the SWR mic
+		 * input latches running at half rate and deliver all-zero
+		 * capture data.
+		 */
+		if (tx->data->ver > LPASS_VER_9_0_0) {
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_CTRL, 0x60);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC0_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC1_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC2_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_DMIC3_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_AMIC0_CTL,
+						0x0E);
+			snd_soc_component_write(component,
+						CDC_TX_TOP_CSR_SWR_AMIC1_CTL,
+						0x0E);
+		}
+		break;
 	case SND_SOC_DAPM_POST_PMD:
-		return tx_macro_mclk_enable(tx, false);
+		tx_macro_mclk_enable(tx, false);
+		/*
+		 * Vendor leaves SWR_CTRL and the SWR mic clock dividers
+		 * set even when idle (OxygenOS idle regmap: 0x88 = 0x60,
+		 * 0xC0..0xD4 = 0x0E) — do not clear them here.
+		 */
+		break;
 	default:
 		break;
 	}
@@ -796,6 +842,22 @@ static void tx_macro_update_smic_sel_v9_2(struct snd_soc_component *component,
 	} else {
 		snd_soc_component_write_field(component, mic_sel_reg,
 					      CDC_TXn_ADC_DMIC_SEL_MASK, 0);
+	}
+
+	/*
+	 * Vendor-parity (erhai, LPASS v9.2): OxygenOS programs the SWR mic
+	 * clock register of every routed input to 0x0E (div-1) — both when
+	 * idle and while capturing. The upstream default write
+	 * (CDC_TX_SWR_MIC_CLK_DEFAULT = 0, div-2) leaves the tx-macro SWR
+	 * input latch clocked at the wrong rate, so SWR mic slots latch
+	 * all-zero data. Computed from val directly: the register only
+	 * exists for SWR mic inputs >= 5 (TX_ADC_TO_DMIC mapping).
+	 */
+	if (val >= 5) {
+		dmic = TX_ADC_TO_DMIC(val);
+		snd_soc_component_write(component,
+					CDC_TX_TOP_CSR_SWR_DMICn_CTL(dmic),
+					0x0E);
 	}
 }
 
@@ -888,20 +950,26 @@ static int tx_macro_tx_mixer_put(struct snd_kcontrol *kcontrol,
 	u32 enable = ucontrol->value.integer.value[0];
 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
 
-	if (enable) {
-		if (tx->active_decimator[dai_id] == dec_id)
-			return 0;
+	/*
+	 * erhai: idempotence keyed on the per-control BIT, not on a single
+	 * "last enabled decimator" field.  With DEC0+DEC1 both on (our mic
+	 * use case) the old model re-entered the enable branch on every
+	 * re-application of the control and inflated active_ch_cnt, which
+	 * tx_macro_get_channel_map() hands to the DSP as the capture
+	 * channel count; disabling DEC0 also silently skipped DEC1.
+	 * (Fixes yzddmr6 <46088090+yzddmr6@users.noreply.github.com>,
+	 *  "ASoC: codecs: lpass-tx-macro: track every enabled capture
+	 *  channel", github.com/yzddmr6/linux-sm8750-erhai 63d6d0dac6.)
+	 */
+	if (!!enable == test_bit(dec_id, &tx->active_ch_mask[dai_id]))
+		return 0;
 
+	if (enable) {
 		set_bit(dec_id, &tx->active_ch_mask[dai_id]);
 		tx->active_ch_cnt[dai_id]++;
-		tx->active_decimator[dai_id] = dec_id;
 	} else {
-		if (tx->active_decimator[dai_id] == -1)
-			return 0;
-
 		tx->active_ch_cnt[dai_id]--;
 		clear_bit(dec_id, &tx->active_ch_mask[dai_id]);
-		tx->active_decimator[dai_id] = -1;
 	}
 	snd_soc_dapm_mixer_update_power(widget->dapm, kcontrol, enable, update);
 
@@ -938,9 +1006,18 @@ static int tx_macro_enable_dec(struct snd_soc_dapm_widget *w,
 				dmic = TX_ADC_TO_DMIC(adc_n);
 				dmic_clk_reg = CDC_TX_TOP_CSR_SWR_DMICn_CTL(dmic);
 
-				snd_soc_component_write_field(component, dmic_clk_reg,
-							CDC_TX_SWR_DMIC_CLK_SEL_MASK,
-							CDC_TX_SWR_MIC_CLK_DEFAULT);
+				/*
+				 * erhai (b62) vendor parity: never reset the routed
+				 * SWR mic clock select to DIV2 here.  This runs at
+				 * stream start, i.e. AFTER the probe/mux-put writes
+				 * that set the vendor value, and it silently undid
+				 * them: live readback during capture showed the two
+				 * ROUTED registers (0xC0, 0xC8) at 0x00 while the
+				 * four unrouted ones stayed 0x0E.  OxygenOS keeps
+				 * all six at 0x0E (DIV1) idle and while capturing.
+				 */
+				snd_soc_component_write(component, dmic_clk_reg,
+							CDC_TX_SWR_MIC_CLK_DIV1);
 			}
 		}
 		snd_soc_component_write_field(component, dec_cfg_reg,
@@ -1194,20 +1271,15 @@ static int tx_macro_digital_mute(struct snd_soc_dai *dai, int mute, int stream)
 	struct tx_macro *tx = snd_soc_component_get_drvdata(component);
 	u8 decimator;
 
-	/* active decimator not set yet */
-	if (tx->active_decimator[dai->id] == -1)
-		return 0;
-
-	decimator = tx->active_decimator[dai->id];
-
-	if (mute)
+	/* erhai: mute/unmute EVERY enabled decimator - the old code only
+	 * touched the last one, so with DEC0+DEC1 on, DEC0 was left
+	 * PGA-muted for the whole capture (digital silence, invisible in
+	 * any register dump of the mixer/enum state).  See the mixer put
+	 * callback for the attribution. */
+	for_each_set_bit(decimator, &tx->active_ch_mask[dai->id], TX_MACRO_DEC_MAX)
 		snd_soc_component_write_field(component,
 					      CDC_TXn_TX_PATH_CTL(decimator),
-					      CDC_TXn_PGA_MUTE_MASK, 0x1);
-	else
-		snd_soc_component_update_bits(component,
-					      CDC_TXn_TX_PATH_CTL(decimator),
-					      CDC_TXn_PGA_MUTE_MASK, 0x0);
+					      CDC_TXn_PGA_MUTE_MASK, !!mute);
 
 	return 0;
 }
@@ -1505,7 +1577,8 @@ static const struct snd_soc_dapm_widget tx_macro_dapm_widgets[] = {
 			   SND_SOC_DAPM_PRE_PMD | SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_SUPPLY_S("TX_MCLK", 0, SND_SOC_NOPM, 0, 0,
-	tx_macro_mclk_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+	tx_macro_mclk_event, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU |
+	SND_SOC_DAPM_POST_PMD),
 
 	SND_SOC_DAPM_SUPPLY_S("TX_SWR_CLK", 0, SND_SOC_NOPM, 0, 0, NULL, 0),
 
@@ -2137,10 +2210,9 @@ static int tx_macro_component_probe(struct snd_soc_component *comp)
 	snd_soc_component_update_bits(comp, CDC_TX0_TX_PATH_SEC7, 0x3F,
 				      0x0A);
 	/* Enable swr mic0 and mic1 clock */
-	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC0_CTL,
-				CDC_TX_SWR_MIC_CLK_DEFAULT);
-	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC1_CTL,
-				CDC_TX_SWR_MIC_CLK_DEFAULT);
+	/* Enable swr mic0 and mic1 clock (vendor default 0x0E, div-1) */
+	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC0_CTL, 0x0E);
+	snd_soc_component_write(comp, CDC_TX_TOP_CSR_SWR_AMIC1_CTL, 0x0E);
 
 	return 0;
 }
@@ -2313,11 +2385,6 @@ static int tx_macro_probe(struct platform_device *pdev)
 	dev_set_drvdata(dev, tx);
 
 	tx->dev = dev;
-
-	/* Set active_decimator default value */
-	tx->active_decimator[TX_MACRO_AIF1_CAP] = -1;
-	tx->active_decimator[TX_MACRO_AIF2_CAP] = -1;
-	tx->active_decimator[TX_MACRO_AIF3_CAP] = -1;
 
 	/* set MCLK and NPL rates */
 	ret = clk_set_rate(tx->mclk, MCLK_FREQ);

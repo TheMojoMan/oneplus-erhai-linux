@@ -511,7 +511,17 @@ static int aw88261_dev_start(struct aw88261 *aw88261)
 	aw88261_dev_pwd(aw_dev, false);
 	usleep_range(AW88261_2000_US, AW88261_2000_US + 10);
 
-	ret = aw88261_dev_configure_syspll(aw88261);
+	/*
+	 * The framing fields are only meaningful once the machine driver has
+	 * called .set_tdm_slot. Without it the framing comes from the ACF
+	 * firmware — e.g. an 8-slot TDM bus shared by several amps, which
+	 * configure_syspll() would overwrite with the probe-time I2S defaults
+	 * and leave the PLL unlocked — so only check for lock in that case.
+	 */
+	if (aw88261->slots_configured)
+		ret = aw88261_dev_configure_syspll(aw88261);
+	else
+		ret = aw88261_dev_check_pll(aw_dev);
 	if (ret) {
 		dev_dbg(aw_dev->dev, "pll check failed");
 		goto pll_check_fail;
@@ -791,6 +801,8 @@ static int aw88261_set_tdm_slot(struct snd_soc_dai *dai,
 	struct snd_soc_component *component = dai->component;
 	struct aw88261 *aw88261 = snd_soc_component_get_drvdata(component);
 	int chan;
+
+	aw88261->slots_configured = true;
 
 	switch (slots) {
 	case 0:

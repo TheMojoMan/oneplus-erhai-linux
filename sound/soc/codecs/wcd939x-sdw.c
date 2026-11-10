@@ -4,6 +4,7 @@
  */
 
 #include <linux/module.h>
+#include <sound/pcm_params.h>
 #include <linux/slab.h>
 #include <linux/platform_device.h>
 #include <linux/device.h>
@@ -22,7 +23,7 @@
 #include "wcd939x.h"
 #include "wcd-common.h"
 
-static const struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
+static struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
 	WCD_SDW_CH(WCD939X_HPH_L, WCD939X_HPH_PORT, BIT(0)),
 	WCD_SDW_CH(WCD939X_HPH_R, WCD939X_HPH_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_CLSH, WCD939X_CLSH_PORT, BIT(0)),
@@ -35,7 +36,18 @@ static const struct wcd_sdw_ch_info wcd939x_sdw_rx_ch_info[] = {
 	WCD_SDW_CH(WCD939X_HIFI_PCM_R, WCD939X_HIFI_PCM_PORT, BIT(1)),
 };
 
-static const struct wcd_sdw_ch_info wcd939x_sdw_tx_ch_info[] = {
+/*
+ * Vendor TX port layout — from OxygenOS erhai-24924 sun-audio DTS +
+ * runtime ChMap ground truth (ADC1 ChMap = SWRM_TX2_CH1 = master port3
+ * ch1, ADC4 ChMap = SWRM_TX3_CH2 = master port4 ch2):
+ *   ADC1 -> slave DP1 ch1, ADC4 -> slave DP2 ch2
+ * and with qcom,tx-port-mapping = <2 3 0 0> (slave port -> master
+ * port) the master port ch_mask is the slave ch_mask passthrough, so
+ * ADC1 rides master port3 ch1 and ADC4 master port4 ch2. The ADSP TX3
+ * intf map {02,03} reads intf ch N = master port N+1, so PCM ch0 = ADC1
+ * and PCM ch1 = ADC4 — exactly the vendor capture topology.
+ */
+static struct wcd_sdw_ch_info wcd939x_sdw_tx_ch_info[] = {
 	WCD_SDW_CH(WCD939X_ADC1, WCD939X_ADC_1_4_PORT, BIT(0)),
 	WCD_SDW_CH(WCD939X_ADC2, WCD939X_ADC_1_4_PORT, BIT(1)),
 	WCD_SDW_CH(WCD939X_ADC3, WCD939X_ADC_1_4_PORT, BIT(2)),
@@ -151,12 +163,30 @@ int wcd939x_sdw_hw_params(struct wcd939x_sdw_priv *wcd,
 		wcd->active_ports++;
 	}
 
-	wcd->sconfig.bps = 1;
+	/*
+	 * erhai: mainline hardcodes PDM 1-bit here (x1e DMIC world).
+	 * erhai AMIC capture carries 16-bit PCM — the stream bps MUST
+	 * match the qcom master's sconfig.bps (params_width) or
+	 * sdw_stream_add_master() rejects the stream with -EINVAL and
+	 * the master ports are left unconfigured (2026-09-10, +b31).
+	 * RX keeps 1 to stay in lockstep with the qcom master's RX
+	 * bps=1 PDM assumption (HPH playback path unaffected).
+	 */
+	if (wcd->is_tx)
+		wcd->sconfig.bps = params_width(params);
+	else
+		wcd->sconfig.bps = 1;
 	wcd->sconfig.frame_rate = params_rate(params);
 	if (wcd->is_tx)
 		wcd->sconfig.direction = SDW_DATA_DIR_TX;
 	else
 		wcd->sconfig.direction = SDW_DATA_DIR_RX;
+
+	/* TEMP DEBUG (mic bringup, +b22) */
+	for (i = 0; i < wcd->active_ports; i++)
+		dev_info(&wcd->sdev->dev, "MICDBG sdw_hw_params: port_config[%d] num=%u ch_mask=0x%x, ch_count=%u\n",
+			 i, port_config[i].num, port_config[i].ch_mask,
+			 wcd->sconfig.ch_count);
 
 	wcd->sconfig.type = SDW_STREAM_PCM;
 
@@ -1179,6 +1209,20 @@ static bool wcd939x_rdwr_register(struct device *dev, unsigned int reg)
 	case WCD939X_DSD_HPHR_CFG3:
 	case WCD939X_DSD_HPHR_CFG4:
 	case WCD939X_DSD_HPHR_CFG5:
+	/*
+	 * erhai mic EXPERIMENTAL: SDW DPn block (0x0100/0x0200 family).
+	 * Expose through the regmap so erhai_tx_chmap_silicon_regs can
+	 * program/verify the ADC->SWR uplink descriptor (Android records
+	 * these at record time; this driver never touched them).
+	 */
+	case WCD939X_DP1_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
 		return true;
 	}
 
@@ -1306,6 +1350,19 @@ static bool wcd939x_volatile_register(struct device *dev, unsigned int reg)
 	case WCD939X_RX_TOP_DSD1_DEBUG_CFG6:
 	case WCD939X_COMPANDER_HPHL_CTL6:
 	case WCD939X_R_CTL6:
+	/*
+	 * erhai mic EXPERIMENTAL: SDW DPn block regs bypass the regmap
+	 * cache (banked, live silicon) so the ChMap probe's writes hit the
+	 * bus and `regmap sdw:3 registers` shows the real state.
+	 */
+	case WCD939X_DP1_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP1_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_INT_MASK_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_CHANNEL_ENABLE_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_SAMPLE_CTRL1_OFF:
+	case WCD939X_DP2_BASE + WCD939X_DPN_OFFSET_CTRL1_OFF:
 		return true;
 	}
 	return false;
@@ -1339,11 +1396,21 @@ static int wcd9390_probe(struct sdw_slave *pdev, const struct sdw_device_id *id)
 {
 	struct device *dev = &pdev->dev;
 	struct wcd939x_sdw_priv *wcd;
-	int ret;
+	u8 master_ch_mask[WCD939X_MAX_SWR_CH_IDS];
+	int master_ch_mask_size = 0;
+	int ret, i;
 
 	wcd = devm_kzalloc(dev, sizeof(*wcd), GFP_KERNEL);
 	if (!wcd)
 		return -ENOMEM;
+
+	/* +b38: wcd939x implements the SDW 1.2 SCP clock base/scale
+	 * registers (vendor master writes SWRS_SCP_BASE_CLK_BASE 0x4d =
+	 * 0x1 and SWRS_SCP_BUSCLOCK_SCALE 0x62/0x72 = 2 to it on every
+	 * datapath enable). Without clock_reg_supported the SDW core
+	 * never programs them (sdw_slave_set_frequency), and the TX
+	 * data ports never clock — capture delivers exact zeros. */
+	pdev->prop.clock_reg_supported = true;
 
 	/*
 	 * Port map index starts with 0, however the data port for this codec
@@ -1372,18 +1439,44 @@ static int wcd9390_probe(struct sdw_slave *pdev, const struct sdw_device_id *id)
 				   SDW_SCP_INT1_BUS_CLASH | SDW_SCP_INT1_PARITY;
 	pdev->prop.lane_control_support = true;
 	pdev->prop.simple_clk_stop_capable = true;
+
+	memset(master_ch_mask, 0, WCD939X_MAX_SWR_CH_IDS);
+
+	if (wcd->is_tx) {
+		master_ch_mask_size = of_property_count_u8_elems(dev->of_node,
+								"qcom,tx-channel-mapping");
+
+		if (master_ch_mask_size > 0)
+			ret = of_property_read_u8_array(dev->of_node,
+							"qcom,tx-channel-mapping",
+							master_ch_mask,
+							master_ch_mask_size);
+	} else {
+		master_ch_mask_size = of_property_count_u8_elems(dev->of_node,
+								"qcom,rx-channel-mapping");
+
+		if (master_ch_mask_size > 0)
+			ret = of_property_read_u8_array(dev->of_node,
+							"qcom,rx-channel-mapping",
+							master_ch_mask,
+							master_ch_mask_size);
+	}
+
+	if (ret < 0)
+		dev_info(dev, "Static channel mapping not specified using device channel maps\n");
+
 	if (wcd->is_tx) {
 		pdev->prop.source_ports = GENMASK(WCD939X_MAX_TX_SWR_PORTS - 1, 0);
 		pdev->prop.src_dpn_prop = wcd939x_tx_dpn_prop;
 		wcd->ch_info = &wcd939x_sdw_tx_ch_info[0];
 		pdev->prop.wake_capable = true;
-	} else {
-		pdev->prop.sink_ports = GENMASK(WCD939X_MAX_RX_SWR_PORTS - 1, 0);
-		pdev->prop.sink_dpn_prop = wcd939x_rx_dpn_prop;
-		wcd->ch_info = &wcd939x_sdw_rx_ch_info[0];
-	}
 
-	if (wcd->is_tx) {
+		for (i = 0; i < master_ch_mask_size; i++) {
+			if (master_ch_mask[i])
+				wcd->ch_info[i].master_ch_mask =
+					WCD939X_SWRM_CH_MASK(master_ch_mask[i]);
+		}
+
 		wcd->regmap = devm_regmap_init_sdw(pdev, &wcd939x_regmap_config);
 		if (IS_ERR(wcd->regmap))
 			return dev_err_probe(dev, PTR_ERR(wcd->regmap),
@@ -1391,6 +1484,16 @@ static int wcd9390_probe(struct sdw_slave *pdev, const struct sdw_device_id *id)
 
 		/* Start in cache-only until device is enumerated */
 		regcache_cache_only(wcd->regmap, true);
+	} else {
+		pdev->prop.sink_ports = GENMASK(WCD939X_MAX_RX_SWR_PORTS - 1, 0);
+		pdev->prop.sink_dpn_prop = wcd939x_rx_dpn_prop;
+		wcd->ch_info = &wcd939x_sdw_rx_ch_info[0];
+
+		for (i = 0; i < master_ch_mask_size; i++) {
+			if (master_ch_mask[i])
+				wcd->ch_info[i].master_ch_mask =
+					WCD939X_SWRM_CH_MASK(master_ch_mask[i]);
+		}
 	}
 
 	ret = component_add(dev, &wcd_sdw_component_ops);

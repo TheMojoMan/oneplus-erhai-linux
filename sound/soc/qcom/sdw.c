@@ -8,6 +8,23 @@
 #include <sound/soc.h>
 #include "sdw.h"
 
+/*
+ * erhai mic (2026-09-18, +b61): the TX_CODEC_DMA_TX_3 intf channel map is
+ * owned by the machine driver -- sc8280xp_snd_set_cpu_tx_channel_map()
+ * compacts the codec's get_channel_map() master_channel_map[] into the
+ * ascending list of master ports that carry active channels.  For our
+ * topology the codec reports map[1..4] = 0 54 59 0 (ADC1 -> master port 2,
+ * ADC4 -> master port 3), so the machine driver programs {2,3} -- exactly
+ * Android's recording-time ground truth
+ * "CODEC_DMA-LPAIF_RXTX-TX-3 Channel Map = {0x02,0x03}".
+ *
+ * The b48/b49/b59 blind override that used to live here ({2,3} then a
+ * speculative flip to {3,4}) is GONE on purpose: it ran 3 us AFTER the
+ * machine driver and silently clobbered the correct derived value with a
+ * guessed one.  Do NOT reintroduce a hardcoded lane list here -- if the map
+ * is wrong, fix the codec's master_channel_map[] / get_channel_map().
+ */
+
 static bool qcom_snd_is_sdw_dai(int id)
 {
 	switch (id) {
@@ -114,6 +131,15 @@ int qcom_snd_sdw_startup(struct snd_pcm_substream *substream)
 		}
 	}
 
+	/*
+	 * NOTE: the TX_CODEC_DMA_TX_3 intf channel map is deliberately NOT
+	 * touched here any more.  sc8280xp_snd_set_cpu_tx_channel_map() (the
+	 * machine driver's .prepare) programs it from the codec's reported
+	 * port map and produces Android's {2,3}; the old b48/b49/b59 override
+	 * that lived at this spot ran AFTER it and clobbered the correct
+	 * value with a hardcoded guess.
+	 */
+
 	return 0;
 
 err_set_stream:
@@ -141,6 +167,16 @@ int qcom_snd_sdw_prepare(struct snd_pcm_substream *substream,
 
 	if (*stream_prepared)
 		return 0;
+
+	/*
+	 * erhai mic (b61): the TX_CODEC_DMA_TX_3 channel-map override that
+	 * lived here (b49's re-assert, later flipped to {3,4} by b59) has been
+	 * REMOVED.  It was made obsolete by sc8280xp_snd_set_cpu_tx_channel_map()
+	 * -- the machine driver's .prepare runs before this function and derives
+	 * the map from the codec's real port map, yielding Android's {2,3}.
+	 * The hardcoded override contradicted it and won (it ran later), which
+	 * is why the ADSP was fed the wrong intf channels.  Leave this out.
+	 */
 
 	ret = sdw_prepare_stream(sruntime);
 	if (ret)

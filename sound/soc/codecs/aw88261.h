@@ -605,6 +605,8 @@ struct aw88261 {
 	unsigned int tx_slotvld_mask;
 	unsigned int rxl_slotvld_mask;
 	unsigned int rxr_slotvld_mask;
+	/* set once the machine driver has called .set_tdm_slot */
+	bool slots_configured;
 
 	bool phase_sync;
 };
