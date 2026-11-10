@@ -1326,6 +1326,23 @@ static void ucsi_unregister_partner(struct ucsi_connector *con)
 	con->partner = NULL;
 }
 
+/*
+ * erhai: the role we last handed to the USB controller.  erhai_otg_glink uses
+ * it to tell a real host session (a hub/device we are hosting) from a stale
+ * ADSP "OTG attach" that only left dwc3 in host mode.  Gating the ADSP detach
+ * on dwc3's mode alone wedged the whole Type-C port after a DP-alt-mode
+ * session: the stale attach flipped dwc3 to host with no partner at all, every
+ * later detach was then suppressed, and the charger/next plug became invisible
+ * (mirror-MEMORY-2026-11-07.md section 21).
+ */
+static bool erhai_ucsi_usb_host_role;
+
+bool erhai_ucsi_usb_host_role_live(void)
+{
+	return READ_ONCE(erhai_ucsi_usb_host_role);
+}
+EXPORT_SYMBOL_GPL(erhai_ucsi_usb_host_role_live);
+
 static void ucsi_partner_change(struct ucsi_connector *con)
 {
 	enum usb_role u_role = USB_ROLE_NONE;
@@ -1356,7 +1373,8 @@ static void ucsi_partner_change(struct ucsi_connector *con)
 			typec_set_mode(con->port, TYPEC_MODE_AUDIO);
 			break;
 		default:
-			if (UCSI_CONSTAT(con, PARTNER_FLAG_USB))
+			if (UCSI_CONSTAT(con, PARTNER_FLAG_USB) &&
+			    !(con->ucsi->quirks & UCSI_NO_USB_MUX_STATE))
 				typec_set_mode(con->port, TYPEC_STATE_USB);
 		}
 
@@ -1373,6 +1391,10 @@ static void ucsi_partner_change(struct ucsi_connector *con)
 		UCSI_CONSTAT(con, PARTNER_FLAG_USB4_GEN4)))))
 		u_role = USB_ROLE_NONE;
 
+	dev_info(con->ucsi->dev, "erhai ucsi: con%d partner_change role -> %d\n",
+		 con->num, u_role);
+
+	WRITE_ONCE(erhai_ucsi_usb_host_role, u_role == USB_ROLE_HOST);
 	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);
 	if (ret)
 		dev_err(con->ucsi->dev, "con:%d: failed to set usb role:%d\n",
@@ -1967,6 +1989,10 @@ static int ucsi_register_port(struct ucsi *ucsi, struct ucsi_connector *con)
 	if (!(UCSI_CONSTAT(con, PARTNER_FLAG_USB)))
 		u_role = USB_ROLE_NONE;
 
+	dev_info(ucsi->dev, "erhai ucsi: con%d register role -> %d\n",
+		 con->num, u_role);
+
+	WRITE_ONCE(erhai_ucsi_usb_host_role, u_role == USB_ROLE_HOST);
 	ret = usb_role_switch_set_role(con->usb_role_sw, u_role);
 	if (ret) {
 		dev_err(ucsi->dev, "con:%d: failed to set usb role:%d\n",
@@ -2374,6 +2400,9 @@ void ucsi_unregister(struct ucsi *ucsi)
 {
 	u64 cmd = UCSI_SET_NOTIFICATION_ENABLE;
 	int i;
+
+	/* erhai: no UCSI-owned session survives an unregister (rescan). */
+	WRITE_ONCE(erhai_ucsi_usb_host_role, false);
 
 	/* Make sure that we are not in the middle of driver initialization */
 	cancel_delayed_work_sync(&ucsi->work);

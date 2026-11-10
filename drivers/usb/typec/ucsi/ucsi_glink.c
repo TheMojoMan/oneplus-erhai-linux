@@ -74,9 +74,11 @@ struct pmic_glink_ucsi {
 
 	struct work_struct notify_work;
 	struct work_struct register_work;
+	struct delayed_work poll_work;
 	spinlock_t state_lock;
 	bool ucsi_registered;
 	bool pd_running;
+	bool rescan_pending;
 
 	u8 read_buf[UCSI_BUF_V2_SIZE];
 };
@@ -310,6 +312,46 @@ static void pmic_glink_ucsi_notify(struct work_struct *work)
 	ucsi_notify_common(ucsi->ucsi, cci);
 }
 
+/*
+ * erhai: the ADSP stops sending USBC_NOTIFY_IND after a detach from a
+ * DP-alt-mode session (charger detaches are unaffected) — a replug within
+ * the following minutes produces ZERO pmic_glink traffic and the attach is
+ * invisible to the whole USB stack (#26 ingress capture, 06:13:40-06:15:58).
+ * Work around it by polling: ucsi_connector_change() makes the UCSI core
+ * issue GET_CONNECTOR_STATUS and process attach/detach/role changes exactly
+ * like a notification would. erhai_ucsi_poll_ms=0 disables the action (the
+ * tick keeps running so the knob can be re-enabled live).
+ */
+static unsigned int erhai_ucsi_poll_ms = 4000;
+module_param(erhai_ucsi_poll_ms, uint, 0644);
+MODULE_PARM_DESC(erhai_ucsi_poll_ms,
+		 "ms between UCSI connector-status polls (ADSP notify "
+		 "starvation workaround; 0 disables)");
+
+static int erhai_ucsi_rescan;
+module_param(erhai_ucsi_rescan, int, 0644);
+MODULE_PARM_DESC(erhai_ucsi_rescan,
+		 "write 1: full UCSI unregister/re-register to kick the "
+		 "wedged ADSP CC state machine (auto-clears)");
+
+static void erhai_ucsi_poll(struct work_struct *work)
+{
+	struct pmic_glink_ucsi *ucsi =
+		container_of(work, struct pmic_glink_ucsi, poll_work.work);
+
+	if (READ_ONCE(erhai_ucsi_rescan)) {
+		WRITE_ONCE(erhai_ucsi_rescan, 0);
+		ucsi->rescan_pending = true;
+		schedule_work(&ucsi->register_work);
+	}
+
+	if (ucsi->ucsi_registered && erhai_ucsi_poll_ms)
+		ucsi_connector_change(ucsi->ucsi, 1);
+
+	schedule_delayed_work(&ucsi->poll_work,
+			      msecs_to_jiffies(erhai_ucsi_poll_ms ?: 4000));
+}
+
 static void pmic_glink_ucsi_register(struct work_struct *work)
 {
 	struct pmic_glink_ucsi *ucsi = container_of(work, struct pmic_glink_ucsi, register_work);
@@ -319,6 +361,20 @@ static void pmic_glink_ucsi_register(struct work_struct *work)
 	spin_lock_irqsave(&ucsi->state_lock, flags);
 	pd_running = ucsi->pd_running;
 	spin_unlock_irqrestore(&ucsi->state_lock, flags);
+
+	/*
+	 * erhai: explicit rescan kick. After an alt-mode detach the ADSP's
+	 * CC attach detection can stay wedged forever (answers "not
+	 * connected" to GET_CONNECTOR_STATUS while a device is attached,
+	 * no self-recovery — #27/#28). Drop the UCSI registration so the
+	 * PPM re-handshakes from scratch. Trigger: echo 1 >
+	 * /sys/module/ucsi_glink/parameters/erhai_ucsi_rescan
+	 */
+	if (ucsi->rescan_pending && ucsi->ucsi_registered) {
+		ucsi->rescan_pending = false;
+		ucsi_unregister(ucsi->ucsi);
+		ucsi->ucsi_registered = false;
+	}
 
 	if (!ucsi->ucsi_registered && pd_running) {
 		ucsi_register(ucsi->ucsi);
@@ -333,6 +389,9 @@ static void pmic_glink_ucsi_callback(const void *data, size_t len, void *priv)
 {
 	struct pmic_glink_ucsi *ucsi = priv;
 	const struct pmic_glink_hdr *hdr = data;
+
+	dev_dbg_ratelimited(ucsi->dev, "erhai ucsi: rx opcode=%#x\n",
+			     le32_to_cpu(hdr->opcode));
 
 	switch (le32_to_cpu(hdr->opcode)) {
 	case UC_UCSI_READ_BUF_REQ:
@@ -372,10 +431,12 @@ static void pmic_glink_ucsi_destroy(void *data)
 	mutex_unlock(&ucsi->lock);
 }
 
-static unsigned long quirk_sc8180x = UCSI_NO_PARTNER_PDOS;
-static unsigned long quirk_sc8280xp = UCSI_NO_PARTNER_PDOS | UCSI_DELAY_DEVICE_PDOS;
-static unsigned long quirk_sm8450 = UCSI_DELAY_DEVICE_PDOS;
-static unsigned long quirk_x1e80100 = UCSI_DELAY_DEVICE_PDOS | UCSI_USB4_IMPLIES_USB;
+static unsigned long quirk_sc8180x = UCSI_NO_PARTNER_PDOS | UCSI_NO_USB_MUX_STATE;
+static unsigned long quirk_sc8280xp = UCSI_NO_PARTNER_PDOS | UCSI_DELAY_DEVICE_PDOS |
+				      UCSI_NO_USB_MUX_STATE;
+static unsigned long quirk_sm8450 = UCSI_DELAY_DEVICE_PDOS | UCSI_NO_USB_MUX_STATE;
+static unsigned long quirk_x1e80100 = UCSI_DELAY_DEVICE_PDOS | UCSI_USB4_IMPLIES_USB |
+				      UCSI_NO_USB_MUX_STATE;
 
 static const struct of_device_id pmic_glink_ucsi_of_quirks[] = {
 	{ .compatible = "qcom,glymur-pmic-glink", .data = &quirk_sm8450, },
@@ -407,6 +468,9 @@ static int pmic_glink_ucsi_probe(struct auxiliary_device *adev,
 
 	INIT_WORK(&ucsi->notify_work, pmic_glink_ucsi_notify);
 	INIT_WORK(&ucsi->register_work, pmic_glink_ucsi_register);
+	INIT_DELAYED_WORK(&ucsi->poll_work, erhai_ucsi_poll);
+	schedule_delayed_work(&ucsi->poll_work,
+			      msecs_to_jiffies(erhai_ucsi_poll_ms));
 	init_completion(&ucsi->read_ack);
 	init_completion(&ucsi->write_ack);
 	spin_lock_init(&ucsi->state_lock);
@@ -470,6 +534,12 @@ static int pmic_glink_ucsi_probe(struct auxiliary_device *adev,
 static void pmic_glink_ucsi_remove(struct auxiliary_device *adev)
 {
 	struct pmic_glink_ucsi *ucsi = dev_get_drvdata(&adev->dev);
+
+	/*
+	 * erhai: drop our own poll tick first -- it is the work that enqueues
+	 * register_work, and it must not re-arm after the drain below.
+	 */
+	cancel_delayed_work_sync(&ucsi->poll_work);
 
 	/* Callbacks can queue work until devres releases the client */
 	disable_work_sync(&ucsi->notify_work);

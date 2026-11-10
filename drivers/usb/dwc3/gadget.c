@@ -2844,6 +2844,8 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 	 */
 	ret = pm_runtime_get_sync(dwc->dev);
 	if (!ret || ret < 0) {
+		dev_err(dwc->dev, "erhai dbg: pullup(%d): runtime resume failed %d\n",
+			is_on, ret);
 		pm_runtime_put(dwc->dev);
 		if (ret < 0)
 			pm_runtime_set_suspended(dwc->dev);
@@ -2864,6 +2866,10 @@ static int dwc3_gadget_pullup(struct usb_gadget *g, int is_on)
 	else
 		ret = dwc3_gadget_soft_connect(dwc);
 	mutex_unlock(&dwc->connect_mutex);
+
+	if (ret)
+		dev_err(dwc->dev, "erhai dbg: pullup(%d): soft_connect %d\n",
+			is_on, ret);
 
 	pm_runtime_put(dwc->dev);
 
@@ -3307,6 +3313,11 @@ static int dwc3_gadget_init_in_endpoint(struct dwc3_ep *dep)
 	size = min_t(int, maxpacket, 1024);
 	usb_ep_set_maxpacket_limit(&dep->endpoint, size);
 
+	if (!size)
+		dev_err(dwc->dev, "erhai: %s maxpacket=0 TXFIFOSIZ=%#x\n",
+			dep->name,
+			dwc3_readl(dwc, DWC3_GTXFIFOSIZ(dep->number >> 1)));
+
 	dep->endpoint.max_streams = 16;
 	dep->endpoint.ops = &dwc3_gadget_ep_ops;
 	list_add_tail(&dep->endpoint.ep_list,
@@ -3354,6 +3365,10 @@ static int dwc3_gadget_init_out_endpoint(struct dwc3_ep *dep)
 		size /= 3;
 
 	usb_ep_set_maxpacket_limit(&dep->endpoint, size);
+
+	if (!size)
+		dev_err(dwc->dev, "erhai: %s maxpacket=0 RXFIFOSIZ=%#x\n",
+			dep->name, dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0)));
 	dep->endpoint.max_streams = 16;
 	dep->endpoint.ops = &dwc3_gadget_ep_ops;
 	list_add_tail(&dep->endpoint.ep_list,

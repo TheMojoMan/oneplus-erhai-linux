@@ -162,6 +162,47 @@ void dwc3_set_prtcap(struct dwc3 *dwc, u32 mode, bool ignore_susphy)
 }
 EXPORT_SYMBOL_GPL(dwc3_set_prtcap);
 
+static unsigned int erhai_exit_pace_ms = 25;
+module_param(erhai_exit_pace_ms, uint, 0644);
+MODULE_PARM_DESC(erhai_exit_pace_ms,
+		 "ms delay inserted on host->device DRD switches (race probe)");
+
+int (*erhai_glue_clk_recover)(struct dwc3 *dwc);
+EXPORT_SYMBOL_GPL(erhai_glue_clk_recover);
+int (*erhai_session_sync)(bool arm);
+EXPORT_SYMBOL_GPL(erhai_session_sync);
+
+/*
+ * Set once the primary controller is fully probed, cleared on removal.
+ * Out-of-tree erhai drivers (otg_glink) use it to check whether a
+ * UCSI-owned host session is live before touching the data role. The
+ * role read is advisory (unlocked), only used to gate destructive
+ * detach handling.
+ */
+static struct dwc3 *erhai_dwc3_dev;
+
+bool erhai_dwc3_host_active(void)
+{
+	return erhai_dwc3_dev &&
+	       erhai_dwc3_dev->current_dr_role == DWC3_GCTL_PRTCAP_HOST;
+}
+EXPORT_SYMBOL_GPL(erhai_dwc3_host_active);
+
+bool erhai_dwc3_revive(struct dwc3 *dwc);
+
+/*
+ * erhai: shared QMP combo PHY helper (drivers/phy/qualcomm/phy-qcom-qmp-combo.c).
+ * Returns -ENODEV when this board's combo PHY is not there and -EBUSY while a DP
+ * client still owns it, so calling it unconditionally is safe.
+ */
+int qmp_combo_usb3_rearm(void);
+
+static void erhai_qmp_rearm(struct dwc3 *dwc)
+{
+	if (dwc->usb3_generic_phy[0] && !IS_ERR(dwc->usb3_generic_phy[0]))
+		qmp_combo_usb3_rearm();
+}
+
 static void __dwc3_set_mode(struct work_struct *work)
 {
 	struct dwc3 *dwc = work_to_dwc(work);
@@ -184,6 +225,9 @@ static void __dwc3_set_mode(struct work_struct *work)
 	if (!desired_dr_role)
 		goto out;
 
+	dev_info(dwc->dev, "erhai drd: switch %#x -> %#x\n",
+		 dwc->current_dr_role, desired_dr_role);
+
 	if (desired_dr_role == dwc->current_dr_role)
 		goto out;
 
@@ -193,10 +237,14 @@ static void __dwc3_set_mode(struct work_struct *work)
 	switch (dwc->current_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
 		dwc3_host_exit(dwc);
+		dev_info(dwc->dev, "erhai drd: host exited\n");
+		if (erhai_session_sync)
+			erhai_session_sync(false);
 		break;
 	case DWC3_GCTL_PRTCAP_DEVICE:
 		dwc3_gadget_exit(dwc);
 		dwc3_event_buffers_cleanup(dwc);
+		dev_info(dwc->dev, "erhai drd: gadget exited\n");
 		break;
 	case DWC3_GCTL_PRTCAP_OTG:
 		dwc3_otg_exit(dwc);
@@ -233,18 +281,87 @@ static void __dwc3_set_mode(struct work_struct *work)
 		dwc3_writel(dwc, DWC3_GCTL, reg);
 	}
 
+	if (desired_dr_role == DWC3_GCTL_PRTCAP_DEVICE &&
+	    DWC3_GCTL_PRTCAP(dwc3_readl(dwc, DWC3_GCTL)) ==
+					DWC3_GCTL_PRTCAP_HOST &&
+	    erhai_exit_pace_ms) {
+		dev_info(dwc->dev, "erhai pace: %u ms before device entry\n",
+			 erhai_exit_pace_ms);
+		msleep(erhai_exit_pace_ms);
+	}
+
+	/*
+	 * erhai #41: after a host exit, the global RAM (GRXFIFOSIZ0) reads
+	 * 0 for a while even though GHWPARAMS0 is alive; charging into the
+	 * soft reset then fails (-110, "FIFO0=0" half-dead state) and the
+	 * 30-s revive cannot fix it. Wait for the RAM to settle before
+	 * switching roles (host entry 6 s later always worked — settle
+	 * time, not damage).
+	 */
+	{
+		unsigned long fifo_deadline = jiffies + msecs_to_jiffies(2000);
+
+		while (dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0)) == 0 &&
+		       time_before(jiffies, fifo_deadline))
+			msleep(50);
+	}
+
+	dev_info(dwc->dev, "erhai drd: pre-prtcap GHWPARAMS0=%#x\n",
+		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
+
 	spin_lock_irqsave(&dwc->lock, flags);
 
 	dwc3_set_prtcap(dwc, desired_dr_role, false);
 
 	spin_unlock_irqrestore(&dwc->lock, flags);
 
+	dev_info(dwc->dev, "erhai drd: post-prtcap GHWPARAMS0=%#x\n",
+		 dwc3_readl(dwc, DWC3_GHWPARAMS0));
+
 	switch (desired_dr_role) {
 	case DWC3_GCTL_PRTCAP_HOST:
+		/*
+		 * erhai: the M31 eUSB2 PHY + PMIC eUSB2 repeater keep stale
+		 * device-mode state across DRD switches (HS dead after detach
+		 * cycles, SS unaffected). Force a full exit/init of the usb2
+		 * phys on every host entry so the repeater really re-modes to
+		 * host. phy_exit/init are refcounted: this unwinds the single
+		 * init from dwc3_core_init and re-runs the m31 + repeater init
+		 * sequences. Runs before host_init, so xhci is not attached to
+		 * the phys yet.
+		 */
+		/* erhai #31: set host mode BEFORE the recycle so the
+		 * eUSB2 repeater re-initializes host-aware (the OSS
+		 * glue sets PHY_HOST_MODE prior to powerup/reset/init) */
+		for (i = 0; i < dwc->num_usb2_ports; i++)
+			if (dwc->usb2_generic_phy[i])
+				phy_set_mode(dwc->usb2_generic_phy[i],
+					     PHY_MODE_USB_HOST);
+		for (i = 0; i < dwc->num_usb3_ports; i++)
+			if (dwc->usb3_generic_phy[i])
+				phy_set_mode(dwc->usb3_generic_phy[i],
+					     PHY_MODE_USB_HOST);
+		for (i = 0; i < dwc->num_usb2_ports; i++) {
+			if (!dwc->usb2_generic_phy[i])
+				continue;
+			dev_info(dwc->dev, "erhai phy: recycle usb2 phy %d\n", i);
+			phy_exit(dwc->usb2_generic_phy[i]);
+			ret = phy_init(dwc->usb2_generic_phy[i]);
+			if (ret)
+				dev_err(dwc->dev,
+					"erhai phy: usb2 recycle failed %d\n", ret);
+		}
+		/* erhai: a finished DP session may have left the shared COM
+		 * block in DP-only mode (USB3 PHY in reset); the xHCI setup
+		 * then times out with -110. Runs while dwc3 is quiescent. */
+		erhai_qmp_rearm(dwc);
+		if (erhai_session_sync)
+			erhai_session_sync(true);
 		ret = dwc3_host_init(dwc);
 		if (ret) {
 			dev_err(dwc->dev, "failed to initialize host\n");
 		} else {
+			dev_info(dwc->dev, "erhai drd: host init ok\n");
 			if (dwc->usb2_phy)
 				otg_set_vbus(dwc->usb2_phy->otg, true);
 
@@ -261,7 +378,17 @@ static void __dwc3_set_mode(struct work_struct *work)
 		}
 		break;
 	case DWC3_GCTL_PRTCAP_DEVICE:
-		dwc3_core_soft_reset(dwc);
+		/* erhai: same COM block repair as in the host path - a stale
+		 * DP-only mode makes this soft reset time out (-110). */
+		erhai_qmp_rearm(dwc);
+		ret = dwc3_core_soft_reset(dwc);
+		dev_info(dwc->dev,
+			 "erhai drd: dev entry: soft_reset=%d GHWPARAMS0=%#x RXFIFOSIZ0=%#x TXFIFOSIZ1=%#x\n",
+			 ret, dwc3_readl(dwc, DWC3_GHWPARAMS0),
+			 dwc3_readl(dwc, DWC3_GRXFIFOSIZ(0)),
+			 dwc3_readl(dwc, DWC3_GTXFIFOSIZ(1)));
+
+		erhai_dwc3_revive(dwc);
 
 		dwc3_event_buffers_setup(dwc);
 
@@ -273,6 +400,7 @@ static void __dwc3_set_mode(struct work_struct *work)
 		ret = dwc3_gadget_init(dwc);
 		if (ret)
 			dev_err(dwc->dev, "failed to initialize peripheral\n");
+		dev_info(dwc->dev, "erhai drd: gadget init %d\n", ret);
 		break;
 	case DWC3_GCTL_PRTCAP_OTG:
 		dwc3_otg_init(dwc);
@@ -333,9 +461,12 @@ int dwc3_core_soft_reset(struct dwc3 *dwc)
 		return 0;
 
 	reg = dwc3_readl(dwc, DWC3_DCTL);
+	dev_info(dwc->dev, "erhai sreset: entry DCTL=%#x\n", reg);
 	reg |= DWC3_DCTL_CSFTRST;
 	reg &= ~DWC3_DCTL_RUN_STOP;
 	dwc3_gadget_dctl_write_safe(dwc, reg);
+	dev_info(dwc->dev, "erhai sreset: post-write DCTL=%#x\n",
+		 dwc3_readl(dwc, DWC3_DCTL));
 
 	/*
 	 * For DWC_usb31 controller 1.90a and later, the DCTL.CSFRST bit
@@ -1502,8 +1633,18 @@ int dwc3_core_init(struct dwc3 *dwc)
 
 	dwc3_config_threshold(dwc);
 
+	/*
+	 * Extend FORCE_GEN1 to DWC_usb32. Mainline gates this to DWC31, so on
+	 * the SM8750 (usb32) host `maximum-speed = "super-speed"` was a silent
+	 * no-op. The reverse Type-C + DP-altmode case (2-lane pin-assignment-D,
+	 * where USB3 shares the SS lanes with DP) needs the host SS link forced
+	 * to Gen1: left at Gen2 the SS LTSSM Gen2 training corrupts the shared
+	 * USB2-HS enumeration on a dock, starving the DP->HDMI bridge DDC. The
+	 * bit is opt-in via DT `maximum-speed = "super-speed"`, so generic usb32
+	 * boards that don't cap maximum-speed are unaffected.
+	 */
 	if (hw_mode != DWC3_GHWPARAMS0_MODE_GADGET &&
-	    (DWC3_IP_IS(DWC31)) &&
+	    (DWC3_IP_IS(DWC31) || DWC3_IP_IS(DWC32)) &&
 	    dwc->maximum_speed == USB_SPEED_SUPER) {
 		int i;
 
@@ -2418,6 +2559,9 @@ int dwc3_core_probe(const struct dwc3_probe_data *data)
 
 	dma_set_max_seg_size(dev, UINT_MAX);
 
+	/* Publish for erhai_dwc3_host_active(). */
+	erhai_dwc3_dev = dwc;
+
 	return 0;
 
 err_exit_debugfs:
@@ -2477,6 +2621,8 @@ static int dwc3_probe(struct platform_device *pdev)
 void dwc3_core_remove(struct dwc3 *dwc)
 {
 	pm_runtime_get_sync(dwc->dev);
+
+	erhai_dwc3_dev = NULL;
 
 	dwc3_core_exit_mode(dwc);
 	dwc3_debugfs_exit(dwc);

@@ -217,6 +217,28 @@ config BATTERY_QCOM_BATTMGR
 	  which is used on modern Qualcomm platforms to provide battery and
 	  power supply information.
 
+config ERHAI_OTG_GLINK
+	tristate "erhai (OnePlus Pad 3) USB-OTG arming over PMIC GLINK"
+	depends on QCOM_PMIC_GLINK
+	select AUXILIARY_BUS
+	help
+	  Binds the otherwise-unbound "pmic_glink.power-supply" aux device on
+	  the OnePlus Pad 3 (erhai / SM8750) and arms USB-OTG by sending the
+	  OnePlus battery_charger USB_OTG_AP_ENABLE + USB_OTG_SWITCH properties
+	  to the ADSP once the charger protection domain is up. Without this,
+	  the ADSP never sources OTG VBUS. It also raises the boost current
+	  limit, flips the dwc3 data-role to host, and enforces a max-SoC
+	  charge limit (bq27z561 gauge, falling back to the ADSP SoC on
+	  gauge-absent units).
+
+	  This targets the same single pmic_glink "power-supply" aux device as
+	  BATTERY_QCOM_BATTMGR, so only one of the two can own it; enable this
+	  when USB-OTG host support is wanted. On SKUs without the pack-side
+	  bq27z561 gauge (Qualcomm QBG variants) this driver additionally
+	  registers an ADSP-backed battery/USB power supply so the desktop
+	  battery icon works there too; on pack-gauge units the bq27xxx
+	  battery stays untouched.
+
 config BATTERY_OLPC
 	tristate "One Laptop Per Child battery"
 	depends on OLPC_EC
@@ -1201,5 +1223,48 @@ config MACSMC_POWER
 	  power supply framework.
 
 	  Say Y or M here if you have an Apple Silicon based Mac.
+
+config CHARGER_ERHAI_PPS
+	tristate "erhai (OnePlus Pad 3) ADSP PPS fast-charge host engine"
+	depends on ERHAI_OTG_GLINK
+	help
+	  Say Y/M to enable the PPS fast-charge engine for the OnePlus Pad 3
+	  (erhai / SM8750).  PD/PPS-only chargers (3rd-party bricks Android
+	  labels "SuperVOOC", e.g. a 100 W Anker) never speak the proprietary
+	  serial VOOC the sc8547a driver handles; this engine negotiates a PPS
+	  APDO through the ADSP charger_pd firmware (VBUS ~8.4 V) and grants
+	  the pack charge demand through the battery-psy profile props, the
+	  same total handshake Android's engine drives.
+
+	  It engages only for PD_PPS adapters with no serial VOOC active, waits
+	  for the serial ladder to decline first, steps VBUS up in small
+	  increments, servos the PPS current against pack state, and always
+	  reverts to the ordinary 5 V contract on detach/limit/abnormal.
+	  Module parameters disable or retune it without a rebuild.
+
+config CHARGER_SC8547A
+	tristate "Southchip SC8547A charge pump / VOOC PHY"
+	depends on I2C
+	help
+	  Say Y to enable support for the Southchip SC8547A divide-by-2
+	  charge pump with integrated VOOC/SVOOC serial PHY, as used for
+	  OnePlus SuperVOOC fast charging (e.g. OnePlus Pad 3 / erhai,
+	  which carries a master + slave SC8547A pair). This driver owns
+	  the charge-pump hardware and the VOOC serial-protocol register
+	  primitives; the adapter-identify state machine lives elsewhere.
+
+config CHARGER_OPLUS_CPS8601
+	tristate "OnePlus CPS8601 wireless pen charger"
+	depends on I2C
+	help
+	  Say Y to enable support for the OnePlus "wireless pen" (stylus)
+	  charger: a CPS8601 WPT (Qi) transmit controller at I2C 0x41 on
+	  the qupv3 i2c hub of the OnePlus Pad 3 (erhai, SM8750).  A pen
+	  (IDT/Renesas P9418-class receiver) placed on the tablet's coil
+	  is charged wirelessly; the pen reports its own BLE MAC over the
+	  power link (consumed by the pen Bluetooth tooling).  The driver
+	  drives the five platform GPIOs and the H-BoOST supply rail over
+	  pmic_glink, enforces the OCP/OVP/FOD thresholds and a power
+	  expiry, and performs Q-value calibration on first attach.
 
 endif # POWER_SUPPLY
