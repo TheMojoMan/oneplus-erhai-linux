@@ -2058,9 +2058,18 @@ static int output_min_count(struct iris_inst *inst)
 	if (inst->fw_min_count) {
 		if (iris_split_mode_enabled(inst) &&
 		    (inst->codec == V4L2_PIX_FMT_VP9 ||
-		     inst->codec == V4L2_PIX_FMT_AV1))
-			return min_t(u32, 4, inst->fw_min_count);
-		else
+		     inst->codec == V4L2_PIX_FMT_AV1)) {
+			/* The split-mode firmware reports 4 buffers, which is
+			 * far less than the reference depth of these codecs.
+			 * Clients that trust it (V4L2 min_number_of_capture_
+			 * buffers) then recycle surfaces the firmware still
+			 * references: frames come back late or corrupt.  Keep a
+			 * floor that covers the reference set - 32 is what the
+			 * VA-API frontend asks for on AV1. */
+			u32 floor = inst->codec == V4L2_PIX_FMT_AV1 ? 32 : 12;
+
+			return clamp_t(u32, inst->fw_min_count, floor, 32);
+		} else
 			return inst->fw_min_count;
 	}
 
