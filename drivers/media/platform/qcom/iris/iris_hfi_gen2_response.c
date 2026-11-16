@@ -342,6 +342,18 @@ static int iris_hfi_gen2_handle_input_buffer(struct iris_inst *inst,
 	buf->attr |= BUF_ATTR_DEQUEUED;
 
 	buf->flags = iris_hfi_gen2_get_driver_buffer_flags(inst, buffer->flags);
+	/*
+	 * The firmware reports HFI_INFO_DATA_CORRUPT for the first submission of
+	 * a session (the submit that also primes the decoder) and decodes the
+	 * frame anyway, so reporting V4L2_BUF_FLAG_ERROR here makes clients throw
+	 * away a perfectly good first picture: GStreamer's v4l2 videodec drops
+	 * the codec frame on an errored input buffer, and the picture that
+	 * follows cannot be matched to any frame any more ("Decoder is producing
+	 * too many buffers", one lost frame at the start of every stream).
+	 * The outcome of a decode belongs on the picture: an empty capture buffer
+	 * is still reported with V4L2_BUF_FLAG_ERROR below.
+	 */
+	buf->flags &= ~V4L2_BUF_FLAG_ERROR;
 
 	return 0;
 }
