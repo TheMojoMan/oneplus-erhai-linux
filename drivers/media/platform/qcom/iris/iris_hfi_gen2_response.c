@@ -5,6 +5,7 @@
 
 #include <media/v4l2-mem2mem.h>
 
+#include "iris_buffer.h"
 #include "iris_hfi_gen2.h"
 #include "iris_hfi_gen2_defines.h"
 #include "iris_hfi_gen2_packet.h"
@@ -383,6 +384,21 @@ static int iris_hfi_gen2_handle_output_buffer(struct iris_inst *inst,
 
 	buf->data_offset = hfi_buffer->data_offset;
 	buf->data_size = hfi_buffer->data_size;
+
+	/* The firmware returns capture buffers it consumed without producing a
+	 * picture (reference-only use): about 1.5 returns per decoded frame.
+	 * Handing those to the client as V4L2_BUF_FLAG_ERROR frames costs every
+	 * client a DQBUF/QBUF round trip per return - GStreamer drops and requeues
+	 * them (its "Decoder is producing too many buffers" warnings) and
+	 * ffmpeg's v4l2m2m wrapper counts them as decoded frames.  Keep such a
+	 * buffer in the firmware instead: nothing about it changed, and the
+	 * client only ever sees real pictures.  Drain time (state is not
+	 * STREAMING, or the firmware flags the last buffer) still returns them so
+	 * the client can complete its own drain. */
+	if (!buf->data_size && inst->state == IRIS_INST_STREAMING &&
+	    !(hfi_buffer->flags & HFI_BUF_FW_FLAG_LAST))
+		return iris_queue_buffer(inst, buf);
+
 	buf->timestamp = hfi_buffer->timestamp;
 
 	buf->attr &= ~BUF_ATTR_QUEUED;
