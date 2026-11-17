@@ -84,10 +84,8 @@ struct erhai_pps_sc_api {
 static const struct erhai_pps_sc_api *pps_sc_cp_get(void)
 {
 	static struct erhai_pps_sc_api api;
-	static bool once;
 
-	if (!once) {
-		once = true;
+	if (!api.snapshot) {
 		api.snapshot = (void *)symbol_get(sc8547a_pps_snapshot);
 		api.cp_engaged = (void *)symbol_get(sc8547a_pps_cp_engaged);
 		api.cp_engage = (void *)symbol_get(sc8547a_pps_cp_engage);
@@ -95,11 +93,25 @@ static const struct erhai_pps_sc_api *pps_sc_cp_get(void)
 		api.cp_disengage = (void *)symbol_get(sc8547a_pps_cp_disengage);
 		if (!api.snapshot || !api.cp_engaged || !api.cp_engage ||
 		    !api.cp_feed || !api.cp_disengage) {
-			symbol_put(sc8547a_pps_snapshot);
-			symbol_put(sc8547a_pps_cp_engaged);
-			symbol_put(sc8547a_pps_cp_engage);
-			symbol_put(sc8547a_pps_cp_feed);
-			symbol_put(sc8547a_pps_cp_disengage);
+			/* Only put back what was taken: symbol_put() on a symbol
+			 * that was never resolved BUGs at __symbol_put()
+			 * (kernel/module/main.c) with an RCU read lock held and
+			 * IRQs disabled, which wedges the boot of every pad whose
+			 * charge pump does not export these (cps8601 builds, or
+			 * any boot where the module is not loaded yet — e.g. the
+			 * initramfs, where only the builtin half is present).
+			 * The cache stays empty, so a later call retries once the
+			 * module appears, exactly like pps_slave_get() below. */
+			if (api.snapshot)
+				symbol_put(sc8547a_pps_snapshot);
+			if (api.cp_engaged)
+				symbol_put(sc8547a_pps_cp_engaged);
+			if (api.cp_engage)
+				symbol_put(sc8547a_pps_cp_engage);
+			if (api.cp_feed)
+				symbol_put(sc8547a_pps_cp_feed);
+			if (api.cp_disengage)
+				symbol_put(sc8547a_pps_cp_disengage);
 			memset(&api, 0, sizeof(api));
 			return NULL;
 		}
